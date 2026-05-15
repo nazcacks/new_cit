@@ -1008,6 +1008,46 @@ pub struct EfilingFile {
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct EfilingFormatField {
+    pub master_code: String,
+    pub version_no: String,
+    pub encoding: String,
+    pub record_type: String,
+    pub record_name: String,
+    pub sort_order: i32,
+    pub fixed_length: i32,
+    pub field_name: String,
+    pub start_pos: i32,
+    pub byte_length: i32,
+    pub data_type: String,
+    pub align: String,
+    pub pad_char: String,
+    pub required: bool,
+    pub source_path: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct EfilingValidationIssue {
+    pub validation_code: String,
+    pub severity: String,
+    pub message: String,
+    pub field_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EfilingPrecheckResult {
+    pub tenant_code: String,
+    pub by_id: i64,
+    pub master_code: String,
+    pub encoding: String,
+    pub valid: bool,
+    pub record_count: i32,
+    pub checksum_preview: String,
+    pub issues: Vec<EfilingValidationIssue>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct Job {
     pub job_id: Uuid,
     pub job_type: String,

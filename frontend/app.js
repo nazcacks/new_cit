@@ -12,6 +12,7 @@ const state = {
   activeTaxDataPath: "/modules/tax-data/financial-statements",
   activeAdjustmentPath: "/modules/adjustment/income",
   activeFormPath: "/modules/forms/versions",
+  activeEfilingPath: "/modules/efiling/hometax-record",
   lawVersions: [],
   selectedLawVersionId: null,
   lawSummary: null,
@@ -413,12 +414,16 @@ function renderModuleMenu(tree) {
       } else if (path?.startsWith("/modules/forms")) {
         event.preventDefault();
         await navigateFormRoute(path);
+      } else if (path?.startsWith("/modules/efiling")) {
+        event.preventDefault();
+        await navigateEfilingRoute(path);
       }
     });
   });
   highlightLawMenu();
   highlightTaxDataMenu();
   highlightAdjustmentMenu();
+  highlightEfilingMenu();
 }
 
 function renderModuleCards(tree) {
@@ -528,6 +533,18 @@ async function navigateFormRoute(path) {
   el("formVersioningWorkspace").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
+async function navigateEfilingRoute(path) {
+  const supported = [
+    "/modules/efiling/hometax-record",
+    "/modules/efiling/validation",
+    "/modules/efiling/history",
+  ];
+  state.activeEfilingPath = supported.includes(path) ? path : "/modules/efiling/hometax-record";
+  highlightEfilingMenu();
+  await renderEfilingScreen();
+  el("efilingWorkspace").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
 function highlightLawMenu() {
   document.querySelectorAll("#moduleMenu .submenu-link, #moduleMenu .menu-link").forEach((link) => {
     link.classList.toggle("active", link.dataset.path === state.activeLawPath);
@@ -539,6 +556,14 @@ function highlightFormMenu() {
   document.querySelectorAll("#moduleMenu .submenu-link, #moduleMenu .menu-link").forEach((link) => {
     if (link.dataset.path?.startsWith("/modules/forms")) {
       link.classList.toggle("active", link.dataset.path === state.activeFormPath);
+    }
+  });
+}
+
+function highlightEfilingMenu() {
+  document.querySelectorAll("#moduleMenu .submenu-link, #moduleMenu .menu-link").forEach((link) => {
+    if (link.dataset.path?.startsWith("/modules/efiling")) {
+      link.classList.toggle("active", link.dataset.path === state.activeEfilingPath);
     }
   });
 }
@@ -1256,12 +1281,12 @@ function taxDataYearSelector(context) {
   `;
 }
 
-function attachTaxDataYearSelector() {
+function attachTaxDataYearSelector(onChange = renderTaxDataScreen) {
   const select = el("taxDataById");
   if (select) {
     select.addEventListener("change", async () => {
       state.byId = Number(select.value);
-      await renderTaxDataScreen();
+      await onChange();
     });
   }
 }
@@ -2789,6 +2814,178 @@ function parseFormFieldValue(value) {
   return trimmed;
 }
 
+async function renderEfilingScreen() {
+  if (state.activeEfilingPath === "/modules/efiling/validation") {
+    await renderEfilingValidationScreen();
+  } else if (state.activeEfilingPath === "/modules/efiling/history") {
+    await renderEfilingHistoryScreen();
+  } else {
+    await renderEfilingRecordScreen();
+  }
+}
+
+async function renderEfilingRecordScreen() {
+  const context = await loadTaxDataContext();
+  el("efilingScreenTitle").textContent = "홈택스 전자신고 레코드 파일 생성";
+  if (!context.byId) {
+    el("efilingScreenBody").innerHTML = taxDataYearSelector(context);
+    attachTaxDataYearSelector(renderEfilingScreen);
+    return;
+  }
+  const root = `/api/tenants/${context.tenantCode}/business-years/${context.byId}/efilings`;
+  const [precheck, histories] = await Promise.all([
+    request(`${root}/precheck`),
+    optionalRequest(root, []),
+  ]);
+  const latest = histories[0] || null;
+  el("efilingScreenBody").innerHTML = `
+    ${taxDataYearSelector(context)}
+    <div class="law-layout">
+      <div class="law-form">
+        <h3>사전검증 후 생성</h3>
+        <label>포맷<input value="${escapeHtml(precheck.master_code)} / ${escapeHtml(precheck.encoding)}" readonly /></label>
+        <label>레코드 수<input value="${precheck.record_count}" readonly /></label>
+        <label>체크섬 미리보기<input value="${escapeHtml(precheck.checksum_preview)}" readonly /></label>
+        <label>검증 상태<input value="${precheck.valid ? "생성 가능" : "오류 확인 필요"}" readonly /></label>
+        <button id="efilingGenerateBtn" class="primary-btn" type="button" ${precheck.valid ? "" : "disabled"}>전자신고 파일 생성</button>
+      </div>
+      <div class="law-table-panel">
+        <h3>최근 생성 파일</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>ID</th><th>상태</th><th>레코드</th><th>체크섬</th><th>생성시각</th><th>파일</th></tr></thead>
+            <tbody>
+              ${
+                latest
+                  ? `<tr>
+                      <td>${latest.efiling_id}</td>
+                      <td><span class="status-pill active">${escapeHtml(latest.status)}</span></td>
+                      <td>${latest.total_records}</td>
+                      <td><code>${escapeHtml(latest.checksum)}</code></td>
+                      <td>${formatDateTime(latest.created_at)}</td>
+                      <td><a class="secondary-btn compact" href="/api/tenants/${escapeHtml(context.tenantCode)}/efilings/${latest.efiling_id}/file">TXT</a></td>
+                    </tr>`
+                  : `<tr><td colspan="6">생성된 전자신고 파일이 없습니다.</td></tr>`
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  `;
+  attachTaxDataYearSelector(renderEfilingScreen);
+  el("efilingGenerateBtn")?.addEventListener("click", async () => {
+    const job = await request(root, {
+      method: "POST",
+      body: JSON.stringify({ max_attempts: 3 }),
+    });
+    state.efileJobId = job.job_id;
+    log("전자신고 파일 생성 작업 등록", job);
+    await renderEfilingRecordScreen();
+  });
+}
+
+async function renderEfilingValidationScreen() {
+  const context = await loadTaxDataContext();
+  el("efilingScreenTitle").textContent = "전자신고 검증 및 오류 점검";
+  if (!context.byId) {
+    el("efilingScreenBody").innerHTML = taxDataYearSelector(context);
+    attachTaxDataYearSelector(renderEfilingScreen);
+    return;
+  }
+  const root = `/api/tenants/${context.tenantCode}/business-years/${context.byId}/efilings`;
+  const [precheck, spec] = await Promise.all([
+    request(`${root}/precheck`),
+    request(`${root}/format-spec`),
+  ]);
+  const issueRows = precheck.issues.length
+    ? precheck.issues
+        .map(
+          (issue) => `
+            <tr>
+              <td><span class="status-pill ${issue.severity === "ERROR" ? "error" : ""}">${escapeHtml(issue.severity)}</span></td>
+              <td>${escapeHtml(issue.validation_code)}</td>
+              <td>${escapeHtml(issue.field_path || "-")}</td>
+              <td>${escapeHtml(issue.message)}</td>
+            </tr>
+          `,
+        )
+        .join("")
+    : `<tr><td colspan="4">사전검증 오류가 없습니다.</td></tr>`;
+  const specRows = spec
+    .map(
+      (field) => `
+        <tr>
+          <td>${escapeHtml(field.record_type)}</td>
+          <td>${escapeHtml(field.field_name)}</td>
+          <td>${field.start_pos}</td>
+          <td>${field.byte_length}</td>
+          <td>${escapeHtml(field.data_type)}</td>
+          <td>${escapeHtml(field.source_path || "-")}</td>
+        </tr>
+      `,
+    )
+    .join("");
+  el("efilingScreenBody").innerHTML = `
+    ${taxDataYearSelector(context)}
+    <div class="form-preview-layout">
+      <section class="form-side-panel">
+        <h3>오류점검 결과</h3>
+        <div class="table-wrap">
+          <table><thead><tr><th>심각도</th><th>규칙</th><th>필드</th><th>메시지</th></tr></thead><tbody>${issueRows}</tbody></table>
+        </div>
+      </section>
+      <section class="form-side-panel">
+        <h3>고정폭 포맷 메타</h3>
+        <div class="table-wrap">
+          <table><thead><tr><th>레코드</th><th>필드</th><th>시작</th><th>길이</th><th>타입</th><th>원천</th></tr></thead><tbody>${specRows}</tbody></table>
+        </div>
+      </section>
+    </div>
+  `;
+  attachTaxDataYearSelector(renderEfilingScreen);
+}
+
+async function renderEfilingHistoryScreen() {
+  const context = await loadTaxDataContext();
+  el("efilingScreenTitle").textContent = "전자신고 이력 관리";
+  if (!context.byId) {
+    el("efilingScreenBody").innerHTML = taxDataYearSelector(context);
+    attachTaxDataYearSelector(renderEfilingScreen);
+    return;
+  }
+  const histories = await optionalRequest(`/api/tenants/${context.tenantCode}/business-years/${context.byId}/efilings`, []);
+  const rows = histories.length
+    ? histories
+        .map(
+          (history) => `
+            <tr>
+              <td>${history.efiling_id}</td>
+              <td><span class="status-pill active">${escapeHtml(history.status)}</span></td>
+              <td>${history.total_records}</td>
+              <td><code>${escapeHtml(history.checksum)}</code></td>
+              <td>${formatDateTime(history.created_at)}</td>
+              <td>${formatDateTime(history.submitted_at)}</td>
+              <td><a class="secondary-btn compact" href="/api/tenants/${escapeHtml(context.tenantCode)}/efilings/${history.efiling_id}/file">TXT</a></td>
+            </tr>
+          `,
+        )
+        .join("")
+    : `<tr><td colspan="7">전자신고 이력이 없습니다.</td></tr>`;
+  el("efilingScreenBody").innerHTML = `
+    ${taxDataYearSelector(context)}
+    <div class="law-table-panel">
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>ID</th><th>상태</th><th>레코드</th><th>체크섬</th><th>생성시각</th><th>제출시각</th><th>파일</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+  attachTaxDataYearSelector(renderEfilingScreen);
+}
+
 async function refreshHealth() {
   try {
     const health = await request("/health");
@@ -4098,6 +4295,9 @@ el("adjustmentRefreshBtn").addEventListener("click", () => {
 });
 el("formRefreshBtn").addEventListener("click", () => {
   renderFormScreen().catch((error) => log("서식 버전 관리 새로고침 실패", { message: error.message }));
+});
+el("efilingRefreshBtn").addEventListener("click", () => {
+  renderEfilingScreen().catch((error) => log("전자신고 새로고침 실패", { message: error.message }));
 });
 document.querySelectorAll(".law-screen-refresh").forEach((button) => {
   button.addEventListener("click", () => {

@@ -157,3 +157,17 @@ Invoke-WebRequest http://localhost:8080/api/tenants/demo/business-years/1/forms/
 Invoke-WebRequest http://localhost:8080/api/tenants/demo/business-years/1/forms/pdf-bundle/download `
   -OutFile forms.zip
 ```
+
+## Phase 16 전자신고 사전검증 예시 (2026-05-15)
+
+- 전자신고 파일 생성 전에 사전검증과 고정폭 포맷 메타를 조회한다.
+- 오류가 없으면 기존 전자신고 생성 작업을 큐에 등록한다.
+
+```powershell
+Invoke-RestMethod http://localhost:8080/api/tenants/demo/business-years/1/efilings/precheck
+Invoke-RestMethod http://localhost:8080/api/tenants/demo/business-years/1/efilings/format-spec
+
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/efilings `
+  -ContentType "application/json" `
+  -Body '{"max_attempts":3}'
+```

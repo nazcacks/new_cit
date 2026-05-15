@@ -360,3 +360,18 @@ Invoke-RestMethod http://localhost:8080/api/tenants/demo/business-years/1/forms/
 Invoke-WebRequest http://localhost:8080/api/tenants/demo/business-years/1/forms/FORM3/pdf -OutFile FORM3.pdf
 Invoke-WebRequest http://localhost:8080/api/tenants/demo/business-years/1/forms/pdf-bundle/download -OutFile forms.zip
 ```
+
+## e-Filing Precheck / Fixed-Width Format API (2026-05-15)
+
+- Added fixed-width e-filing field metadata for the 2026 CIT text format.
+- `GET /api/tenants/{tenant_code}/business-years/{by_id}/efilings/precheck` returns validation issues, record count, and checksum preview before file generation.
+- `GET /api/tenants/{tenant_code}/business-years/{by_id}/efilings/format-spec` returns record type, field position, byte length, data type, padding, and source path.
+- The embedded UI now opens the `8.1`, `8.2`, and `8.3` e-filing menus as separated screens.
+
+```powershell
+Invoke-RestMethod http://localhost:8080/api/tenants/demo/business-years/1/efilings/precheck
+Invoke-RestMethod http://localhost:8080/api/tenants/demo/business-years/1/efilings/format-spec
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/efilings `
+  -ContentType "application/json" `
+  -Body '{"max_attempts":3}'
+```

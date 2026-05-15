@@ -246,6 +246,41 @@ async fn api_flow_persists_to_postgres_generates_efiling_and_handles_dlq() {
     assert_form_versioning_module_works(&client, &base_url, &tenant_code, by_id).await;
     assert_business_year_workflow_works(&client, &base_url, &tenant_code, by_id).await;
 
+    let efile_precheck = get_json(
+        &client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/efilings/precheck"),
+    )
+    .await;
+    assert_eq!(efile_precheck["record_count"], 3);
+    assert_eq!(
+        efile_precheck["checksum_preview"]
+            .as_str()
+            .expect("checksum")
+            .len(),
+        20
+    );
+    assert!(efile_precheck["valid"].as_bool().expect("valid"));
+    assert!(efile_precheck["issues"]
+        .as_array()
+        .expect("precheck issues")
+        .iter()
+        .any(|issue| issue["validation_code"] == "BIZ_REG_NO_CHECKSUM"
+            && issue["severity"] == "WARN"));
+    let efile_spec = get_json(
+        &client,
+        &format!(
+            "{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/efilings/format-spec"
+        ),
+    )
+    .await;
+    assert!(efile_spec
+        .as_array()
+        .expect("efile spec")
+        .iter()
+        .any(|field| field["record_type"] == "D"
+            && field["field_name"] == "taxable_income"
+            && field["data_type"] == "N"));
+
     let job = post_json(
         &client,
         &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/efilings"),

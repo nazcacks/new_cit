@@ -926,6 +926,24 @@ const WorkFile = () => {
             <li>✓ 합계 일치</li>
             <li>✓ 필수 항목</li>
           </ul>
+          <div className="mt-3 overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="text-slate-500 border-b"><tr><th className="text-left py-1">레코드</th><th>필드</th><th>시작</th><th>길이</th><th>타입</th><th>원천</th></tr></thead>
+              <tbody>
+                {[
+                  ["H","biz_reg_no",2,10,"AN","고객사 사업자번호"],
+                  ["H","total_tax_due",58,20,"N","FORM3.total_tax_due"],
+                  ["D","taxable_income",12,15,"N","FORM3.taxable_income"],
+                  ["D","corporate_tax",27,15,"N","FORM3.corporate_tax"],
+                  ["T","checksum",8,20,"AN","system.checksum"],
+                ].map(row=>(
+                  <tr key={row.join("-")} className="border-b last:border-0">
+                    <td className="py-1 font-mono">{row[0]}</td><td className="font-mono">{row[1]}</td><td>{row[2]}</td><td>{row[3]}</td><td>{row[4]}</td><td>{row[5]}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
           <Btn size="sm" className="mt-2" onClick={()=>setStep(2)} disabled={step>=2}>사전 검증 실행 →</Btn>
           {step>=2 && <div className="text-emerald-600 text-sm mt-2">통과 (오류 0)</div>}
         </Card>

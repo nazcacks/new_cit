@@ -230,6 +230,14 @@ pub fn router(state: AppState) -> Router {
             get(list_efilings).post(enqueue_efiling),
         )
         .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/efilings/precheck",
+            get(precheck_efiling),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/efilings/format-spec",
+            get(get_efiling_format_spec),
+        )
+        .route(
             "/api/tenants/:tenant_code/efilings/:efiling_id/file",
             get(download_efiling_file),
         )
@@ -1309,6 +1317,32 @@ async fn list_efilings(
         .await
         .map_err(map_anyhow)?;
     Ok(Json(histories))
+}
+
+async fn precheck_efiling(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+) -> AppResult<Json<crate::domain::EfilingPrecheckResult>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let result = efiling::precheck_efiling(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(result))
+}
+
+async fn get_efiling_format_spec(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+) -> AppResult<Json<Vec<crate::domain::EfilingFormatField>>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let fields = efiling::list_format_spec(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(fields))
 }
 
 async fn download_efiling_file(

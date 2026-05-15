@@ -1539,3 +1539,11 @@ FOR EACH ROW EXECUTE FUNCTION fn_audit_trigger();
 - `form_data.status`가 `APPROVED`이면 PDF 워터마크는 `APPROVED`, 그 외 상태는 `DRAFT`로 표시한다.
 - 부속서식 일람 API는 FORM3, FORM15, FORM22의 생성 여부, 검증 오류 수, 대표 금액, `updated_at`을 반환한다.
 - 추후 100여 종 확장 시 `form_templates` 또는 `form_versions.template_json`에 출력 템플릿 식별자, 출력 순서, 묶음 그룹, 필드 좌표를 추가한다.
+
+## Phase 16 전자신고 DB 보완 (2026-05-15)
+
+- public `efile_record_fields`에 `data_type`, `description`을 추가해 필드 타입과 설명을 메타화한다.
+- public `efile_validation_rules`는 전자신고 마스터별 오류점검 규칙, 심각도, 대상 필드, 규칙 JSON을 저장한다.
+- `CIT-EFILE-2026`은 H/D/T 레코드의 시작 위치, 길이, 정렬, 패딩, 원천 경로를 `efile_record_fields`에 적재한다.
+- `{tenant_schema}.efiling_validation`은 파일 생성 시 발생한 WARN/ERROR 검증 이슈를 이력별로 저장한다.
+- 파일 생성은 ERROR 검증 이슈가 있으면 중단하고, WARN은 파일 생성과 함께 검증 이력으로 남긴다.
