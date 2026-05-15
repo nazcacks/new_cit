@@ -261,3 +261,25 @@ Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-y
   -Body '{"asset_id":1,"usage_month":"2026-01-01","total_distance_km":1000,"business_distance_km":700}'
 Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/adjustments/assets/B10 -Body '{}' -ContentType "application/json"
 ```
+
+## Transaction-Based Adjustment API (2026-05-15)
+
+- Added B-2 donation, B-3 entertainment expense, and B-9 interest expense adjustment endpoints.
+- B-2 reads transaction details, applies law-version donation limits, and creates 10-year donation carryforwards.
+- B-3 stores revenue breakdowns and applies law-version entertainment base/revenue limits plus non-card evidence disallowance.
+- B-9 classifies interest into unidentified creditor, unidentified recipient, construction financing, non-business asset, and weighted-loan deemed interest buckets.
+- The embedded UI now opens the donation/entertainment adjustment menu as a separated transaction-based screen.
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/adjustments/transactions/B2 `
+  -ContentType "application/json" `
+  -Body '{"taxable_income_before_donation":500000000}'
+
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/adjustments/transactions/B3 `
+  -ContentType "application/json" `
+  -Body '{"revenue_breakdowns":[{"revenue_category":"PRODUCT","amount":2000000000},{"revenue_category":"SERVICE","amount":1000000000}]}'
+
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/adjustments/transactions/B9 `
+  -ContentType "application/json" `
+  -Body '{"weighted_average_loan_balance":100000000,"weighted_average_interest_rate_bps":460}'
+```

@@ -1485,3 +1485,11 @@ FOR EACH ROW EXECUTE FUNCTION fn_audit_trigger();
 - `vehicle_usage_logs`로 업무용승용차의 월별 총 주행거리, 업무사용거리, 업무사용비율을 저장한다.
 - B-4/B-5/B-6/B-10 결과는 `adjustment_items`, `tax_adjustments`, `reserves`, `depreciation`에 저장한다.
 - 감가상각 계산은 `assets`와 Phase 4 `tax_limits(DEPRECIATION_LIFE)`를 연결해 자산별 세법 한도를 산출한다.
+
+## Phase 10 거래 기반 세무조정 DB 보완 (2026-05-15)
+
+- `donation_carryforwards`는 B-2 기부금 한도초과액의 원천 사업연도, 기부금 유형, 최초 금액, 사용액, 만료액, 잔액, 만료연도를 저장한다.
+- `entertainment_revenue_breakdowns`는 B-3 접대비 한도 산정용 수입금액 명세를 사업연도별로 저장한다.
+- `loan_interest_facts`는 B-9 지급이자 계산용 가지급금 적수/평균잔액, 가중평균 이자율, 인정이자 계산액을 저장한다.
+- B-2/B-3/B-9 결과는 공통 `adjustment_items`와 `tax_adjustments`에 `source_module`(`B2`, `B3`, `B9`)로 저장한다.
+- 법령 버전별 한도율은 `tax_limits`의 `DONATION_*`, `ENTERTAINMENT_*`, `INTEREST_DEEMED_RATE_BPS` 항목으로 관리한다.

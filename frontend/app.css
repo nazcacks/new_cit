@@ -796,6 +796,20 @@ td {
   min-height: 260px;
 }
 
+.progress-bar {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #d9e2ec;
+}
+
+.progress-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #2563eb;
+}
+
 .compact-grid {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }

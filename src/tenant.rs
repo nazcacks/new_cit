@@ -280,6 +280,44 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
         CREATE INDEX IF NOT EXISTS idx_transactions_by
             ON {schema}.transactions(by_id, category, tx_date);
 
+        CREATE TABLE IF NOT EXISTS {schema}.donation_carryforwards (
+            carryforward_id BIGSERIAL PRIMARY KEY,
+            by_id           BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
+            source_year     INT NOT NULL,
+            donation_type   VARCHAR(30) NOT NULL,
+            original_amount BIGINT NOT NULL,
+            used_amount     BIGINT NOT NULL DEFAULT 0,
+            expired_amount  BIGINT NOT NULL DEFAULT 0,
+            remaining_amount BIGINT NOT NULL,
+            expires_year    INT NOT NULL,
+            adjustment_item_id BIGINT,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_donation_carryforwards_by
+            ON {schema}.donation_carryforwards(by_id, donation_type, expires_year);
+
+        CREATE TABLE IF NOT EXISTS {schema}.entertainment_revenue_breakdowns (
+            revenue_breakdown_id BIGSERIAL PRIMARY KEY,
+            by_id           BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
+            revenue_category VARCHAR(80) NOT NULL,
+            amount          BIGINT NOT NULL,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_entertainment_revenue_breakdowns_by
+            ON {schema}.entertainment_revenue_breakdowns(by_id, revenue_category);
+
+        CREATE TABLE IF NOT EXISTS {schema}.loan_interest_facts (
+            loan_interest_fact_id BIGSERIAL PRIMARY KEY,
+            by_id           BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
+            weighted_average_loan_balance BIGINT NOT NULL DEFAULT 0,
+            weighted_average_interest_rate_bps INT NOT NULL DEFAULT 0,
+            deemed_interest BIGINT NOT NULL DEFAULT 0,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_loan_interest_facts_by
+            ON {schema}.loan_interest_facts(by_id, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS {schema}.by_law_snapshot (
             snapshot_id      BIGSERIAL PRIMARY KEY,
             by_id            BIGINT NOT NULL UNIQUE REFERENCES {schema}.business_years(by_id),

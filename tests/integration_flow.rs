@@ -138,6 +138,7 @@ async fn api_flow_persists_to_postgres_generates_efiling_and_handles_dlq() {
     assert_tax_data_input_module_works(&client, &base_url, &tenant_code, customer_id, by_id).await;
     assert_income_adjustment_engine_works(&client, &base_url, &tenant_code, by_id).await;
     assert_asset_based_adjustment_modules_work(&client, &base_url, &tenant_code, by_id).await;
+    assert_transaction_based_adjustment_modules_work(&client, &base_url, &tenant_code, by_id).await;
     assert_form_versioning_module_works(&client, &base_url, &tenant_code, by_id).await;
     assert_business_year_workflow_works(&client, &base_url, &tenant_code, by_id).await;
 
@@ -808,8 +809,14 @@ MACH002,Fast depreciated machine,MACHINE,2026-02-01,90000000,3
 
     let transaction_csv = "\
 tx_date,partner_name,category,account_code,description,amount,evidence_type
-2026-03-01,Good Charity,DONATION,53100,Donation receipt,3000000,RECEIPT
-2026-04-05,Client Dinner,ENTERTAINMENT,53200,Dinner meeting,700000,CARD
+2026-03-01,Special Charity,DONATION,53100,SPECIAL donation receipt,30000000,RECEIPT
+2026-03-02,Good Charity,DONATION,53100,GENERAL donation receipt,70000000,RECEIPT
+2026-04-05,Client Dinner,ENTERTAINMENT,53200,Dinner meeting,40000000,CARD
+2026-04-06,Cash Cafe,ENTERTAINMENT,53200,Cash meeting,5000000,CASH
+2026-05-01,Unknown Lender,INTEREST,71100,UNKNOWN_CREDITOR interest,2000000,WIRE
+2026-05-02,Builder Bank,INTEREST,71100,CONSTRUCTION financing interest,3000000,WIRE
+2026-05-03,Affiliate Loan,INTEREST,71100,NON_BUSINESS asset interest,4000000,WIRE
+2026-05-04,Main Bank,INTEREST,71100,General loan interest,1000000,WIRE
 ";
     let transactions_imported = post_csv_file(
         client,
@@ -825,7 +832,7 @@ tx_date,partner_name,category,account_code,description,amount,evidence_type
     assert_eq!(validation["balanced"], true);
     assert_eq!(validation["asset_count"], 3);
     assert_eq!(validation["business_vehicle_count"], 1);
-    assert_eq!(validation["transaction_count"], 2);
+    assert_eq!(validation["transaction_count"], 8);
 
     let bad_fs_csv = "\
 statement_type,account_code,account_name,debit,credit
@@ -1014,6 +1021,71 @@ async fn assert_asset_based_adjustment_modules_work(
 
     let b10_items = get_json(client, &format!("{root}/adjustments/assets/B10")).await;
     assert!(!b10_items.as_array().expect("b10 items").is_empty());
+}
+
+async fn assert_transaction_based_adjustment_modules_work(
+    client: &Client,
+    base_url: &str,
+    tenant_code: &str,
+    by_id: i64,
+) {
+    let root = format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}");
+    let donations = post_json(
+        client,
+        &format!("{root}/adjustments/transactions/B2"),
+        json!({
+            "taxable_income_before_donation": 500000000
+        }),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(donations["module_code"], "B2");
+    assert_eq!(donations["addbacks"], 23_000_000_i64);
+    assert_eq!(
+        donations["donation_carryforwards"][0]["remaining_amount"],
+        23_000_000_i64
+    );
+    assert_eq!(donations["donation_carryforwards"][0]["expires_year"], 2036);
+
+    let entertainment = post_json(
+        client,
+        &format!("{root}/adjustments/transactions/B3"),
+        json!({
+            "revenue_breakdowns": [
+                {"revenue_category": "PRODUCT", "amount": 2000000000_i64},
+                {"revenue_category": "SERVICE", "amount": 1000000000_i64}
+            ]
+        }),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(entertainment["module_code"], "B3");
+    assert_eq!(entertainment["details"]["tax_limit"], 21_000_000_i64);
+    assert_eq!(entertainment["addbacks"], 24_000_000_i64);
+    assert!(entertainment["law_banner"]["law"]["version_code"]
+        .as_str()
+        .is_some());
+
+    let interest = post_json(
+        client,
+        &format!("{root}/adjustments/transactions/B9"),
+        json!({
+            "weighted_average_loan_balance": 100000000_i64,
+            "weighted_average_interest_rate_bps": 460
+        }),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(interest["module_code"], "B9");
+    assert_eq!(interest["details"]["deemed_interest"], 4_600_000_i64);
+    assert_eq!(interest["addbacks"], 13_600_000_i64);
+
+    let b9_items = get_json(client, &format!("{root}/adjustments/transactions/B9")).await;
+    assert!(b9_items
+        .as_array()
+        .expect("b9 items")
+        .iter()
+        .any(|row| row["item_code"] == "B9_DEEMED_LOAN_INTEREST"));
 }
 
 async fn assert_form_versioning_module_works(

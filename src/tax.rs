@@ -8,10 +8,11 @@ use crate::{
         AdjustmentItem, AssetBasedAdjustmentRequest, AssetBasedAdjustmentResult,
         CalculateAdjustmentRequest, CalculationResult, CreateIncomeAdjustmentRequest,
         CreateLawAmendmentRequest, CreateTaxLawRequest, CreateTaxLimitRequest,
-        CreateTaxRateRequest, CreateVehicleUsageLogRequest, FormData, IncomeAdjustmentItemInput,
-        IncomeAdjustmentResult, LawAmendmentHistory, LawSnapshot, LawVersioningImpactRequest,
-        ReserveRecord, TaxAdjustment, TaxLawVersion, TaxLimit, TaxRate, TenantRef,
-        UpdateTaxLawStatusRequest, VehicleUsageLog,
+        CreateTaxRateRequest, CreateVehicleUsageLogRequest, DonationCarryforward, FormData,
+        IncomeAdjustmentItemInput, IncomeAdjustmentResult, LawAmendmentHistory, LawSnapshot,
+        LawVersioningImpactRequest, ReserveRecord, RevenueBreakdownInput, TaxAdjustment,
+        TaxLawVersion, TaxLimit, TaxRate, TenantRef, TransactionBasedAdjustmentRequest,
+        TransactionBasedAdjustmentResult, UpdateTaxLawStatusRequest, VehicleUsageLog,
     },
     tenant,
 };
@@ -894,6 +895,147 @@ pub async fn calculate_asset_based_adjustment(
     })
 }
 
+pub async fn calculate_transaction_based_adjustment(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    module_code: &str,
+    request: TransactionBasedAdjustmentRequest,
+) -> Result<TransactionBasedAdjustmentResult> {
+    let by = tenant::get_business_year(pool, tenant, by_id).await?;
+    let snapshot = ensure_law_snapshot(pool, tenant, by_id).await?;
+    let module_code = normalize_transaction_module(module_code)?;
+    let law_banner = json!({
+        "snapshot_id": snapshot.snapshot_id,
+        "locked": snapshot.locked,
+        "law": snapshot.snapshot_data.get("law").cloned().unwrap_or_else(|| json!({}))
+    });
+
+    clear_transaction_adjustment(pool, tenant, by_id, &module_code).await?;
+    let (items, details) = match module_code.as_str() {
+        "B2" => {
+            donation_adjustment_items(pool, tenant, &by, snapshot.law_version_id, request).await?
+        }
+        "B3" => {
+            entertainment_adjustment_items(pool, tenant, by_id, snapshot.law_version_id, request)
+                .await?
+        }
+        "B9" => {
+            interest_adjustment_items(pool, tenant, by_id, snapshot.law_version_id, request).await?
+        }
+        _ => return Err(anyhow!("invalid transaction based adjustment module")),
+    };
+    let addbacks = items
+        .iter()
+        .filter(|item| item.direction == "ADD")
+        .map(|item| item.amount)
+        .sum();
+    let deductions = items
+        .iter()
+        .filter(|item| item.direction == "DEDUCT")
+        .map(|item| item.amount)
+        .sum();
+    let summary_id = insert_tax_adjustment(
+        pool,
+        tenant,
+        by_id,
+        NewAdjustment {
+            category: "TRANSACTION_ADJUSTMENT",
+            code: match module_code.as_str() {
+                "B2" => "B2_DONATION_SUMMARY",
+                "B3" => "B3_ENTERTAINMENT_SUMMARY",
+                "B9" => "B9_INTEREST_SUMMARY",
+                _ => "TRANSACTION_SUMMARY",
+            },
+            amount: addbacks - deductions,
+            direction: "INFO",
+            description: "Transaction based tax adjustment",
+            snapshot_id: snapshot.snapshot_id,
+            metadata: json!({
+                "module": module_code,
+                "law_banner": law_banner,
+                "details": details
+            }),
+        },
+    )
+    .await?;
+
+    let mut saved_items = Vec::new();
+    let mut reserves_created = Vec::new();
+    let mut donation_carryforwards = Vec::new();
+    for item in &items {
+        let saved =
+            insert_adjustment_item(pool, tenant, by_id, summary_id, &module_code, item).await?;
+        if item.disposition == "RESERVE" && item.amount > 0 {
+            let carryforward_years = item
+                .metadata
+                .get("carryforward_years")
+                .and_then(Value::as_i64)
+                .and_then(|value| i32::try_from(value).ok())
+                .unwrap_or(10);
+            reserves_created.push(
+                insert_reserve(
+                    pool,
+                    tenant,
+                    by_id,
+                    summary_id,
+                    &module_code,
+                    item,
+                    by.year_label + carryforward_years,
+                )
+                .await?,
+            );
+        }
+        if module_code == "B2" {
+            if let Some(donation_type) = item
+                .metadata
+                .get("carryforward_donation_type")
+                .and_then(Value::as_str)
+            {
+                donation_carryforwards.push(
+                    insert_donation_carryforward(
+                        pool,
+                        tenant,
+                        NewDonationCarryforward {
+                            by_id,
+                            source_year: by.year_label,
+                            donation_type,
+                            amount: item.amount,
+                            expires_year: by.year_label
+                                + item
+                                    .metadata
+                                    .get("carryforward_years")
+                                    .and_then(Value::as_i64)
+                                    .and_then(|value| i32::try_from(value).ok())
+                                    .unwrap_or(10),
+                            adjustment_item_id: Some(saved.adjustment_item_id),
+                        },
+                    )
+                    .await?,
+                );
+            }
+        }
+        saved_items.push(saved);
+    }
+    if module_code == "B2" {
+        donation_carryforwards.extend(list_donation_carryforwards(pool, tenant, by_id).await?);
+        donation_carryforwards.sort_by_key(|row| row.carryforward_id);
+        donation_carryforwards.dedup_by_key(|row| row.carryforward_id);
+    }
+
+    Ok(TransactionBasedAdjustmentResult {
+        module_code,
+        addbacks,
+        deductions,
+        snapshot_id: snapshot.snapshot_id,
+        law_banner,
+        items: saved_items,
+        reserves_created,
+        donation_carryforwards,
+        details,
+    })
+}
+
 pub async fn calculate_adjustments(
     pool: &PgPool,
     tenant: &TenantRef,
@@ -1123,6 +1265,23 @@ fn normalize_asset_module(module_code: &str) -> Result<String> {
     }
 }
 
+fn normalize_transaction_module(module_code: &str) -> Result<String> {
+    let normalized = module_code
+        .trim()
+        .to_ascii_uppercase()
+        .replace(['-', '_'], "");
+    match normalized.as_str() {
+        "B2" | "DONATION" | "DONATIONS" => Ok("B2".to_string()),
+        "B3" | "ENTERTAINMENT" | "ENTERTAINMENTEXPENSE" => Ok("B3".to_string()),
+        "B9" | "INTEREST" | "INTERESTEXPENSE" => Ok("B9".to_string()),
+        _ => Err(anyhow!("invalid transaction based adjustment module")),
+    }
+}
+
+fn normalize_any_adjustment_module(module_code: &str) -> Result<String> {
+    normalize_asset_module(module_code).or_else(|_| normalize_transaction_module(module_code))
+}
+
 async fn depreciation_items(
     pool: &PgPool,
     tenant: &TenantRef,
@@ -1321,6 +1480,344 @@ async fn business_vehicle_items(
     Ok((items, json!({ "vehicles": details })))
 }
 
+#[derive(Debug, Clone)]
+struct TransactionRow {
+    description: String,
+    amount: i64,
+    evidence_type: String,
+}
+
+struct NewDonationCarryforward<'a> {
+    by_id: i64,
+    source_year: i32,
+    donation_type: &'a str,
+    amount: i64,
+    expires_year: i32,
+    adjustment_item_id: Option<i64>,
+}
+
+async fn donation_adjustment_items(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by: &crate::domain::BusinessYear,
+    law_version_id: i64,
+    request: TransactionBasedAdjustmentRequest,
+) -> Result<(Vec<PreparedIncomeItem>, Value)> {
+    mark_expired_donation_carryforwards(pool, tenant, by.customer_id, by.year_label).await?;
+    let transactions = load_transaction_rows(pool, tenant, by.by_id, "DONATION").await?;
+    let special_amount = transactions
+        .iter()
+        .filter(|row| classify_donation_type(&row.description) == "SPECIAL")
+        .map(|row| row.amount)
+        .sum::<i64>();
+    let general_amount = transactions
+        .iter()
+        .filter(|row| classify_donation_type(&row.description) == "GENERAL")
+        .map(|row| row.amount)
+        .sum::<i64>();
+    let base_income = match request
+        .taxable_income_before_donation
+        .or(request.accounting_income)
+    {
+        Some(value) => value.max(0),
+        None => resolve_accounting_income(pool, tenant, by.by_id)
+            .await?
+            .max(0),
+    };
+    let special_bps =
+        tax_limit_amount(pool, law_version_id, "DONATION_SPECIAL_LIMIT_BPS", 5_000).await?;
+    let general_bps =
+        tax_limit_amount(pool, law_version_id, "DONATION_GENERAL_LIMIT_BPS", 1_000).await?;
+    let carryforward_years =
+        tax_limit_amount(pool, law_version_id, "DONATION_CARRYFORWARD_YEARS", 10).await?;
+    let special_limit = amount_by_bps(base_income, special_bps);
+    let special_current_deductible = special_amount.min(special_limit);
+    let (special_prior_used, special_allocations) = allocate_donation_carryforwards(
+        pool,
+        tenant,
+        by.customer_id,
+        by.year_label,
+        "SPECIAL",
+        special_limit - special_current_deductible,
+    )
+    .await?;
+    let general_base = (base_income - special_current_deductible - special_prior_used).max(0);
+    let general_limit = amount_by_bps(general_base, general_bps);
+    let general_current_deductible = general_amount.min(general_limit);
+    let (general_prior_used, general_allocations) = allocate_donation_carryforwards(
+        pool,
+        tenant,
+        by.customer_id,
+        by.year_label,
+        "GENERAL",
+        general_limit - general_current_deductible,
+    )
+    .await?;
+    let special_excess = (special_amount - special_current_deductible).max(0);
+    let general_excess = (general_amount - general_current_deductible).max(0);
+
+    let mut items = Vec::new();
+    if special_excess > 0 {
+        items.push(PreparedIncomeItem {
+            section: "LOSS_DISALLOWANCE".to_string(),
+            item_code: "B2_SPECIAL_DONATION_EXCESS".to_string(),
+            item_name: "Special donation limit excess".to_string(),
+            amount: special_excess,
+            direction: "ADD".to_string(),
+            disposition: "RESERVE".to_string(),
+            law_ref: Some("CIT donation limit".to_string()),
+            metadata: json!({
+                "carryforward_donation_type": "SPECIAL",
+                "carryforward_years": carryforward_years
+            }),
+        });
+    }
+    if general_excess > 0 {
+        items.push(PreparedIncomeItem {
+            section: "LOSS_DISALLOWANCE".to_string(),
+            item_code: "B2_GENERAL_DONATION_EXCESS".to_string(),
+            item_name: "General donation limit excess".to_string(),
+            amount: general_excess,
+            direction: "ADD".to_string(),
+            disposition: "RESERVE".to_string(),
+            law_ref: Some("CIT donation limit".to_string()),
+            metadata: json!({
+                "carryforward_donation_type": "GENERAL",
+                "carryforward_years": carryforward_years
+            }),
+        });
+    }
+    if special_prior_used + general_prior_used > 0 {
+        items.push(PreparedIncomeItem {
+            section: "LOSS_INCLUSION".to_string(),
+            item_code: "B2_PRIOR_CARRYFORWARD_USED".to_string(),
+            item_name: "Prior donation carryforward used".to_string(),
+            amount: special_prior_used + general_prior_used,
+            direction: "DEDUCT".to_string(),
+            disposition: "OTHER".to_string(),
+            law_ref: Some("CIT donation carryforward".to_string()),
+            metadata: json!({
+                "special_used": special_prior_used,
+                "general_used": general_prior_used
+            }),
+        });
+    }
+
+    Ok((
+        items,
+        json!({
+            "base_income": base_income,
+            "transaction_count": transactions.len(),
+            "special": {
+                "reported": special_amount,
+                "limit_bps": special_bps,
+                "limit": special_limit,
+                "current_deductible": special_current_deductible,
+                "prior_used": special_prior_used,
+                "excess": special_excess,
+                "allocations": special_allocations
+            },
+            "general": {
+                "reported": general_amount,
+                "limit_bps": general_bps,
+                "limit": general_limit,
+                "current_deductible": general_current_deductible,
+                "prior_used": general_prior_used,
+                "excess": general_excess,
+                "allocations": general_allocations
+            },
+            "carryforward_years": carryforward_years
+        }),
+    ))
+}
+
+async fn entertainment_adjustment_items(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    law_version_id: i64,
+    request: TransactionBasedAdjustmentRequest,
+) -> Result<(Vec<PreparedIncomeItem>, Value)> {
+    let transactions = load_transaction_rows(pool, tenant, by_id, "ENTERTAINMENT").await?;
+    let total = transactions.iter().map(|row| row.amount).sum::<i64>();
+    let non_card = transactions
+        .iter()
+        .filter(|row| !is_card_evidence(&row.evidence_type))
+        .map(|row| row.amount)
+        .sum::<i64>();
+    let card_eligible = (total - non_card).max(0);
+    let (revenue, revenue_lines) = resolve_entertainment_revenue(
+        pool,
+        tenant,
+        by_id,
+        request.gross_revenue,
+        request.revenue_breakdowns,
+    )
+    .await?;
+    let base_limit =
+        tax_limit_amount(pool, law_version_id, "ENTERTAINMENT_BASE_LIMIT", 12_000_000).await?;
+    let revenue_rate_bps =
+        tax_limit_amount(pool, law_version_id, "ENTERTAINMENT_REVENUE_RATE_BPS", 30).await?;
+    let no_card_bps = tax_limit_amount(
+        pool,
+        law_version_id,
+        "ENTERTAINMENT_NO_CARD_DISALLOW_BPS",
+        10_000,
+    )
+    .await?;
+    let revenue_limit = amount_by_bps(revenue, revenue_rate_bps);
+    let tax_limit = base_limit + revenue_limit;
+    let no_card_disallowed = amount_by_bps(non_card, no_card_bps);
+    let limit_excess = (card_eligible - tax_limit).max(0);
+
+    let mut items = Vec::new();
+    if no_card_disallowed > 0 {
+        items.push(PreparedIncomeItem {
+            section: "LOSS_DISALLOWANCE".to_string(),
+            item_code: "B3_NO_CARD_DISALLOWANCE".to_string(),
+            item_name: "Entertainment expense without qualified evidence".to_string(),
+            amount: no_card_disallowed,
+            direction: "ADD".to_string(),
+            disposition: "OUTFLOW".to_string(),
+            law_ref: Some("CIT entertainment evidence rule".to_string()),
+            metadata: json!({ "non_card_amount": non_card, "disallow_bps": no_card_bps }),
+        });
+    }
+    if limit_excess > 0 {
+        items.push(PreparedIncomeItem {
+            section: "LOSS_DISALLOWANCE".to_string(),
+            item_code: "B3_ENTERTAINMENT_LIMIT_EXCESS".to_string(),
+            item_name: "Entertainment expense limit excess".to_string(),
+            amount: limit_excess,
+            direction: "ADD".to_string(),
+            disposition: "OUTFLOW".to_string(),
+            law_ref: Some("CIT entertainment limit".to_string()),
+            metadata: json!({ "tax_limit": tax_limit }),
+        });
+    }
+
+    Ok((
+        items,
+        json!({
+            "transaction_count": transactions.len(),
+            "reported": total,
+            "card_eligible": card_eligible,
+            "non_card": non_card,
+            "gross_revenue": revenue,
+            "revenue_breakdowns": revenue_lines,
+            "base_limit": base_limit,
+            "revenue_rate_bps": revenue_rate_bps,
+            "revenue_limit": revenue_limit,
+            "tax_limit": tax_limit,
+            "no_card_disallowed": no_card_disallowed,
+            "limit_excess": limit_excess
+        }),
+    ))
+}
+
+async fn interest_adjustment_items(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    law_version_id: i64,
+    request: TransactionBasedAdjustmentRequest,
+) -> Result<(Vec<PreparedIncomeItem>, Value)> {
+    let transactions = load_transaction_rows(pool, tenant, by_id, "INTEREST").await?;
+    let mut unknown_creditor = 0;
+    let mut unknown_recipient = 0;
+    let mut construction = 0;
+    let mut non_business = 0;
+    let mut general = 0;
+    for row in &transactions {
+        match classify_interest_type(&row.description).as_str() {
+            "UNKNOWN_CREDITOR" => unknown_creditor += row.amount,
+            "UNKNOWN_RECIPIENT" => unknown_recipient += row.amount,
+            "CONSTRUCTION" => construction += row.amount,
+            "NON_BUSINESS" => non_business += row.amount,
+            _ => general += row.amount,
+        }
+    }
+    let default_rate =
+        tax_limit_amount(pool, law_version_id, "INTEREST_DEEMED_RATE_BPS", 460).await?;
+    let rate_bps = request
+        .weighted_average_interest_rate_bps
+        .unwrap_or(i32::try_from(default_rate).unwrap_or(460))
+        .max(0);
+    let loan_balance = request.weighted_average_loan_balance.unwrap_or(0).max(0);
+    let deemed_interest = amount_by_bps(loan_balance, i64::from(rate_bps));
+    let manual = request.manual_interest_disallowance.unwrap_or(0).max(0);
+    insert_loan_interest_fact(pool, tenant, by_id, loan_balance, rate_bps, deemed_interest).await?;
+
+    let buckets = [
+        (
+            "B9_UNKNOWN_CREDITOR",
+            "Interest paid to unidentified creditor",
+            unknown_creditor,
+            "UNKNOWN_CREDITOR",
+        ),
+        (
+            "B9_UNKNOWN_RECIPIENT",
+            "Interest paid to unidentified recipient",
+            unknown_recipient,
+            "UNKNOWN_RECIPIENT",
+        ),
+        (
+            "B9_CONSTRUCTION_INTEREST",
+            "Construction financing interest",
+            construction,
+            "CONSTRUCTION",
+        ),
+        (
+            "B9_NON_BUSINESS_INTEREST",
+            "Non-business asset related interest",
+            non_business,
+            "NON_BUSINESS",
+        ),
+        (
+            "B9_DEEMED_LOAN_INTEREST",
+            "Deemed interest from weighted loan balance",
+            deemed_interest,
+            "WEIGHTED_AVERAGE_LOAN",
+        ),
+        (
+            "B9_MANUAL_DISALLOWANCE",
+            "Manual interest disallowance",
+            manual,
+            "MANUAL",
+        ),
+    ];
+    let items = buckets
+        .into_iter()
+        .filter(|(_, _, amount, _)| *amount > 0)
+        .map(|(code, name, amount, interest_type)| PreparedIncomeItem {
+            section: "LOSS_DISALLOWANCE".to_string(),
+            item_code: code.to_string(),
+            item_name: name.to_string(),
+            amount,
+            direction: "ADD".to_string(),
+            disposition: "OUTFLOW".to_string(),
+            law_ref: Some("CIT interest expense disallowance".to_string()),
+            metadata: json!({ "interest_type": interest_type }),
+        })
+        .collect::<Vec<_>>();
+
+    Ok((
+        items,
+        json!({
+            "transaction_count": transactions.len(),
+            "unknown_creditor": unknown_creditor,
+            "unknown_recipient": unknown_recipient,
+            "construction": construction,
+            "non_business": non_business,
+            "general": general,
+            "weighted_average_loan_balance": loan_balance,
+            "weighted_average_interest_rate_bps": rate_bps,
+            "deemed_interest": deemed_interest,
+            "manual_interest_disallowance": manual
+        }),
+    ))
+}
+
 async fn resolve_accounting_income(pool: &PgPool, tenant: &TenantRef, by_id: i64) -> Result<i64> {
     let schema = quote_ident(&tenant.schema_name)?;
     let sql = format!(
@@ -1400,6 +1897,363 @@ async fn clear_module_adjustment(
         .execute(pool)
         .await
         .context("failed to clear asset based adjustment")?;
+    Ok(())
+}
+
+async fn clear_transaction_adjustment(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    module_code: &str,
+) -> Result<()> {
+    clear_module_adjustment(pool, tenant, by_id, module_code).await?;
+    if module_code == "B2" {
+        let schema = quote_ident(&tenant.schema_name)?;
+        let sql = format!("DELETE FROM {schema}.donation_carryforwards WHERE by_id = $1");
+        sqlx::query(&sql).bind(by_id).execute(pool).await?;
+    }
+    Ok(())
+}
+
+fn amount_by_bps(amount: i64, bps: i64) -> i64 {
+    ((amount.max(0) as i128) * i128::from(bps.max(0)) / 10_000) as i64
+}
+
+async fn tax_limit_amount(
+    pool: &PgPool,
+    law_version_id: i64,
+    item_code: &str,
+    default_amount: i64,
+) -> Result<i64> {
+    Ok(sqlx::query_scalar::<_, Option<i64>>(
+        r#"
+        SELECT amount
+        FROM tax_limits
+        WHERE law_version_id = $1 AND item_code = $2
+        ORDER BY effective_from DESC, tax_limit_id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(law_version_id)
+    .bind(item_code)
+    .fetch_optional(pool)
+    .await
+    .context("failed to load tax limit")?
+    .flatten()
+    .unwrap_or(default_amount))
+}
+
+async fn load_transaction_rows(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    category: &str,
+) -> Result<Vec<TransactionRow>> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        SELECT COALESCE(description, '') AS description,
+               GREATEST(amount, 0)::BIGINT AS amount,
+               COALESCE(evidence_type, '') AS evidence_type
+        FROM {schema}.transactions
+        WHERE by_id = $1 AND UPPER(category) = $2
+        ORDER BY tx_date, transaction_id
+        "#
+    );
+    let rows = sqlx::query(&sql)
+        .bind(by_id)
+        .bind(category)
+        .fetch_all(pool)
+        .await
+        .context("failed to load transaction rows")?;
+    Ok(rows
+        .into_iter()
+        .map(|row| TransactionRow {
+            description: row.get("description"),
+            amount: row.get("amount"),
+            evidence_type: row.get("evidence_type"),
+        })
+        .collect())
+}
+
+fn classify_donation_type(description: &str) -> &'static str {
+    let normalized = description.to_ascii_uppercase();
+    if normalized.contains("SPECIAL")
+        || description.contains("특례")
+        || description.contains("법정")
+        || normalized.contains("STATUTORY")
+    {
+        "SPECIAL"
+    } else {
+        "GENERAL"
+    }
+}
+
+fn classify_interest_type(description: &str) -> String {
+    let normalized = description
+        .trim()
+        .to_ascii_uppercase()
+        .replace([' ', '-'], "_");
+    if normalized.contains("UNKNOWN_CREDITOR") || description.contains("채권자불분명") {
+        "UNKNOWN_CREDITOR".to_string()
+    } else if normalized.contains("UNKNOWN_RECIPIENT") || description.contains("수령자불분명")
+    {
+        "UNKNOWN_RECIPIENT".to_string()
+    } else if normalized.contains("CONSTRUCTION") || description.contains("건설자금") {
+        "CONSTRUCTION".to_string()
+    } else if normalized.contains("NON_BUSINESS") || description.contains("업무무관") {
+        "NON_BUSINESS".to_string()
+    } else {
+        "GENERAL".to_string()
+    }
+}
+
+fn is_card_evidence(evidence_type: &str) -> bool {
+    matches!(
+        evidence_type.trim().to_ascii_uppercase().as_str(),
+        "CARD" | "CREDIT_CARD" | "CORPORATE_CARD" | "CHECK_CARD"
+    )
+}
+
+async fn mark_expired_donation_carryforwards(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    customer_id: i64,
+    year_label: i32,
+) -> Result<()> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        UPDATE {schema}.donation_carryforwards cf
+        SET expired_amount = remaining_amount,
+            remaining_amount = 0,
+            updated_at = NOW()
+        FROM {schema}.business_years bys
+        WHERE cf.by_id = bys.by_id
+          AND bys.customer_id = $1
+          AND cf.expires_year < $2
+          AND cf.remaining_amount > 0
+        "#
+    );
+    sqlx::query(&sql)
+        .bind(customer_id)
+        .bind(year_label)
+        .execute(pool)
+        .await
+        .context("failed to expire donation carryforwards")?;
+    Ok(())
+}
+
+async fn allocate_donation_carryforwards(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    customer_id: i64,
+    year_label: i32,
+    donation_type: &str,
+    available_limit: i64,
+) -> Result<(i64, Vec<Value>)> {
+    let mut remaining_limit = available_limit.max(0);
+    if remaining_limit <= 0 {
+        return Ok((0, Vec::new()));
+    }
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        SELECT cf.carryforward_id, cf.source_year, cf.remaining_amount, cf.expires_year
+        FROM {schema}.donation_carryforwards cf
+        JOIN {schema}.business_years bys ON bys.by_id = cf.by_id
+        WHERE bys.customer_id = $1
+          AND bys.year_label < $2
+          AND cf.donation_type = $3
+          AND cf.expires_year >= $2
+          AND cf.remaining_amount > 0
+        ORDER BY cf.expires_year, cf.source_year, cf.carryforward_id
+        "#
+    );
+    let rows = sqlx::query(&sql)
+        .bind(customer_id)
+        .bind(year_label)
+        .bind(donation_type)
+        .fetch_all(pool)
+        .await
+        .context("failed to load donation carryforwards")?;
+    let mut used_total = 0;
+    let mut allocations = Vec::new();
+    for row in rows {
+        if remaining_limit <= 0 {
+            break;
+        }
+        let carryforward_id = row.get::<i64, _>("carryforward_id");
+        let source_year = row.get::<i32, _>("source_year");
+        let remaining_amount = row.get::<i64, _>("remaining_amount");
+        let expires_year = row.get::<i32, _>("expires_year");
+        let used = remaining_amount.min(remaining_limit);
+        let update_sql = format!(
+            r#"
+            UPDATE {schema}.donation_carryforwards
+            SET used_amount = used_amount + $1,
+                remaining_amount = remaining_amount - $1,
+                updated_at = NOW()
+            WHERE carryforward_id = $2
+            "#
+        );
+        sqlx::query(&update_sql)
+            .bind(used)
+            .bind(carryforward_id)
+            .execute(pool)
+            .await
+            .context("failed to allocate donation carryforward")?;
+        remaining_limit -= used;
+        used_total += used;
+        allocations.push(json!({
+            "carryforward_id": carryforward_id,
+            "source_year": source_year,
+            "used": used,
+            "expires_year": expires_year
+        }));
+    }
+    Ok((used_total, allocations))
+}
+
+async fn insert_donation_carryforward(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    new_carryforward: NewDonationCarryforward<'_>,
+) -> Result<DonationCarryforward> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        INSERT INTO {schema}.donation_carryforwards (
+            by_id, source_year, donation_type, original_amount, remaining_amount,
+            expires_year, adjustment_item_id
+        )
+        VALUES ($1, $2, $3, $4, $4, $5, $6)
+        RETURNING carryforward_id, by_id, source_year, donation_type, original_amount,
+                  used_amount, expired_amount, remaining_amount, expires_year,
+                  adjustment_item_id, created_at, updated_at
+        "#
+    );
+    sqlx::query_as::<_, DonationCarryforward>(&sql)
+        .bind(new_carryforward.by_id)
+        .bind(new_carryforward.source_year)
+        .bind(new_carryforward.donation_type)
+        .bind(new_carryforward.amount)
+        .bind(new_carryforward.expires_year)
+        .bind(new_carryforward.adjustment_item_id)
+        .fetch_one(pool)
+        .await
+        .context("failed to insert donation carryforward")
+}
+
+async fn list_donation_carryforwards(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+) -> Result<Vec<DonationCarryforward>> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        SELECT carryforward_id, by_id, source_year, donation_type, original_amount,
+               used_amount, expired_amount, remaining_amount, expires_year,
+               adjustment_item_id, created_at, updated_at
+        FROM {schema}.donation_carryforwards
+        WHERE by_id = $1
+        ORDER BY source_year, donation_type, carryforward_id
+        "#
+    );
+    sqlx::query_as::<_, DonationCarryforward>(&sql)
+        .bind(by_id)
+        .fetch_all(pool)
+        .await
+        .context("failed to list donation carryforwards")
+}
+
+async fn resolve_entertainment_revenue(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    gross_revenue: Option<i64>,
+    revenue_breakdowns: Option<Vec<RevenueBreakdownInput>>,
+) -> Result<(i64, Vec<Value>)> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    if let Some(lines) = revenue_breakdowns {
+        let delete_sql =
+            format!("DELETE FROM {schema}.entertainment_revenue_breakdowns WHERE by_id = $1");
+        sqlx::query(&delete_sql).bind(by_id).execute(pool).await?;
+        let insert_sql = format!(
+            r#"
+            INSERT INTO {schema}.entertainment_revenue_breakdowns (
+                by_id, revenue_category, amount
+            )
+            VALUES ($1, $2, $3)
+            "#
+        );
+        for line in lines.iter().filter(|line| line.amount > 0) {
+            sqlx::query(&insert_sql)
+                .bind(by_id)
+                .bind(line.revenue_category.trim())
+                .bind(line.amount)
+                .execute(pool)
+                .await
+                .context("failed to insert entertainment revenue breakdown")?;
+        }
+    }
+    let sql = format!(
+        r#"
+        SELECT revenue_category, amount
+        FROM {schema}.entertainment_revenue_breakdowns
+        WHERE by_id = $1
+        ORDER BY revenue_breakdown_id
+        "#
+    );
+    let rows = sqlx::query(&sql)
+        .bind(by_id)
+        .fetch_all(pool)
+        .await
+        .context("failed to load entertainment revenue breakdowns")?;
+    let line_values = rows
+        .iter()
+        .map(|row| {
+            json!({
+                "revenue_category": row.get::<String, _>("revenue_category"),
+                "amount": row.get::<i64, _>("amount")
+            })
+        })
+        .collect::<Vec<_>>();
+    let breakdown_total = rows
+        .iter()
+        .map(|row| row.get::<i64, _>("amount").max(0))
+        .sum::<i64>();
+    Ok((gross_revenue.unwrap_or(breakdown_total).max(0), line_values))
+}
+
+async fn insert_loan_interest_fact(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    weighted_average_loan_balance: i64,
+    weighted_average_interest_rate_bps: i32,
+    deemed_interest: i64,
+) -> Result<()> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let delete_sql = format!("DELETE FROM {schema}.loan_interest_facts WHERE by_id = $1");
+    sqlx::query(&delete_sql).bind(by_id).execute(pool).await?;
+    let sql = format!(
+        r#"
+        INSERT INTO {schema}.loan_interest_facts (
+            by_id, weighted_average_loan_balance, weighted_average_interest_rate_bps, deemed_interest
+        )
+        VALUES ($1, $2, $3, $4)
+        "#
+    );
+    sqlx::query(&sql)
+        .bind(by_id)
+        .bind(weighted_average_loan_balance)
+        .bind(weighted_average_interest_rate_bps)
+        .bind(deemed_interest)
+        .execute(pool)
+        .await
+        .context("failed to insert loan interest fact")?;
     Ok(())
 }
 
@@ -1739,7 +2593,7 @@ pub async fn list_adjustment_items_by_module(
     by_id: i64,
     module_code: &str,
 ) -> Result<Vec<AdjustmentItem>> {
-    let module_code = normalize_asset_module(module_code)?;
+    let module_code = normalize_any_adjustment_module(module_code)?;
     let schema = quote_ident(&tenant.schema_name)?;
     let sql = format!(
         r#"

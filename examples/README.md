@@ -59,3 +59,15 @@ docker compose up --build -d postgres api
 - `POST /adjustments/assets/B4`로 자산대장 기반 감가상각 조정을 계산한다.
 - `POST /vehicle-usage-logs`로 업무용승용차 월별 운행기록을 등록한다.
 - `POST /adjustments/assets/B5`, `B6`, `B10`으로 퇴직급여충당금, 대손충당금, 업무용승용차 조정을 계산한다.
+
+## Phase 10 거래 기반 세무조정 예시 (2026-05-15)
+
+- `POST /adjustments/transactions/B2`로 거래 명세의 기부금을 특례/일반 한도와 10년 이월 기준으로 계산한다.
+- `POST /adjustments/transactions/B3`에 수입금액 명세를 전달해 접대비 한도와 무증빙 손금불산입액을 계산한다.
+- `POST /adjustments/transactions/B9`에 가지급금 적수/평균잔액과 이자율을 전달해 지급이자 손금불산입액을 계산한다.
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/adjustments/transactions/B2 `
+  -ContentType "application/json" `
+  -Body '{"taxable_income_before_donation":500000000}'
+```

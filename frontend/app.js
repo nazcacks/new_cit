@@ -1468,6 +1468,10 @@ async function renderAdjustmentScreen() {
     await renderIncomeAdjustmentScreen();
     return;
   }
+  if (state.activeAdjustmentPath === "/modules/adjustment/donations-entertainment") {
+    await renderTransactionBasedAdjustmentScreen();
+    return;
+  }
   await renderAssetBasedAdjustmentScreen();
 }
 
@@ -1476,11 +1480,143 @@ function assetModuleForPath(path) {
     "/modules/adjustment/depreciation": ["B4", "B-4 감가상각"],
     "/modules/adjustment/retirement-reserve": ["B5", "B-5 퇴직급여충당금"],
     "/modules/adjustment/bad-debt-reserve": ["B6", "B-6 대손충당금"],
-    "/modules/adjustment/donations-entertainment": ["B6", "거래 기반 조정"],
     "/modules/adjustment/carryforward-loss": ["B6", "이월결손금"],
     "/modules/adjustment/tax-credits": ["B6", "세액공제"],
     "/modules/adjustment/penalty-tax": ["B6", "가산세"],
   }[path] || ["B10", "B-10 업무용승용차"];
+}
+
+async function renderTransactionBasedAdjustmentScreen() {
+  const context = await loadTaxDataContext();
+  el("adjustmentScreenTitle").textContent = "B-2/B-3/B-9 거래 기반 세무조정";
+  if (!context.byId) {
+    el("adjustmentScreenBody").innerHTML = taxDataYearSelector(context);
+    return;
+  }
+  const root = `/api/tenants/${context.tenantCode}/business-years/${context.byId}`;
+  const [b2Items, b3Items, b9Items, transactions] = await Promise.all([
+    optionalRequest(`${root}/adjustments/transactions/B2`, []),
+    optionalRequest(`${root}/adjustments/transactions/B3`, []),
+    optionalRequest(`${root}/adjustments/transactions/B9`, []),
+    optionalRequest(`${root}/tax-data/transactions`, []),
+  ]);
+  const adjustmentItems = [...b2Items, ...b3Items, ...b9Items];
+  const itemRows = adjustmentItems.length
+    ? adjustmentItems
+        .map(
+          (item) => `
+            <tr>
+              <td>${escapeHtml(item.source_module)}</td>
+              <td>${escapeHtml(item.item_code)}<br><span class="muted">${escapeHtml(item.item_name)}</span></td>
+              <td>${money.format(item.amount)}</td>
+              <td>${escapeHtml(item.direction)}</td>
+              <td>${escapeHtml(item.disposition)}</td>
+            </tr>
+          `,
+        )
+        .join("")
+    : `<tr><td colspan="5">저장된 거래 기반 조정 항목이 없습니다.</td></tr>`;
+  const filteredTransactions = transactions.filter((row) =>
+    ["DONATION", "ENTERTAINMENT", "INTEREST"].includes((row.category || "").toUpperCase()),
+  );
+  const transactionRows = filteredTransactions.length
+    ? filteredTransactions
+        .map(
+          (row) => `
+            <tr>
+              <td>${formatDate(row.tx_date)}</td>
+              <td>${escapeHtml(row.category)}</td>
+              <td>${escapeHtml(row.partner_name)}</td>
+              <td>${escapeHtml(row.description || "-")}</td>
+              <td>${escapeHtml(row.evidence_type || "-")}</td>
+              <td>${money.format(row.amount)}</td>
+            </tr>
+          `,
+        )
+        .join("")
+    : `<tr><td colspan="6">거래 명세가 없습니다.</td></tr>`;
+  el("adjustmentScreenBody").innerHTML = `
+    ${taxDataYearSelector(context)}
+    <div class="law-layout">
+      <div class="law-form">
+        <form id="b2TransactionForm">
+          <h3>B-2 기부금</h3>
+          <label>기부금 차감 전 기준소득<input id="b2BaseIncome" type="number" value="500000000" /></label>
+          <button class="primary-btn" type="submit">기부금 한도/10년 이월 계산</button>
+        </form>
+        <form id="b3TransactionForm">
+          <h3>B-3 접대비</h3>
+          <label>제품매출<input id="b3ProductRevenue" type="number" value="2000000000" /></label>
+          <label>용역매출<input id="b3ServiceRevenue" type="number" value="1000000000" /></label>
+          <button class="primary-btn" type="submit">접대비 한도 계산</button>
+        </form>
+        <form id="b9TransactionForm">
+          <h3>B-9 지급이자</h3>
+          <label>가지급금 적수/평균잔액<input id="b9LoanBalance" type="number" value="100000000" /></label>
+          <label>가중평균 이자율(bps)<input id="b9RateBps" type="number" value="460" /></label>
+          <label>수동 손금불산입<input id="b9Manual" type="number" value="0" /></label>
+          <div class="progress-bar"><span id="b9LoanBar" style="width:46%"></span></div>
+          <button class="primary-btn" type="submit">지급이자 손금불산입 계산</button>
+        </form>
+      </div>
+      <div class="law-table-panel">
+        <h3>조정 결과</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>모듈</th><th>항목</th><th>금액</th><th>방향</th><th>처분</th></tr></thead>
+            <tbody>${itemRows}</tbody>
+          </table>
+        </div>
+        <pre id="transactionAdjustmentResult" class="json-result">{}</pre>
+      </div>
+    </div>
+    <div class="law-table-panel">
+      <h3>기부금 / 접대비 / 지급이자 거래 명세</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>일자</th><th>구분</th><th>거래처</th><th>설명</th><th>증빙</th><th>금액</th></tr></thead>
+          <tbody>${transactionRows}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+  attachTaxDataYearSelector();
+  el("b9RateBps").addEventListener("input", () => {
+    el("b9LoanBar").style.width = `${Math.min(100, Math.max(0, Number(el("b9RateBps").value || 0) / 10))}%`;
+  });
+  el("b2TransactionForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await postTransactionAdjustment(root, "B2", {
+      taxable_income_before_donation: Number(el("b2BaseIncome").value || 0),
+    });
+  });
+  el("b3TransactionForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await postTransactionAdjustment(root, "B3", {
+      revenue_breakdowns: [
+        { revenue_category: "PRODUCT", amount: Number(el("b3ProductRevenue").value || 0) },
+        { revenue_category: "SERVICE", amount: Number(el("b3ServiceRevenue").value || 0) },
+      ],
+    });
+  });
+  el("b9TransactionForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await postTransactionAdjustment(root, "B9", {
+      weighted_average_loan_balance: Number(el("b9LoanBalance").value || 0),
+      weighted_average_interest_rate_bps: Number(el("b9RateBps").value || 0),
+      manual_interest_disallowance: Number(el("b9Manual").value || 0),
+    });
+  });
+}
+
+async function postTransactionAdjustment(root, moduleCode, body) {
+  const result = await request(`${root}/adjustments/transactions/${moduleCode}`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  el("transactionAdjustmentResult").textContent = JSON.stringify(result, null, 2);
+  log(`${moduleCode} 거래 기반 조정 완료`, { addbacks: result.addbacks, deductions: result.deductions });
+  await renderTransactionBasedAdjustmentScreen();
 }
 
 async function renderAssetBasedAdjustmentScreen() {

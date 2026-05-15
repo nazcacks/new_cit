@@ -569,6 +569,52 @@ pub struct AssetBasedAdjustmentResult {
     pub details: Value,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct RevenueBreakdownInput {
+    pub revenue_category: String,
+    pub amount: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TransactionBasedAdjustmentRequest {
+    pub accounting_income: Option<i64>,
+    pub taxable_income_before_donation: Option<i64>,
+    pub gross_revenue: Option<i64>,
+    pub revenue_breakdowns: Option<Vec<RevenueBreakdownInput>>,
+    pub weighted_average_loan_balance: Option<i64>,
+    pub weighted_average_interest_rate_bps: Option<i32>,
+    pub manual_interest_disallowance: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct DonationCarryforward {
+    pub carryforward_id: i64,
+    pub by_id: i64,
+    pub source_year: i32,
+    pub donation_type: String,
+    pub original_amount: i64,
+    pub used_amount: i64,
+    pub expired_amount: i64,
+    pub remaining_amount: i64,
+    pub expires_year: i32,
+    pub adjustment_item_id: Option<i64>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TransactionBasedAdjustmentResult {
+    pub module_code: String,
+    pub addbacks: i64,
+    pub deductions: i64,
+    pub snapshot_id: i64,
+    pub law_banner: Value,
+    pub items: Vec<AdjustmentItem>,
+    pub reserves_created: Vec<ReserveRecord>,
+    pub donation_carryforwards: Vec<DonationCarryforward>,
+    pub details: Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalculationResult {
     pub accounting_income: i64,
