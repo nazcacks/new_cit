@@ -130,6 +130,14 @@ pub fn router(state: AppState) -> Router {
             post(update_business_year_status),
         )
         .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/workflow",
+            get(get_business_year_workflow),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/amendment-preview",
+            get(get_amendment_preview),
+        )
+        .route(
             "/api/tenants/:tenant_code/business-years/:by_id/snapshot",
             get(get_law_snapshot).post(create_law_snapshot),
         )
@@ -491,6 +499,32 @@ async fn update_business_year_status(
             .map_err(map_anyhow)?;
     }
     Ok(Json(by))
+}
+
+async fn get_business_year_workflow(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+) -> AppResult<Json<crate::domain::BusinessYearWorkflow>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let workflow = tenant::get_business_year_workflow(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(workflow))
+}
+
+async fn get_amendment_preview(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+) -> AppResult<Json<crate::domain::AmendmentPreview>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let preview = tenant::preview_amendment(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(preview))
 }
 
 async fn create_tax_law(

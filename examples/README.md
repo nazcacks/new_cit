@@ -171,3 +171,21 @@ Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-y
   -ContentType "application/json" `
   -Body '{"max_attempts":3}'
 ```
+
+## Phase 17 워크플로 예시 (2026-05-15)
+
+- 사업연도 상태 전이를 actor/comment와 함께 저장한다.
+- 워크플로와 수정신고 차이 미리보기를 조회한다.
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/status `
+  -ContentType "application/json" `
+  -Body '{"status":"IN_REVIEW","actor":"writer01","approver":"reviewer01","comment":"검토 요청"}'
+
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/status `
+  -ContentType "application/json" `
+  -Body '{"status":"APPROVED","actor":"reviewer01","comment":"승인"}'
+
+Invoke-RestMethod http://localhost:8080/api/tenants/demo/business-years/1/workflow
+Invoke-RestMethod http://localhost:8080/api/tenants/demo/business-years/1/amendment-preview
+```

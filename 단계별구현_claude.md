@@ -1116,3 +1116,21 @@
 - 사전검증 API는 생성 전 오류/WARN을 반환하고 ERROR가 없을 때만 생성 가능 상태가 된다.
 - 생성 파일은 고정폭 H/D/T 레코드와 CRLF 줄바꿈을 유지한다.
 - UI에서 전자신고 메뉴 클릭 시 각 메뉴별 화면이 분리되어 열린다.
+
+### Phase 17 산출물 (2026-05-15 구현)
+
+- DB: 테넌트 스키마에 `workflow_events`, `approval_lines`를 추가했다.
+- API: `GET /business-years/{by_id}/workflow`로 상태 전이 이벤트와 결재라인을 조회한다.
+- API: `GET /business-years/{by_id}/amendment-preview`로 수정신고 진입 후 원 신고 상태 대비 차이 항목을 조회한다.
+- 로직: DRAFT -> IN_REVIEW -> APPROVED -> FILED -> AMENDED 상태 전이를 검증하고 위반 시 거부한다.
+- 로직: IN_REVIEW 진입 시 결재라인을 생성하고, APPROVED 전환 시 결재라인을 승인 처리한다.
+- 로직: FILED 전환 시 사업연도 잠금 및 법령 스냅샷 잠금을 유지하고, AMENDED 전환 시 사업연도 작업 잠금을 해제한다.
+- 화면: 사업연도 관리 화면에 워크플로 조회, 수정비교 조회, actor/comment 기반 상태 변경을 추가했다.
+- 테스트: 통합 테스트에서 상태 전이 위반 거부, 결재 이력, FILED 잠금, AMENDED 잠금 해제, 수정신고 차이 미리보기를 검증한다.
+
+### Phase 17 완료 기준 확인
+
+- 허용되지 않은 상태 전이는 `BAD_REQUEST`로 거부된다.
+- 결재 요청/승인 이력은 `workflow_events`, `approval_lines`에 남는다.
+- 신고 완료 시 스냅샷은 잠기고, 수정신고 진입 시 사업연도 작업 잠금은 해제된다.
+- 수정신고 미리보기 API는 원 신고 상태와 현재 상태의 차이 목록을 반환한다.

@@ -1,11 +1,13 @@
 use anyhow::{Context, Result};
+use serde_json::{json, Value};
 use sqlx::PgPool;
 
 use crate::{
     db::{execute_batch, quote_ident},
     domain::{
-        BusinessYear, CreateBusinessYearRequest, CreateCustomerRequest, CreateTenantRequest,
-        Customer, Tenant, TenantRef, UpdateBusinessYearStatusRequest,
+        AmendmentDiff, AmendmentPreview, ApprovalLine, BusinessYear, BusinessYearWorkflow,
+        CreateBusinessYearRequest, CreateCustomerRequest, CreateTenantRequest, Customer, Tenant,
+        TenantRef, UpdateBusinessYearStatusRequest, WorkflowEvent,
     },
 };
 
@@ -599,6 +601,33 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
 
+        CREATE TABLE IF NOT EXISTS {schema}.workflow_events (
+            event_id    BIGSERIAL PRIMARY KEY,
+            by_id       BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
+            from_status VARCHAR(30),
+            to_status   VARCHAR(30) NOT NULL,
+            action      VARCHAR(50) NOT NULL,
+            actor       VARCHAR(100) NOT NULL DEFAULT 'system',
+            comment     TEXT,
+            metadata    JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+            created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_workflow_events_by
+            ON {schema}.workflow_events(by_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS {schema}.approval_lines (
+            line_id           BIGSERIAL PRIMARY KEY,
+            by_id             BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
+            step_order        INT NOT NULL DEFAULT 1,
+            approver_login_id VARCHAR(100) NOT NULL,
+            status            VARCHAR(30) NOT NULL DEFAULT 'PENDING',
+            acted_at          TIMESTAMPTZ,
+            comment           TEXT,
+            created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_approval_lines_by
+            ON {schema}.approval_lines(by_id, step_order);
+
         CREATE TABLE IF NOT EXISTS {schema}.audit_logs (
             audit_id        BIGSERIAL PRIMARY KEY,
             table_name      VARCHAR(100) NOT NULL,
@@ -743,13 +772,21 @@ pub async fn update_business_year_status(
     let current = get_business_year(pool, tenant, by_id).await?;
     let next = normalize_business_year_status(&request.status)?;
     validate_business_year_status_transition(&current.status, &next)?;
-    let locked = next == "FILED";
+    let actor = request.actor.as_deref().unwrap_or("system");
+    let comment = request.comment.as_deref();
+    let approver = request.approver.as_deref().unwrap_or(actor);
+    let lock_on_file = next == "FILED";
+    let unlock_for_amendment = next == "AMENDED";
     let schema = quote_ident(&tenant.schema_name)?;
     let sql = format!(
         r#"
         UPDATE {schema}.business_years
         SET status = $2,
-            locked_at = CASE WHEN $3 THEN COALESCE(locked_at, NOW()) ELSE locked_at END,
+            locked_at = CASE
+                WHEN $3 THEN COALESCE(locked_at, NOW())
+                WHEN $4 THEN NULL
+                ELSE locked_at
+            END,
             updated_at = NOW()
         WHERE by_id = $1
         RETURNING by_id, customer_id, year_label, start_date, end_date, status,
@@ -757,13 +794,267 @@ pub async fn update_business_year_status(
         "#
     );
 
-    sqlx::query_as::<_, BusinessYear>(&sql)
+    let by = sqlx::query_as::<_, BusinessYear>(&sql)
         .bind(by_id)
-        .bind(next)
-        .bind(locked)
+        .bind(&next)
+        .bind(lock_on_file)
+        .bind(unlock_for_amendment)
         .fetch_one(pool)
         .await
-        .context("failed to update business year status")
+        .context("failed to update business year status")?;
+    record_workflow_transition(
+        pool,
+        tenant,
+        by_id,
+        &current.status,
+        &by.status,
+        actor,
+        comment,
+    )
+    .await?;
+    sync_approval_line(
+        pool,
+        tenant,
+        by_id,
+        &current.status,
+        &by.status,
+        approver,
+        comment,
+    )
+    .await?;
+    Ok(by)
+}
+
+async fn record_workflow_transition(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    from_status: &str,
+    to_status: &str,
+    actor: &str,
+    comment: Option<&str>,
+) -> Result<()> {
+    if from_status == to_status {
+        return Ok(());
+    }
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        INSERT INTO {schema}.workflow_events (
+            by_id, from_status, to_status, action, actor, comment, metadata
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        "#
+    );
+    sqlx::query(&sql)
+        .bind(by_id)
+        .bind(from_status)
+        .bind(to_status)
+        .bind(workflow_action(from_status, to_status))
+        .bind(actor)
+        .bind(comment)
+        .bind(json!({ "from_status": from_status, "to_status": to_status }))
+        .execute(pool)
+        .await
+        .context("failed to insert workflow event")?;
+    Ok(())
+}
+
+async fn sync_approval_line(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    from_status: &str,
+    to_status: &str,
+    approver: &str,
+    comment: Option<&str>,
+) -> Result<()> {
+    if from_status == to_status {
+        return Ok(());
+    }
+    let schema = quote_ident(&tenant.schema_name)?;
+    match to_status {
+        "IN_REVIEW" => {
+            let sql = format!(
+                r#"
+                INSERT INTO {schema}.approval_lines (
+                    by_id, step_order, approver_login_id, status, comment
+                )
+                SELECT $1, 1, $2, 'PENDING', $3
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM {schema}.approval_lines
+                    WHERE by_id = $1 AND status = 'PENDING'
+                )
+                "#
+            );
+            sqlx::query(&sql)
+                .bind(by_id)
+                .bind(approver)
+                .bind(comment)
+                .execute(pool)
+                .await
+                .context("failed to create approval line")?;
+        }
+        "APPROVED" => {
+            let update_sql = format!(
+                r#"
+                UPDATE {schema}.approval_lines
+                SET status = 'APPROVED', approver_login_id = $2,
+                    acted_at = NOW(), comment = $3
+                WHERE by_id = $1 AND status = 'PENDING'
+                "#
+            );
+            let updated = sqlx::query(&update_sql)
+                .bind(by_id)
+                .bind(approver)
+                .bind(comment)
+                .execute(pool)
+                .await
+                .context("failed to approve approval line")?;
+            if updated.rows_affected() == 0 {
+                let insert_sql = format!(
+                    r#"
+                    INSERT INTO {schema}.approval_lines (
+                        by_id, step_order, approver_login_id, status, acted_at, comment
+                    )
+                    VALUES ($1, 1, $2, 'APPROVED', NOW(), $3)
+                    "#
+                );
+                sqlx::query(&insert_sql)
+                    .bind(by_id)
+                    .bind(approver)
+                    .bind(comment)
+                    .execute(pool)
+                    .await
+                    .context("failed to insert approved approval line")?;
+            }
+        }
+        "DRAFT" if from_status == "IN_REVIEW" => {
+            let sql = format!(
+                r#"
+                UPDATE {schema}.approval_lines
+                SET status = 'RETURNED', acted_at = NOW(), comment = $2
+                WHERE by_id = $1 AND status = 'PENDING'
+                "#
+            );
+            sqlx::query(&sql)
+                .bind(by_id)
+                .bind(comment)
+                .execute(pool)
+                .await
+                .context("failed to return approval line")?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn workflow_action(from_status: &str, to_status: &str) -> &'static str {
+    match (from_status, to_status) {
+        ("DRAFT", "IN_REVIEW") => "SUBMIT_REVIEW",
+        ("IN_REVIEW", "APPROVED") => "APPROVE",
+        ("IN_REVIEW", "DRAFT") => "RETURN",
+        ("APPROVED", "FILED") => "FILE",
+        ("FILED", "AMENDED") => "START_AMENDMENT",
+        ("AMENDED", "IN_REVIEW") => "RESUBMIT_AMENDMENT",
+        _ => "STATUS_CHANGE",
+    }
+}
+
+pub async fn get_business_year_workflow(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+) -> Result<BusinessYearWorkflow> {
+    Ok(BusinessYearWorkflow {
+        business_year: get_business_year(pool, tenant, by_id).await?,
+        events: list_workflow_events(pool, tenant, by_id).await?,
+        approval_lines: list_approval_lines(pool, tenant, by_id).await?,
+    })
+}
+
+pub async fn list_workflow_events(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+) -> Result<Vec<WorkflowEvent>> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        SELECT event_id, by_id, from_status, to_status, action, actor,
+               comment, metadata, created_at
+        FROM {schema}.workflow_events
+        WHERE by_id = $1
+        ORDER BY created_at DESC, event_id DESC
+        "#
+    );
+    sqlx::query_as::<_, WorkflowEvent>(&sql)
+        .bind(by_id)
+        .fetch_all(pool)
+        .await
+        .context("failed to list workflow events")
+}
+
+pub async fn list_approval_lines(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+) -> Result<Vec<ApprovalLine>> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        SELECT line_id, by_id, step_order, approver_login_id, status,
+               acted_at, comment, created_at
+        FROM {schema}.approval_lines
+        WHERE by_id = $1
+        ORDER BY step_order, line_id
+        "#
+    );
+    sqlx::query_as::<_, ApprovalLine>(&sql)
+        .bind(by_id)
+        .fetch_all(pool)
+        .await
+        .context("failed to list approval lines")
+}
+
+pub async fn preview_amendment(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+) -> Result<AmendmentPreview> {
+    let business_year = get_business_year(pool, tenant, by_id).await?;
+    let events = list_workflow_events(pool, tenant, by_id).await?;
+    let filed_event = events.iter().find(|event| event.to_status == "FILED");
+    let differences = vec![
+        AmendmentDiff {
+            area: "BUSINESS_YEAR".to_string(),
+            field: "status".to_string(),
+            original_value: json!(filed_event
+                .map(|event| event.to_status.as_str())
+                .unwrap_or("FILED")),
+            current_value: json!(business_year.status.clone()),
+            description: "원 신고 상태와 현재 수정신고 진행 상태".to_string(),
+        },
+        AmendmentDiff {
+            area: "LOCK".to_string(),
+            field: "locked_at".to_string(),
+            original_value: filed_event
+                .map(|event| json!(event.created_at))
+                .unwrap_or(Value::Null),
+            current_value: business_year
+                .locked_at
+                .map(|locked_at| json!(locked_at))
+                .unwrap_or(Value::Null),
+            description: "수정신고 진입 시 작업 잠금 해제 여부".to_string(),
+        },
+    ];
+    Ok(AmendmentPreview {
+        tenant_code: tenant.tenant_code.clone(),
+        by_id,
+        current_status: business_year.status.clone(),
+        locked: business_year.locked_at.is_some(),
+        differences,
+    })
 }
 
 pub async fn get_business_year(

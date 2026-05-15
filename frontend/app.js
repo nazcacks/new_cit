@@ -1196,7 +1196,12 @@ async function renderBusinessYearsScreen() {
                     <td>${year.customer_id}</td>
                     <td>${formatDate(year.start_date)} ~ ${formatDate(year.end_date)}</td>
                     <td><span class="status-pill ${year.status.toLowerCase()}">${escapeHtml(year.status)}</span></td>
-                    <td class="table-actions">${actions}<button class="secondary-btn compact" type="button" data-snapshot-by-id="${year.by_id}">스냅샷</button></td>
+                    <td class="table-actions">
+                      ${actions}
+                      <button class="secondary-btn compact" type="button" data-workflow-by-id="${year.by_id}">워크플로</button>
+                      <button class="secondary-btn compact" type="button" data-amendment-by-id="${year.by_id}">수정비교</button>
+                      <button class="secondary-btn compact" type="button" data-snapshot-by-id="${year.by_id}">스냅샷</button>
+                    </td>
                   </tr>
                 `;
               })
@@ -1225,10 +1230,32 @@ async function renderBusinessYearsScreen() {
     button.addEventListener("click", async () => {
       const updated = await request(`/api/tenants/${tenantCode}/business-years/${button.dataset.byId}/status`, {
         method: "POST",
-        body: JSON.stringify({ status: button.dataset.byStatus }),
+        body: JSON.stringify({
+          status: button.dataset.byStatus,
+          actor: state.user?.login_id || "ui",
+          approver: state.user?.login_id || "reviewer",
+          comment: `UI ${button.dataset.byStatus}`,
+        }),
       });
       log("사업연도 상태 변경", updated);
       await renderBusinessYearsScreen();
+    });
+  });
+  document.querySelectorAll("[data-workflow-by-id]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const workflow = await request(`/api/tenants/${tenantCode}/business-years/${button.dataset.workflowById}/workflow`);
+      el("businessYearSnapshotOutput").textContent = JSON.stringify(workflow, null, 2);
+      log("사업연도 워크플로 조회", {
+        events: workflow.events.length,
+        approvals: workflow.approval_lines.length,
+      });
+    });
+  });
+  document.querySelectorAll("[data-amendment-by-id]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const preview = await request(`/api/tenants/${tenantCode}/business-years/${button.dataset.amendmentById}/amendment-preview`);
+      el("businessYearSnapshotOutput").textContent = JSON.stringify(preview, null, 2);
+      log("수정신고 차이 미리보기", { differences: preview.differences.length });
     });
   });
   document.querySelectorAll("[data-snapshot-by-id]").forEach((button) => {

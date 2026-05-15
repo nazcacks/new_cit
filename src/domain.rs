@@ -216,6 +216,59 @@ pub struct CreateBusinessYearRequest {
 #[derive(Debug, Deserialize)]
 pub struct UpdateBusinessYearStatusRequest {
     pub status: String,
+    pub actor: Option<String>,
+    pub approver: Option<String>,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct WorkflowEvent {
+    pub event_id: i64,
+    pub by_id: i64,
+    pub from_status: Option<String>,
+    pub to_status: String,
+    pub action: String,
+    pub actor: String,
+    pub comment: Option<String>,
+    pub metadata: Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct ApprovalLine {
+    pub line_id: i64,
+    pub by_id: i64,
+    pub step_order: i32,
+    pub approver_login_id: String,
+    pub status: String,
+    pub acted_at: Option<DateTime<Utc>>,
+    pub comment: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BusinessYearWorkflow {
+    pub business_year: BusinessYear,
+    pub events: Vec<WorkflowEvent>,
+    pub approval_lines: Vec<ApprovalLine>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AmendmentDiff {
+    pub area: String,
+    pub field: String,
+    pub original_value: Value,
+    pub current_value: Value,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AmendmentPreview {
+    pub tenant_code: String,
+    pub by_id: i64,
+    pub current_status: String,
+    pub locked: bool,
+    pub differences: Vec<AmendmentDiff>,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]

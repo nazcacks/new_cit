@@ -873,6 +873,38 @@ const WorkAppr = () => {
           </div>
         </Card>
 
+        <Card title="워크플로 이력 / 수정신고 차이">
+          <div className="grid grid-cols-2 gap-4 text-sm">
+            <div>
+              <div className="text-xs text-slate-500 mb-2">상태 전이 이벤트</div>
+              <ol className="space-y-2">
+                {[
+                  ["DRAFT","IN_REVIEW","writer01","검토 요청"],
+                  ["IN_REVIEW","APPROVED","reviewer01","승인"],
+                  ["APPROVED","FILED","system","신고 완료 및 잠금"],
+                  ["FILED","AMENDED","writer01","수정신고 진입"],
+                ].map((row,idx)=>(
+                  <li key={idx} className="border rounded px-3 py-2 flex justify-between">
+                    <span><b>{row[0]}</b> → <b>{row[1]}</b><div className="text-xs text-slate-500">{row[3]}</div></span>
+                    <span className="text-xs text-slate-500">{row[2]}</span>
+                  </li>
+                ))}
+              </ol>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500 mb-2">수정신고 차이 미리보기</div>
+              <table className="w-full text-xs">
+                <thead className="text-slate-500 border-b"><tr><th className="text-left py-1">영역</th><th>원 신고</th><th>현재</th></tr></thead>
+                <tbody>
+                  <tr className="border-b"><td>상태</td><td>FILED</td><td>AMENDED</td></tr>
+                  <tr className="border-b"><td>작업잠금</td><td>LOCKED</td><td>OPEN</td></tr>
+                  <tr className="border-b"><td>스냅샷</td><td>LOCKED</td><td>LOCKED</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </Card>
+
         <div className="flex justify-end gap-2">
           <Btn variant="secondary" onClick={()=>navigate("ws-val")}>◀ 이전</Btn>
           <Btn onClick={()=>navigate("ws-print")}>다음 (6. 출력) ▶</Btn>

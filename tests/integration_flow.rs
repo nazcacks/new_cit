@@ -1564,16 +1564,48 @@ async fn assert_business_year_workflow_works(
     tenant_code: &str,
     by_id: i64,
 ) {
+    let invalid = post_json(
+        client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/status"),
+        json!({ "status": "FILED", "actor": "integration" }),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert!(invalid["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("invalid business year status transition"));
+
     for status in ["IN_REVIEW", "APPROVED", "FILED"] {
         let updated = post_json(
             client,
             &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/status"),
-            json!({ "status": status }),
+            json!({
+                "status": status,
+                "actor": "integration",
+                "approver": "reviewer01",
+                "comment": format!("integration {status}")
+            }),
             StatusCode::OK,
         )
         .await;
         assert_eq!(updated["status"], status);
     }
+    let workflow = get_json(
+        client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/workflow"),
+    )
+    .await;
+    assert!(workflow["events"]
+        .as_array()
+        .expect("workflow events")
+        .iter()
+        .any(|event| event["action"] == "APPROVE"));
+    assert!(workflow["approval_lines"]
+        .as_array()
+        .expect("approval lines")
+        .iter()
+        .any(|line| line["status"] == "APPROVED"));
 
     let snapshot = get_json(
         client,
@@ -1585,11 +1617,23 @@ async fn assert_business_year_workflow_works(
     let amended = post_json(
         client,
         &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/status"),
-        json!({ "status": "AMENDED" }),
+        json!({ "status": "AMENDED", "actor": "integration", "comment": "amendment start" }),
         StatusCode::OK,
     )
     .await;
     assert_eq!(amended["status"], "AMENDED");
+    assert!(amended["locked_at"].is_null());
+    let amendment_preview = get_json(
+        client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/amendment-preview"),
+    )
+    .await;
+    assert_eq!(amendment_preview["current_status"], "AMENDED");
+    assert!(amendment_preview["differences"]
+        .as_array()
+        .expect("amendment diffs")
+        .iter()
+        .any(|diff| diff["field"] == "status"));
 }
 
 fn assert_module_tree_matches_design(tree: &Value) {

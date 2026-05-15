@@ -1547,3 +1547,11 @@ FOR EACH ROW EXECUTE FUNCTION fn_audit_trigger();
 - `CIT-EFILE-2026`은 H/D/T 레코드의 시작 위치, 길이, 정렬, 패딩, 원천 경로를 `efile_record_fields`에 적재한다.
 - `{tenant_schema}.efiling_validation`은 파일 생성 시 발생한 WARN/ERROR 검증 이슈를 이력별로 저장한다.
 - 파일 생성은 ERROR 검증 이슈가 있으면 중단하고, WARN은 파일 생성과 함께 검증 이력으로 남긴다.
+
+## Phase 17 워크플로 DB 보완 (2026-05-15)
+
+- `{tenant_schema}.workflow_events`는 사업연도 상태 전이, 액션, actor, comment, metadata를 이력으로 저장한다.
+- `{tenant_schema}.approval_lines`는 사업연도별 결재 단계, 결재자, 상태, 처리시각, comment를 저장한다.
+- 상태 전이 API는 허용된 상태 변경만 반영하고, 변경 성공 시 `workflow_events`를 자동 적재한다.
+- `IN_REVIEW` 전환은 PENDING 결재라인을 만들고, `APPROVED` 전환은 결재라인을 APPROVED로 처리한다.
+- `FILED` 전환은 `business_years.locked_at`을 설정하고, `AMENDED` 전환은 수정신고 작업을 위해 `locked_at`을 해제한다.

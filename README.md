@@ -375,3 +375,19 @@ Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-y
   -ContentType "application/json" `
   -Body '{"max_attempts":3}'
 ```
+
+## Business-Year Workflow API (2026-05-15)
+
+- Added workflow event and approval-line tracking for business-year status changes.
+- Invalid transitions are rejected, while valid transitions record actor/comment metadata.
+- `GET /api/tenants/{tenant_code}/business-years/{by_id}/workflow` returns status events and approval lines.
+- `GET /api/tenants/{tenant_code}/business-years/{by_id}/amendment-preview` returns amendment-mode differences.
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/status `
+  -ContentType "application/json" `
+  -Body '{"status":"IN_REVIEW","actor":"writer01","approver":"reviewer01","comment":"submit"}'
+
+Invoke-RestMethod http://localhost:8080/api/tenants/demo/business-years/1/workflow
+Invoke-RestMethod http://localhost:8080/api/tenants/demo/business-years/1/amendment-preview
+```
