@@ -11,6 +11,7 @@ use axum::{
     Json, Router,
 };
 use serde::Deserialize;
+use serde_json::{json, Value};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use uuid::Uuid;
 
@@ -48,6 +49,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/me", get(me))
         .route("/api/auth/logout", post(logout))
         .route("/api/modules/tree", get(get_module_tree))
+        .route(
+            "/api/operations/launch-readiness",
+            get(get_launch_readiness),
+        )
         .route("/api/tenants", get(list_tenants).post(create_tenant))
         .route(
             "/api/admin/tenants/:tenant_code/users",
@@ -312,6 +317,34 @@ async fn security_headers(request: Request<Body>, next: Next) -> axum::response:
         HeaderValue::from_static("default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'"),
     );
     response
+}
+
+async fn get_launch_readiness() -> Json<Value> {
+    Json(json!({
+        "phase": 20,
+        "status": "READY_FOR_PILOT",
+        "pilot": {
+            "target_tenants": 3,
+            "target_filings": 100,
+            "incident_target": 0
+        },
+        "sla": {
+            "availability_target_bps": 9950,
+            "readiness_endpoint": "/ready",
+            "health_endpoint": "/health"
+        },
+        "operations": {
+            "on_call": "24/7 primary-secondary rotation",
+            "hotfix": "triage -> fix branch -> fmt/test/clippy -> docker build -> deploy -> postmortem",
+            "signup": "tenant application -> contract check -> tenant provisioning -> admin invite -> first customer onboarding"
+        },
+        "manuals": [
+            "docs/phase19/운영매뉴얼_v1.md",
+            "docs/phase19/사용자매뉴얼_v1.md",
+            "docs/phase20/파일럿운영계획_v1.md",
+            "docs/phase20/정식가입프로세스_v1.md"
+        ]
+    }))
 }
 
 async fn login(

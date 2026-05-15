@@ -418,3 +418,13 @@ Invoke-RestMethod http://localhost:8080/api/tenants/demo/reports/year-comparison
 ```powershell
 Invoke-RestMethod http://localhost:8080/ready
 ```
+
+## Phase 20 Pilot / GA Gate (2026-05-15)
+
+- Added `/api/operations/launch-readiness` to expose pilot, SLA, on-call, hotfix, signup, and manual readiness metadata.
+- Added Phase 20 runbooks under `docs/phase20/`.
+- The launch gate targets 2~3 pilot tenants, 100 incident-free filings, SLA 99.5%, and a live signup process.
+
+```powershell
+Invoke-RestMethod http://localhost:8080/api/operations/launch-readiness
+```

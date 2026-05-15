@@ -657,6 +657,15 @@ async fn assert_web_ui_is_available(client: &Client, base_url: &str) {
     assert_eq!(health["status"], "ok");
     let ready = get_json(client, &format!("{base_url}/ready")).await;
     assert_eq!(ready["status"], "ok");
+    let launch = get_json(
+        client,
+        &format!("{base_url}/api/operations/launch-readiness"),
+    )
+    .await;
+    assert_eq!(launch["phase"], 20);
+    assert_eq!(launch["status"], "READY_FOR_PILOT");
+    assert_eq!(launch["pilot"]["target_filings"], 100);
+    assert_eq!(launch["sla"]["availability_target_bps"], 9950);
 
     let auth = post_json(
         client,

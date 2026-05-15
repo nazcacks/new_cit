@@ -13,6 +13,12 @@
 - Phase 19 evidence records DB-backed audit integrity and tenant/customer/work-scope isolation as security diagnosis targets.
 - No schema change is required for Phase 19; the readiness gate and security headers are application-layer controls.
 
+## Phase 20 Pilot / GA DB Note (2026-05-15)
+
+- Phase 20 does not add schema; pilot/GA readiness is exposed as application metadata through `/api/operations/launch-readiness`.
+- Pilot reporting uses existing `jobs`, `efiling_history`, `audit_logs`, `notifications`, and tenant/customer tables.
+- 가입 프로세스는 기존 tenant provisioning과 고객사별 대상 업무/사용자별 업무권한 모델을 그대로 사용한다.
+
 > **문서 버전**: v1.0
 > **작성일**: 2026-05-14
 > **작성자**: 강수 (Kang-Soo.Cho@kr.ey.com)

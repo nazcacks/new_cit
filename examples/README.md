@@ -18,6 +18,15 @@ Invoke-RestMethod http://localhost:8080/ready
 (Invoke-WebRequest http://localhost:8080/).Headers
 ```
 
+## Phase 20 Pilot / GA Examples (2026-05-15)
+
+- Use `/api/operations/launch-readiness` before pilot opening and GA checks.
+- Use `docs/phase20/정식가입프로세스_v1.md` when onboarding accounting firms, tax corporations, and tax accountant offices.
+
+```powershell
+Invoke-RestMethod http://localhost:8080/api/operations/launch-readiness
+```
+
 Use these examples after starting the stack:
 
 ```powershell
