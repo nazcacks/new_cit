@@ -83,3 +83,15 @@ Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-y
   -ContentType "application/json" `
   -Body '{"taxable_income_before_loss":300000000,"loss_carryforwards":[{"origin_year":2025,"original_amount":400000000,"remaining_amount":400000000,"expires_year":2026}]}'
 ```
+
+## Phase 12 세액 예시 (2026-05-15)
+
+- `POST /adjustments/tax/B12`로 세액공제·감면을 계산한다.
+- `POST /adjustments/tax/B13`으로 최저한세 추가세액을 계산한다.
+- `POST /adjustments/tax/B14`로 감면율 적용 가산세를 계산한다.
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/adjustments/tax/B12 `
+  -ContentType "application/json" `
+  -Body '{"tax_base":500000000,"calculated_tax":70000000,"credits":[{"credit_type":"RND","base_amount":100000000,"rate_bps":2500}]}'
+```

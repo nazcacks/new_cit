@@ -141,6 +141,7 @@ async fn api_flow_persists_to_postgres_generates_efiling_and_handles_dlq() {
     assert_transaction_based_adjustment_modules_work(&client, &base_url, &tenant_code, by_id).await;
     assert_evaluation_carryforward_reserve_modules_work(&client, &base_url, &tenant_code, by_id)
         .await;
+    assert_tax_amount_adjustment_modules_work(&client, &base_url, &tenant_code, by_id).await;
     assert_form_versioning_module_works(&client, &base_url, &tenant_code, by_id).await;
     assert_business_year_workflow_works(&client, &base_url, &tenant_code, by_id).await;
 
@@ -1190,6 +1191,67 @@ async fn assert_evaluation_carryforward_reserve_modules_work(
         .any(|row| row["section"] == "CAPITAL_CHANGE"));
 }
 
+async fn assert_tax_amount_adjustment_modules_work(
+    client: &Client,
+    base_url: &str,
+    tenant_code: &str,
+    by_id: i64,
+) {
+    let root = format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}");
+    let credits = post_json(
+        client,
+        &format!("{root}/adjustments/tax/B12"),
+        json!({
+            "tax_base": 500000000_i64,
+            "calculated_tax": 70000000_i64,
+            "credits": [{
+                "credit_type": "RND",
+                "base_amount": 100000000_i64,
+                "rate_bps": 2500
+            }]
+        }),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(credits["module_code"], "B12");
+    assert_eq!(credits["deductions"], 25_000_000_i64);
+    assert_eq!(credits["determined_tax"], 45_000_000_i64);
+
+    let minimum_tax = post_json(
+        client,
+        &format!("{root}/adjustments/tax/B13"),
+        json!({
+            "tax_base": 500000000_i64,
+            "regular_tax_after_credits": 30000000_i64,
+            "minimum_tax_rate_bps": 1000
+        }),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(minimum_tax["module_code"], "B13");
+    assert_eq!(minimum_tax["details"]["minimum_tax"], 50_000_000_i64);
+    assert_eq!(minimum_tax["addbacks"], 20_000_000_i64);
+
+    let penalty = post_json(
+        client,
+        &format!("{root}/adjustments/tax/B14"),
+        json!({
+            "penalties": [{
+                "penalty_type": "UNDER_REPORTED",
+                "tax_base": 100000000_i64,
+                "rate_bps": 1000,
+                "days_late": 1,
+                "reduction_bps": 5000
+            }]
+        }),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(penalty["module_code"], "B14");
+    assert_eq!(penalty["addbacks"], 5_000_000_i64);
+    assert_eq!(penalty["determined_tax"], 5_000_000_i64);
+}
+
 async fn assert_form_versioning_module_works(
     client: &Client,
     base_url: &str,
@@ -1343,7 +1405,7 @@ fn assert_module_tree_matches_design(tree: &Value) {
     assert_eq!(modules.len(), 9);
     assert_eq!(
         modules.iter().map(child_count).sum::<usize>(),
-        47,
+        48,
         "detailed module count including law-versioning menus"
     );
 
@@ -1420,8 +1482,9 @@ fn assert_module_tree_matches_design(tree: &Value) {
             "5.7 재고·유가증권 평가",
             "5.8 이월결손금",
             "5.9 세액공제/감면",
-            "5.10 가산세",
-            "5.11 자본금과 적립금",
+            "5.10 최저한세",
+            "5.11 가산세",
+            "5.12 자본금과 적립금",
         ],
     );
     assert_children(

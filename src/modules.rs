@@ -97,8 +97,9 @@ pub fn module_tree() -> Value {
                     submodule("adjustment.inventory-valuation", "5.7", "재고·유가증권 평가", "/modules/adjustment/inventory-valuation"),
                     submodule("adjustment.carryforward-loss", "5.8", "이월결손금", "/modules/adjustment/carryforward-loss"),
                     submodule("adjustment.tax-credits", "5.9", "세액공제/감면", "/modules/adjustment/tax-credits"),
-                    submodule("adjustment.penalty-tax", "5.10", "가산세", "/modules/adjustment/penalty-tax"),
-                    submodule("adjustment.capital-reserves", "5.11", "자본금과 적립금", "/modules/adjustment/capital-reserves"),
+                    submodule("adjustment.minimum-tax", "5.10", "최저한세", "/modules/adjustment/minimum-tax"),
+                    submodule("adjustment.penalty-tax", "5.11", "가산세", "/modules/adjustment/penalty-tax"),
+                    submodule("adjustment.capital-reserves", "5.12", "자본금과 적립금", "/modules/adjustment/capital-reserves"),
                 ],
             ),
             module(

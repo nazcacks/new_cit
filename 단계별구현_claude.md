@@ -1020,3 +1020,21 @@
 - B-11은 만료연도가 현재 사업연도 또는 다음 사업연도인 잔여 결손금을 `expiration_alerts`로 반환한다.
 - B-7/B-8 평가 차이는 `valuation_positions`, `adjustment_items`, `reserves`에 함께 저장된다.
 - 평가·이월·유보 화면은 메뉴별 독립 화면으로 열리고 통합 테스트, JS 문법 검증, clippy를 통과한다.
+
+### Phase 12 산출물 (2026-05-15 구현)
+
+- DB: 테넌트 스키마에 `tax_credit_claims`, `minimum_tax_results`, `penalty_tax_items`를 추가.
+- DB: Phase 4 `tax_limits`에 투자·외국납부·재해·중소특별·창업 감면율과 최저한세율을 법령 버전별로 추가.
+- API: `POST/GET /api/tenants/{tenant_code}/business-years/{by_id}/adjustments/tax/{module_code}`로 B-12, B-13, B-14 계산/조회 구현.
+- 로직: B-12는 공제 유형별 대상금액, 공제율, 요청액, 허용액을 계산하고 산출세액 한도 내에서 결정세액을 차감.
+- 로직: B-13은 과세표준과 일반 산출세액을 최저한세와 비교해 추가 납부세액을 산출.
+- 로직: B-14는 무신고/과소/납부지연/원천 가산세 유형별 기준세액, 일수, 감면율을 적용.
+- 화면: 세무조정 메뉴에 세액공제·감면, 최저한세, 가산세 독립 화면을 연결.
+- 테스트: 통합 테스트에서 B-12 공제 후 결정세액, B-13 최저한세 추가세액, B-14 감면 적용 가산세를 검증하고 최저한세 5종 단위 회귀 테스트를 추가.
+
+### Phase 12 완료 기준 확인
+
+- B-12 응답은 `calculated_tax -> deductions -> determined_tax` 흐름을 반환한다.
+- B-13은 일반 세액이 최저한세보다 낮은 경우 차액을 `ADD` 조정 항목으로 저장한다.
+- B-14는 감면율 적용 후 가산세를 `penalty_tax_items`와 조정 항목에 저장한다.
+- 최저한세 적용 케이스 5종 단위 테스트와 통합 테스트, JS 문법 검증, clippy를 통과한다.

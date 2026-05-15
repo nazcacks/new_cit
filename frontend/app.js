@@ -1476,6 +1476,10 @@ async function renderAdjustmentScreen() {
     await renderEvaluationAdjustmentScreen();
     return;
   }
+  if (taxAmountModuleForPath(state.activeAdjustmentPath)) {
+    await renderTaxAmountAdjustmentScreen();
+    return;
+  }
   await renderAssetBasedAdjustmentScreen();
 }
 
@@ -1488,13 +1492,19 @@ function evaluationModuleForPath(path) {
   }[path];
 }
 
+function taxAmountModuleForPath(path) {
+  return {
+    "/modules/adjustment/tax-credits": ["B12", "B-12 세액공제·감면"],
+    "/modules/adjustment/minimum-tax": ["B13", "B-13 최저한세"],
+    "/modules/adjustment/penalty-tax": ["B14", "B-14 가산세"],
+  }[path];
+}
+
 function assetModuleForPath(path) {
   return {
     "/modules/adjustment/depreciation": ["B4", "B-4 감가상각"],
     "/modules/adjustment/retirement-reserve": ["B5", "B-5 퇴직급여충당금"],
     "/modules/adjustment/bad-debt-reserve": ["B6", "B-6 대손충당금"],
-    "/modules/adjustment/tax-credits": ["B6", "세액공제"],
-    "/modules/adjustment/penalty-tax": ["B6", "가산세"],
   }[path] || ["B10", "B-10 업무용승용차"];
 }
 
@@ -1755,6 +1765,122 @@ function collectEvaluationPayload(moduleCode) {
         valuation_method: el("valuationMethod").value,
         book_amount: Number(el("valuationBookAmount").value || 0),
         tax_amount: Number(el("valuationTaxAmount").value || 0),
+      },
+    ],
+  };
+}
+
+async function renderTaxAmountAdjustmentScreen() {
+  const context = await loadTaxDataContext();
+  const [moduleCode, title] = taxAmountModuleForPath(state.activeAdjustmentPath);
+  el("adjustmentScreenTitle").textContent = title;
+  if (!context.byId) {
+    el("adjustmentScreenBody").innerHTML = taxDataYearSelector(context);
+    return;
+  }
+  const root = `/api/tenants/${context.tenantCode}/business-years/${context.byId}`;
+  const items = await optionalRequest(`${root}/adjustments/tax/${moduleCode}`, []);
+  const itemRows = items.length
+    ? items
+        .map(
+          (item) => `
+            <tr>
+              <td>${escapeHtml(item.item_code)}<br><span class="muted">${escapeHtml(item.item_name)}</span></td>
+              <td>${money.format(item.amount)}</td>
+              <td>${escapeHtml(item.direction)}</td>
+            </tr>
+          `,
+        )
+        .join("")
+    : `<tr><td colspan="3">저장된 세액 조정 항목이 없습니다.</td></tr>`;
+  el("adjustmentScreenBody").innerHTML = `
+    ${taxDataYearSelector(context)}
+    <div class="law-layout">
+      <form id="taxAmountAdjustmentForm" class="law-form">
+        <h3>${escapeHtml(title)} 계산</h3>
+        ${taxAmountFormMarkup(moduleCode)}
+        <button class="primary-btn" type="submit">결정세액 계산/저장</button>
+      </form>
+      <div class="law-table-panel">
+        <h3>산출세액 → 결정세액</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>항목</th><th>금액</th><th>방향</th></tr></thead>
+            <tbody>${itemRows}</tbody>
+          </table>
+        </div>
+        <pre id="taxAmountAdjustmentResult" class="json-result">{}</pre>
+      </div>
+    </div>
+  `;
+  attachTaxDataYearSelector();
+  el("taxAmountAdjustmentForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const result = await request(`${root}/adjustments/tax/${moduleCode}`, {
+      method: "POST",
+      body: JSON.stringify(collectTaxAmountPayload(moduleCode)),
+    });
+    el("taxAmountAdjustmentResult").textContent = JSON.stringify(result, null, 2);
+    log(`${moduleCode} 세액 조정 완료`, { determined_tax: result.determined_tax });
+    await renderTaxAmountAdjustmentScreen();
+  });
+}
+
+function taxAmountFormMarkup(moduleCode) {
+  if (moduleCode === "B13") {
+    return `
+      <label>과세표준<input id="taxAmountBase" type="number" value="500000000" /></label>
+      <label>공제 후 일반 산출세액<input id="regularTaxAfterCredits" type="number" value="30000000" /></label>
+      <label>최저한세율(bps)<input id="minimumTaxRateBps" type="number" value="1000" /></label>
+    `;
+  }
+  if (moduleCode === "B14") {
+    return `
+      <label>가산세 유형<input id="penaltyType" value="UNDER_REPORTED" /></label>
+      <label>기준세액<input id="penaltyTaxBase" type="number" value="100000000" /></label>
+      <label>가산세율(bps)<input id="penaltyRateBps" type="number" value="1000" /></label>
+      <label>지연일수<input id="penaltyDaysLate" type="number" value="1" /></label>
+      <label>수정신고 감면율(bps)<input id="penaltyReductionBps" type="number" value="5000" /></label>
+    `;
+  }
+  return `
+    <label>과세표준<input id="taxAmountBase" type="number" value="500000000" /></label>
+    <label>산출세액<input id="calculatedTax" type="number" value="70000000" /></label>
+    <label>공제 유형<input id="creditType" value="RND" /></label>
+    <label>공제 대상금액<input id="creditBaseAmount" type="number" value="100000000" /></label>
+    <label>공제율(bps)<input id="creditRateBps" type="number" value="2500" /></label>
+  `;
+}
+
+function collectTaxAmountPayload(moduleCode) {
+  if (moduleCode === "B13") {
+    return {
+      tax_base: Number(el("taxAmountBase").value || 0),
+      regular_tax_after_credits: Number(el("regularTaxAfterCredits").value || 0),
+      minimum_tax_rate_bps: Number(el("minimumTaxRateBps").value || 0),
+    };
+  }
+  if (moduleCode === "B14") {
+    return {
+      penalties: [
+        {
+          penalty_type: el("penaltyType").value,
+          tax_base: Number(el("penaltyTaxBase").value || 0),
+          rate_bps: Number(el("penaltyRateBps").value || 0),
+          days_late: Number(el("penaltyDaysLate").value || 1),
+          reduction_bps: Number(el("penaltyReductionBps").value || 0),
+        },
+      ],
+    };
+  }
+  return {
+    tax_base: Number(el("taxAmountBase").value || 0),
+    calculated_tax: Number(el("calculatedTax").value || 0),
+    credits: [
+      {
+        credit_type: el("creditType").value,
+        base_amount: Number(el("creditBaseAmount").value || 0),
+        rate_bps: Number(el("creditRateBps").value || 0),
       },
     ],
   };

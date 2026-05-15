@@ -11,8 +11,9 @@ use crate::{
         CreateTaxLimitRequest, CreateTaxRateRequest, CreateVehicleUsageLogRequest,
         DonationCarryforward, EvaluationAdjustmentRequest, EvaluationAdjustmentResult, FormData,
         IncomeAdjustmentItemInput, IncomeAdjustmentResult, LawAmendmentHistory, LawSnapshot,
-        LawVersioningImpactRequest, LossCarryforwardInput, LossCarryforwardRecord, ReserveRecord,
-        RevenueBreakdownInput, TaxAdjustment, TaxLawVersion, TaxLimit, TaxRate, TenantRef,
+        LawVersioningImpactRequest, LossCarryforwardInput, LossCarryforwardRecord, PenaltyTaxInput,
+        ReserveRecord, RevenueBreakdownInput, TaxAdjustment, TaxAmountAdjustmentRequest,
+        TaxAmountAdjustmentResult, TaxCreditInput, TaxLawVersion, TaxLimit, TaxRate, TenantRef,
         TransactionBasedAdjustmentRequest, TransactionBasedAdjustmentResult,
         UpdateTaxLawStatusRequest, ValuationPositionInput, VehicleUsageLog,
     },
@@ -823,12 +824,12 @@ pub async fn calculate_asset_based_adjustment(
         "B10" => business_vehicle_items(pool, tenant, by_id, request).await?,
         _ => return Err(anyhow!("unsupported asset based adjustment module")),
     };
-    let addbacks = items
+    let addbacks: i64 = items
         .iter()
         .filter(|item| item.direction == "ADD")
         .map(|item| item.amount)
         .sum();
-    let deductions = items
+    let deductions: i64 = items
         .iter()
         .filter(|item| item.direction == "DEDUCT")
         .map(|item| item.amount)
@@ -927,12 +928,12 @@ pub async fn calculate_transaction_based_adjustment(
         }
         _ => return Err(anyhow!("invalid transaction based adjustment module")),
     };
-    let addbacks = items
+    let addbacks: i64 = items
         .iter()
         .filter(|item| item.direction == "ADD")
         .map(|item| item.amount)
         .sum();
-    let deductions = items
+    let deductions: i64 = items
         .iter()
         .filter(|item| item.direction == "DEDUCT")
         .map(|item| item.amount)
@@ -1156,6 +1157,118 @@ pub async fn calculate_evaluation_adjustment(
         law_banner,
         items: saved_items,
         reserves_created,
+        details,
+    })
+}
+
+pub async fn calculate_tax_amount_adjustment(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    module_code: &str,
+    request: TaxAmountAdjustmentRequest,
+) -> Result<TaxAmountAdjustmentResult> {
+    let by = tenant::get_business_year(pool, tenant, by_id).await?;
+    let snapshot = ensure_law_snapshot(pool, tenant, by_id).await?;
+    let rates =
+        load_applicable_rates(pool, snapshot.law_version_id, by.start_date, by.end_date).await?;
+    let module_code = normalize_tax_amount_module(module_code)?;
+    let law_banner = json!({
+        "snapshot_id": snapshot.snapshot_id,
+        "locked": snapshot.locked,
+        "law": snapshot.snapshot_data.get("law").cloned().unwrap_or_else(|| json!({}))
+    });
+    clear_tax_amount_adjustment(pool, tenant, by_id, &module_code).await?;
+    let tax_base = request.tax_base.unwrap_or_default().max(0);
+    let calculated_tax = request
+        .calculated_tax
+        .unwrap_or_else(|| calculate_corporate_tax(tax_base, &rates))
+        .max(0);
+    let (items, details) = match module_code.as_str() {
+        "B12" => {
+            tax_credit_items(
+                pool,
+                tenant,
+                by_id,
+                snapshot.law_version_id,
+                calculated_tax,
+                request.credits.unwrap_or_default(),
+            )
+            .await?
+        }
+        "B13" => {
+            minimum_tax_items(
+                pool,
+                tenant,
+                &by,
+                snapshot.law_version_id,
+                tax_base,
+                request
+                    .regular_tax_after_credits
+                    .unwrap_or(calculated_tax)
+                    .max(0),
+                request.minimum_tax_rate_bps,
+            )
+            .await?
+        }
+        "B14" => {
+            penalty_tax_items(pool, tenant, by_id, request.penalties.unwrap_or_default()).await?
+        }
+        _ => return Err(anyhow!("invalid tax amount adjustment module")),
+    };
+    let addbacks: i64 = items
+        .iter()
+        .filter(|item| item.direction == "ADD")
+        .map(|item| item.amount)
+        .sum();
+    let deductions: i64 = items
+        .iter()
+        .filter(|item| item.direction == "DEDUCT")
+        .map(|item| item.amount)
+        .sum();
+    let determined_tax = (calculated_tax + addbacks - deductions).max(0);
+    let summary_id = insert_tax_adjustment(
+        pool,
+        tenant,
+        by_id,
+        NewAdjustment {
+            category: "TAX_AMOUNT_ADJUSTMENT",
+            code: match module_code.as_str() {
+                "B12" => "B12_TAX_CREDIT_SUMMARY",
+                "B13" => "B13_MINIMUM_TAX_SUMMARY",
+                "B14" => "B14_PENALTY_TAX_SUMMARY",
+                _ => "TAX_AMOUNT_SUMMARY",
+            },
+            amount: determined_tax,
+            direction: "INFO",
+            description: "Tax amount adjustment",
+            snapshot_id: snapshot.snapshot_id,
+            metadata: json!({
+                "module": module_code,
+                "tax_base": tax_base,
+                "calculated_tax": calculated_tax,
+                "determined_tax": determined_tax,
+                "law_banner": law_banner,
+                "details": details
+            }),
+        },
+    )
+    .await?;
+    let mut saved_items = Vec::new();
+    for item in &items {
+        saved_items.push(
+            insert_adjustment_item(pool, tenant, by_id, summary_id, &module_code, item).await?,
+        );
+    }
+    Ok(TaxAmountAdjustmentResult {
+        module_code,
+        addbacks,
+        deductions,
+        calculated_tax,
+        determined_tax,
+        snapshot_id: snapshot.snapshot_id,
+        law_banner,
+        items: saved_items,
         details,
     })
 }
@@ -1416,10 +1529,24 @@ fn normalize_evaluation_module(module_code: &str) -> Result<String> {
     }
 }
 
+fn normalize_tax_amount_module(module_code: &str) -> Result<String> {
+    let normalized = module_code
+        .trim()
+        .to_ascii_uppercase()
+        .replace(['-', '_'], "");
+    match normalized.as_str() {
+        "B12" | "TAXCREDIT" | "CREDITS" => Ok("B12".to_string()),
+        "B13" | "MINIMUMTAX" => Ok("B13".to_string()),
+        "B14" | "PENALTYTAX" | "PENALTY" => Ok("B14".to_string()),
+        _ => Err(anyhow!("invalid tax amount adjustment module")),
+    }
+}
+
 fn normalize_any_adjustment_module(module_code: &str) -> Result<String> {
     normalize_asset_module(module_code)
         .or_else(|_| normalize_transaction_module(module_code))
         .or_else(|_| normalize_evaluation_module(module_code))
+        .or_else(|_| normalize_tax_amount_module(module_code))
 }
 
 async fn depreciation_items(
@@ -1643,6 +1770,15 @@ struct NewValuationPosition<'a> {
     valuation_method: &'a str,
     tax_amount: i64,
     adjustment_amount: i64,
+}
+
+struct NewTaxCreditClaim<'a> {
+    by_id: i64,
+    credit_type: &'a str,
+    base_amount: i64,
+    rate_bps: i64,
+    requested_amount: i64,
+    allowed_amount: i64,
 }
 
 async fn donation_adjustment_items(
@@ -2198,6 +2334,190 @@ async fn capital_reserve_items(
     ))
 }
 
+async fn tax_credit_items(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    law_version_id: i64,
+    calculated_tax: i64,
+    credits: Vec<TaxCreditInput>,
+) -> Result<(Vec<PreparedIncomeItem>, Value)> {
+    let mut remaining_tax = calculated_tax.max(0);
+    let mut items = Vec::new();
+    let mut details = Vec::new();
+    for credit in credits {
+        let credit_type = credit.credit_type.trim().to_ascii_uppercase();
+        if credit_type.is_empty() || credit.base_amount <= 0 {
+            continue;
+        }
+        let rate_bps = match credit.rate_bps {
+            Some(value) => value.max(0),
+            None => credit_rate_bps(pool, law_version_id, &credit_type).await?,
+        };
+        let requested = credit
+            .requested_amount
+            .unwrap_or_else(|| amount_by_bps(credit.base_amount, rate_bps))
+            .max(0);
+        let allowed = requested.min(remaining_tax);
+        remaining_tax -= allowed;
+        insert_tax_credit_claim(
+            pool,
+            tenant,
+            NewTaxCreditClaim {
+                by_id,
+                credit_type: &credit_type,
+                base_amount: credit.base_amount,
+                rate_bps,
+                requested_amount: requested,
+                allowed_amount: allowed,
+            },
+        )
+        .await?;
+        details.push(json!({
+            "credit_type": credit_type,
+            "base_amount": credit.base_amount,
+            "rate_bps": rate_bps,
+            "requested_amount": requested,
+            "allowed_amount": allowed
+        }));
+        if allowed > 0 {
+            items.push(PreparedIncomeItem {
+                section: "TAX_CREDIT".to_string(),
+                item_code: format!("B12_{credit_type}"),
+                item_name: format!("{credit_type} tax credit"),
+                amount: allowed,
+                direction: "DEDUCT".to_string(),
+                disposition: "OTHER".to_string(),
+                law_ref: Some("CIT tax credit rule".to_string()),
+                metadata: json!({ "requested_amount": requested, "rate_bps": rate_bps }),
+            });
+        }
+    }
+    Ok((
+        items,
+        json!({
+            "calculated_tax": calculated_tax,
+            "credits": details,
+            "tax_after_credits": remaining_tax
+        }),
+    ))
+}
+
+async fn minimum_tax_items(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by: &crate::domain::BusinessYear,
+    law_version_id: i64,
+    tax_base: i64,
+    regular_tax: i64,
+    requested_rate_bps: Option<i64>,
+) -> Result<(Vec<PreparedIncomeItem>, Value)> {
+    let is_sme = load_customer_is_sme(pool, tenant, by.customer_id).await?;
+    let limit_code = if is_sme {
+        "MINIMUM_TAX_RATE_BPS_SME"
+    } else {
+        "MINIMUM_TAX_RATE_BPS_GENERAL"
+    };
+    let rate_bps = requested_rate_bps
+        .unwrap_or(
+            tax_limit_amount(
+                pool,
+                law_version_id,
+                limit_code,
+                if is_sme { 1_000 } else { 1_700 },
+            )
+            .await?,
+        )
+        .max(0);
+    let minimum_tax = amount_by_bps(tax_base, rate_bps);
+    let additional_tax = minimum_tax_extra_due(regular_tax, tax_base, rate_bps);
+    insert_minimum_tax_result(
+        pool,
+        tenant,
+        by.by_id,
+        tax_base,
+        regular_tax,
+        minimum_tax,
+        additional_tax,
+    )
+    .await?;
+    let items = if additional_tax > 0 {
+        vec![PreparedIncomeItem {
+            section: "MINIMUM_TAX".to_string(),
+            item_code: "B13_MINIMUM_TAX_ADDITIONAL".to_string(),
+            item_name: "Minimum tax additional amount".to_string(),
+            amount: additional_tax,
+            direction: "ADD".to_string(),
+            disposition: "OTHER".to_string(),
+            law_ref: Some("CIT minimum tax rule".to_string()),
+            metadata: json!({ "minimum_tax": minimum_tax, "regular_tax": regular_tax }),
+        }]
+    } else {
+        Vec::new()
+    };
+    Ok((
+        items,
+        json!({
+            "tax_base": tax_base,
+            "regular_tax": regular_tax,
+            "minimum_tax_rate_bps": rate_bps,
+            "minimum_tax": minimum_tax,
+            "additional_tax": additional_tax,
+            "is_sme": is_sme
+        }),
+    ))
+}
+
+async fn penalty_tax_items(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    penalties: Vec<PenaltyTaxInput>,
+) -> Result<(Vec<PreparedIncomeItem>, Value)> {
+    let mut items = Vec::new();
+    let mut details = Vec::new();
+    for penalty in penalties {
+        let penalty_type = penalty.penalty_type.trim().to_ascii_uppercase();
+        if penalty_type.is_empty() || penalty.tax_base <= 0 || penalty.rate_bps <= 0 {
+            continue;
+        }
+        let multiplier = i64::from(penalty.days_late.unwrap_or(1).max(1));
+        let raw = amount_by_bps(penalty.tax_base, penalty.rate_bps * multiplier);
+        let reduction_bps = penalty.reduction_bps.unwrap_or(0).clamp(0, 10_000);
+        let amount = amount_by_bps(raw, 10_000 - reduction_bps);
+        insert_penalty_tax_item(pool, tenant, by_id, &penalty_type, &penalty, amount).await?;
+        details.push(json!({
+            "penalty_type": penalty_type,
+            "tax_base": penalty.tax_base,
+            "rate_bps": penalty.rate_bps,
+            "days_late": penalty.days_late,
+            "reduction_bps": reduction_bps,
+            "penalty_amount": amount
+        }));
+        if amount > 0 {
+            items.push(PreparedIncomeItem {
+                section: "PENALTY_TAX".to_string(),
+                item_code: format!("B14_{penalty_type}"),
+                item_name: format!("{penalty_type} penalty tax"),
+                amount,
+                direction: "ADD".to_string(),
+                disposition: "OTHER".to_string(),
+                law_ref: Some("Penalty tax rule".to_string()),
+                metadata: json!({ "reduction_bps": reduction_bps }),
+            });
+        }
+    }
+    let total = items.iter().map(|item| item.amount).sum::<i64>();
+    Ok((
+        items,
+        json!({ "penalties": details, "penalty_total": total }),
+    ))
+}
+
+pub fn minimum_tax_extra_due(regular_tax: i64, tax_base: i64, minimum_tax_rate_bps: i64) -> i64 {
+    (amount_by_bps(tax_base, minimum_tax_rate_bps) - regular_tax.max(0)).max(0)
+}
+
 async fn resolve_accounting_income(pool: &PgPool, tenant: &TenantRef, by_id: i64) -> Result<i64> {
     let schema = quote_ident(&tenant.schema_name)?;
     let sql = format!(
@@ -2311,6 +2631,44 @@ async fn clear_evaluation_adjustment(
         .bind(module_code)
         .execute(pool)
         .await?;
+    }
+    Ok(())
+}
+
+async fn clear_tax_amount_adjustment(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    module_code: &str,
+) -> Result<()> {
+    clear_module_adjustment(pool, tenant, by_id, module_code).await?;
+    let schema = quote_ident(&tenant.schema_name)?;
+    match module_code {
+        "B12" => {
+            sqlx::query(&format!(
+                "DELETE FROM {schema}.tax_credit_claims WHERE by_id = $1"
+            ))
+            .bind(by_id)
+            .execute(pool)
+            .await?;
+        }
+        "B13" => {
+            sqlx::query(&format!(
+                "DELETE FROM {schema}.minimum_tax_results WHERE by_id = $1"
+            ))
+            .bind(by_id)
+            .execute(pool)
+            .await?;
+        }
+        "B14" => {
+            sqlx::query(&format!(
+                "DELETE FROM {schema}.penalty_tax_items WHERE by_id = $1"
+            ))
+            .bind(by_id)
+            .execute(pool)
+            .await?;
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -2939,6 +3297,104 @@ async fn aggregate_reserves(pool: &PgPool, tenant: &TenantRef, by_id: i64) -> Re
         .collect())
 }
 
+async fn credit_rate_bps(pool: &PgPool, law_version_id: i64, credit_type: &str) -> Result<i64> {
+    let item_code = match credit_type {
+        "RND" | "R_AND_D" => "RND_CREDIT_BPS",
+        "INVESTMENT" | "INTEGRATED_INVESTMENT" => "INTEGRATED_INVESTMENT_CREDIT_BPS",
+        "FOREIGN_TAX" => "FOREIGN_TAX_CREDIT_LIMIT_BPS",
+        "DISASTER" => "DISASTER_CREDIT_BPS",
+        "SME_SPECIAL" => "SME_SPECIAL_REDUCTION_BPS",
+        "STARTUP" => "STARTUP_REDUCTION_BPS",
+        _ => "RND_CREDIT_BPS",
+    };
+    tax_limit_amount(pool, law_version_id, item_code, 0).await
+}
+
+async fn insert_tax_credit_claim(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    claim: NewTaxCreditClaim<'_>,
+) -> Result<()> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    sqlx::query(&format!(
+        r#"
+        INSERT INTO {schema}.tax_credit_claims (
+            by_id, credit_type, base_amount, rate_bps, requested_amount, allowed_amount
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+        "#
+    ))
+    .bind(claim.by_id)
+    .bind(claim.credit_type)
+    .bind(claim.base_amount)
+    .bind(claim.rate_bps)
+    .bind(claim.requested_amount)
+    .bind(claim.allowed_amount)
+    .execute(pool)
+    .await
+    .context("failed to insert tax credit claim")?;
+    Ok(())
+}
+
+async fn insert_minimum_tax_result(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    tax_base: i64,
+    regular_tax: i64,
+    minimum_tax: i64,
+    additional_tax: i64,
+) -> Result<()> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    sqlx::query(&format!(
+        r#"
+        INSERT INTO {schema}.minimum_tax_results (
+            by_id, tax_base, regular_tax, minimum_tax, additional_tax
+        )
+        VALUES ($1, $2, $3, $4, $5)
+        "#
+    ))
+    .bind(by_id)
+    .bind(tax_base)
+    .bind(regular_tax)
+    .bind(minimum_tax)
+    .bind(additional_tax)
+    .execute(pool)
+    .await
+    .context("failed to insert minimum tax result")?;
+    Ok(())
+}
+
+async fn insert_penalty_tax_item(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    penalty_type: &str,
+    penalty: &PenaltyTaxInput,
+    penalty_amount: i64,
+) -> Result<()> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    sqlx::query(&format!(
+        r#"
+        INSERT INTO {schema}.penalty_tax_items (
+            by_id, penalty_type, tax_base, rate_bps, days_late, reduction_bps, penalty_amount
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        "#
+    ))
+    .bind(by_id)
+    .bind(penalty_type)
+    .bind(penalty.tax_base)
+    .bind(penalty.rate_bps)
+    .bind(penalty.days_late)
+    .bind(penalty.reduction_bps.unwrap_or(0).clamp(0, 10_000))
+    .bind(penalty_amount)
+    .execute(pool)
+    .await
+    .context("failed to insert penalty tax item")?;
+    Ok(())
+}
+
 async fn depreciation_tax_life(pool: &PgPool, law_version_id: i64, category: &str) -> Result<i32> {
     if category.to_ascii_uppercase().contains("VEHICLE") {
         return Ok(5);
@@ -3513,7 +3969,7 @@ fn build_form_payload(form_code: &str, summary: &Value, snapshot_id: i64) -> Res
 
 #[cfg(test)]
 mod tests {
-    use super::calculate_corporate_tax;
+    use super::{calculate_corporate_tax, minimum_tax_extra_due};
     use crate::domain::TaxRate;
     use chrono::NaiveDate;
     use serde_json::json;
@@ -3542,5 +3998,19 @@ mod tests {
         ];
         assert_eq!(calculate_corporate_tax(100_000_000, &rates), 9_000_000);
         assert_eq!(calculate_corporate_tax(300_000_000, &rates), 37_000_000);
+    }
+
+    #[test]
+    fn minimum_tax_extra_due_handles_regression_cases() {
+        let cases = [
+            (60_000_000, 500_000_000, 1_000, 0),
+            (50_000_000, 500_000_000, 1_000, 0),
+            (30_000_000, 500_000_000, 1_000, 20_000_000),
+            (0, 0, 1_000, 0),
+            (100_000_000, 1_000_000_000, 1_700, 70_000_000),
+        ];
+        for (regular_tax, tax_base, bps, expected) in cases {
+            assert_eq!(minimum_tax_extra_due(regular_tax, tax_base, bps), expected);
+        }
     }
 }

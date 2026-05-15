@@ -690,6 +690,46 @@ pub struct EvaluationAdjustmentResult {
     pub details: Value,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaxCreditInput {
+    pub credit_type: String,
+    pub base_amount: i64,
+    pub rate_bps: Option<i64>,
+    pub requested_amount: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PenaltyTaxInput {
+    pub penalty_type: String,
+    pub tax_base: i64,
+    pub rate_bps: i64,
+    pub days_late: Option<i32>,
+    pub reduction_bps: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaxAmountAdjustmentRequest {
+    pub tax_base: Option<i64>,
+    pub calculated_tax: Option<i64>,
+    pub regular_tax_after_credits: Option<i64>,
+    pub minimum_tax_rate_bps: Option<i64>,
+    pub credits: Option<Vec<TaxCreditInput>>,
+    pub penalties: Option<Vec<PenaltyTaxInput>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TaxAmountAdjustmentResult {
+    pub module_code: String,
+    pub addbacks: i64,
+    pub deductions: i64,
+    pub calculated_tax: i64,
+    pub determined_tax: i64,
+    pub snapshot_id: i64,
+    pub law_banner: Value,
+    pub items: Vec<AdjustmentItem>,
+    pub details: Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalculationResult {
     pub accounting_income: i64,

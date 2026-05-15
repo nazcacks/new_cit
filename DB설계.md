@@ -1501,3 +1501,10 @@ FOR EACH ROW EXECUTE FUNCTION fn_audit_trigger();
 - `capital_changes`는 B-15 자본금 변동일, 변동유형, 금액, 설명을 사업연도별로 저장한다.
 - B-15 집계는 `reserves`의 모든 모듈 유보를 `source_module + reserve_code + direction` 기준으로 합산한다.
 - 이월결손금 공제한도율은 `tax_limits(LOSS_DEDUCTION_LIMIT_BPS_SME|GENERAL)`로 법령 버전별 관리한다.
+
+## Phase 12 세액 DB 보완 (2026-05-15)
+
+- `tax_credit_claims`는 B-12 공제 유형, 대상금액, 공제율, 요청액, 허용액을 저장한다.
+- `minimum_tax_results`는 B-13 과세표준, 일반세액, 최저한세, 추가세액을 저장한다.
+- `penalty_tax_items`는 B-14 가산세 유형, 기준세액, 세율, 지연일수, 감면율, 산출 가산세를 저장한다.
+- 세액공제율과 최저한세율은 `tax_limits(CREDIT|MINIMUM_TAX)` 항목으로 법령 버전별 관리한다.

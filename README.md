@@ -299,3 +299,16 @@ Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-y
   -ContentType "application/json" `
   -Body '{"capital_changes":[{"change_date":"2026-06-30","change_type":"PAID_IN_CAPITAL","amount":50000000,"description":"Paid-in capital increase"}]}'
 ```
+
+## Tax Amount Adjustment API (2026-05-15)
+
+- Added B-12 tax credits/reductions, B-13 minimum tax, and B-14 penalty tax endpoints.
+- B-12 returns the calculated-tax to determined-tax flow after allowed credits.
+- B-13 stores minimum tax comparison results and additional tax.
+- B-14 stores penalty tax items after reduction rates.
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/adjustments/tax/B12 `
+  -ContentType "application/json" `
+  -Body '{"tax_base":500000000,"calculated_tax":70000000,"credits":[{"credit_type":"RND","base_amount":100000000,"rate_bps":2500}]}'
+```

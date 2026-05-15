@@ -428,6 +428,47 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
         CREATE INDEX IF NOT EXISTS idx_capital_changes_by
             ON {schema}.capital_changes(by_id, change_date, capital_change_id);
 
+        CREATE TABLE IF NOT EXISTS {schema}.tax_credit_claims (
+            credit_claim_id BIGSERIAL PRIMARY KEY,
+            by_id           BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
+            credit_type     VARCHAR(50) NOT NULL,
+            base_amount     BIGINT NOT NULL,
+            rate_bps        BIGINT NOT NULL,
+            requested_amount BIGINT NOT NULL,
+            allowed_amount  BIGINT NOT NULL,
+            metadata        JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_tax_credit_claims_by
+            ON {schema}.tax_credit_claims(by_id, credit_type);
+
+        CREATE TABLE IF NOT EXISTS {schema}.minimum_tax_results (
+            minimum_tax_result_id BIGSERIAL PRIMARY KEY,
+            by_id           BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
+            tax_base        BIGINT NOT NULL,
+            regular_tax     BIGINT NOT NULL,
+            minimum_tax     BIGINT NOT NULL,
+            additional_tax  BIGINT NOT NULL,
+            metadata        JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_minimum_tax_results_by
+            ON {schema}.minimum_tax_results(by_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS {schema}.penalty_tax_items (
+            penalty_tax_item_id BIGSERIAL PRIMARY KEY,
+            by_id           BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
+            penalty_type    VARCHAR(50) NOT NULL,
+            tax_base        BIGINT NOT NULL,
+            rate_bps        BIGINT NOT NULL,
+            days_late       INT,
+            reduction_bps   BIGINT NOT NULL DEFAULT 0,
+            penalty_amount  BIGINT NOT NULL,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_penalty_tax_items_by
+            ON {schema}.penalty_tax_items(by_id, penalty_type);
+
         CREATE TABLE IF NOT EXISTS {schema}.tax_agents (
             tax_agent_id BIGSERIAL PRIMARY KEY,
             customer_id  BIGINT NOT NULL REFERENCES {schema}.customers(customer_id),
