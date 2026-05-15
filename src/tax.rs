@@ -7,12 +7,14 @@ use crate::{
     domain::{
         AdjustmentItem, AssetBasedAdjustmentRequest, AssetBasedAdjustmentResult,
         CalculateAdjustmentRequest, CalculationResult, CapitalChange, CapitalChangeInput,
-        CreateIncomeAdjustmentRequest, CreateLawAmendmentRequest, CreateTaxLawRequest,
-        CreateTaxLimitRequest, CreateTaxRateRequest, CreateVehicleUsageLogRequest,
-        DonationCarryforward, EvaluationAdjustmentRequest, EvaluationAdjustmentResult, FormData,
+        ConsolidatedEntityInput, ConsolidationEliminationInput, CreateIncomeAdjustmentRequest,
+        CreateLawAmendmentRequest, CreateTaxLawRequest, CreateTaxLimitRequest,
+        CreateTaxRateRequest, CreateVehicleUsageLogRequest, DonationCarryforward,
+        EvaluationAdjustmentRequest, EvaluationAdjustmentResult, ForeignIncomeInput, FormData,
         IncomeAdjustmentItemInput, IncomeAdjustmentResult, LawAmendmentHistory, LawSnapshot,
         LawVersioningImpactRequest, LossCarryforwardInput, LossCarryforwardRecord, PenaltyTaxInput,
-        ReserveRecord, RevenueBreakdownInput, TaxAdjustment, TaxAmountAdjustmentRequest,
+        ReserveRecord, RevenueBreakdownInput, SpecialTaxAdjustmentRequest,
+        SpecialTaxAdjustmentResult, TaxAdjustment, TaxAmountAdjustmentRequest,
         TaxAmountAdjustmentResult, TaxCreditInput, TaxLawVersion, TaxLimit, TaxRate, TenantRef,
         TransactionBasedAdjustmentRequest, TransactionBasedAdjustmentResult,
         UpdateTaxLawStatusRequest, ValuationPositionInput, VehicleUsageLog,
@@ -1273,6 +1275,102 @@ pub async fn calculate_tax_amount_adjustment(
     })
 }
 
+pub async fn calculate_special_tax_adjustment(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    module_code: &str,
+    request: SpecialTaxAdjustmentRequest,
+) -> Result<SpecialTaxAdjustmentResult> {
+    let by = tenant::get_business_year(pool, tenant, by_id).await?;
+    let snapshot = ensure_law_snapshot(pool, tenant, by_id).await?;
+    let rates =
+        load_applicable_rates(pool, snapshot.law_version_id, by.start_date, by.end_date).await?;
+    let module_code = normalize_special_module(module_code)?;
+    let law_banner = json!({
+        "snapshot_id": snapshot.snapshot_id,
+        "locked": snapshot.locked,
+        "law": snapshot.snapshot_data.get("law").cloned().unwrap_or_else(|| json!({}))
+    });
+    clear_special_adjustment(pool, tenant, by_id, &module_code).await?;
+    let (items, taxable_income, details) = match module_code.as_str() {
+        "B16" => {
+            foreign_corporation_items(
+                pool,
+                tenant,
+                by_id,
+                request.foreign_incomes.unwrap_or_default(),
+            )
+            .await?
+        }
+        "B17" => {
+            consolidated_tax_items(
+                pool,
+                tenant,
+                by_id,
+                request.consolidated_entities.unwrap_or_default(),
+                request.eliminations.unwrap_or_default(),
+                &rates,
+            )
+            .await?
+        }
+        _ => return Err(anyhow!("invalid special tax adjustment module")),
+    };
+    let addbacks: i64 = items
+        .iter()
+        .filter(|item| item.direction == "ADD")
+        .map(|item| item.amount)
+        .sum();
+    let deductions: i64 = items
+        .iter()
+        .filter(|item| item.direction == "DEDUCT")
+        .map(|item| item.amount)
+        .sum();
+    let calculated_tax = calculate_corporate_tax(taxable_income, &rates);
+    let summary_id = insert_tax_adjustment(
+        pool,
+        tenant,
+        by_id,
+        NewAdjustment {
+            category: "SPECIAL_TAX_ADJUSTMENT",
+            code: if module_code == "B16" {
+                "B16_FOREIGN_CORPORATION_SUMMARY"
+            } else {
+                "B17_CONSOLIDATED_TAX_SUMMARY"
+            },
+            amount: taxable_income,
+            direction: "INFO",
+            description: "Special tax adjustment",
+            snapshot_id: snapshot.snapshot_id,
+            metadata: json!({
+                "module": module_code,
+                "taxable_income": taxable_income,
+                "calculated_tax": calculated_tax,
+                "law_banner": law_banner,
+                "details": details
+            }),
+        },
+    )
+    .await?;
+    let mut saved_items = Vec::new();
+    for item in &items {
+        saved_items.push(
+            insert_adjustment_item(pool, tenant, by_id, summary_id, &module_code, item).await?,
+        );
+    }
+    Ok(SpecialTaxAdjustmentResult {
+        module_code,
+        addbacks,
+        deductions,
+        taxable_income,
+        calculated_tax,
+        snapshot_id: snapshot.snapshot_id,
+        law_banner,
+        items: saved_items,
+        details,
+    })
+}
+
 pub async fn calculate_adjustments(
     pool: &PgPool,
     tenant: &TenantRef,
@@ -1542,11 +1640,24 @@ fn normalize_tax_amount_module(module_code: &str) -> Result<String> {
     }
 }
 
+fn normalize_special_module(module_code: &str) -> Result<String> {
+    let normalized = module_code
+        .trim()
+        .to_ascii_uppercase()
+        .replace(['-', '_'], "");
+    match normalized.as_str() {
+        "B16" | "FOREIGNCORP" | "FOREIGNCORPORATION" => Ok("B16".to_string()),
+        "B17" | "CONSOLIDATED" | "CONSOLIDATEDTAX" => Ok("B17".to_string()),
+        _ => Err(anyhow!("invalid special tax adjustment module")),
+    }
+}
+
 fn normalize_any_adjustment_module(module_code: &str) -> Result<String> {
     normalize_asset_module(module_code)
         .or_else(|_| normalize_transaction_module(module_code))
         .or_else(|_| normalize_evaluation_module(module_code))
         .or_else(|_| normalize_tax_amount_module(module_code))
+        .or_else(|_| normalize_special_module(module_code))
 }
 
 async fn depreciation_items(
@@ -1779,6 +1890,16 @@ struct NewTaxCreditClaim<'a> {
     rate_bps: i64,
     requested_amount: i64,
     allowed_amount: i64,
+}
+
+struct NewForeignIncomeItem<'a> {
+    by_id: i64,
+    income_type: &'a str,
+    gross_amount: i64,
+    attributable_expense: i64,
+    pe_allocation_bps: i64,
+    allocated_income: i64,
+    withholding_tax: i64,
 }
 
 async fn donation_adjustment_items(
@@ -2518,6 +2639,153 @@ pub fn minimum_tax_extra_due(regular_tax: i64, tax_base: i64, minimum_tax_rate_b
     (amount_by_bps(tax_base, minimum_tax_rate_bps) - regular_tax.max(0)).max(0)
 }
 
+async fn foreign_corporation_items(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    incomes: Vec<ForeignIncomeInput>,
+) -> Result<(Vec<PreparedIncomeItem>, i64, Value)> {
+    let mut details = Vec::new();
+    let mut taxable_income = 0;
+    let mut withholding_total = 0;
+    for income in incomes {
+        let income_type = normalize_foreign_income_type(&income.income_type)?;
+        let gross = income.gross_amount.max(0);
+        let expense = income.attributable_expense.unwrap_or(0).max(0);
+        let pe_bps = income.pe_allocation_bps.unwrap_or(10_000).clamp(0, 10_000);
+        let net = (gross - expense).max(0);
+        let allocated = amount_by_bps(net, pe_bps);
+        let withholding = income.withholding_tax.unwrap_or(0).max(0);
+        insert_foreign_income_item(
+            pool,
+            tenant,
+            NewForeignIncomeItem {
+                by_id,
+                income_type: &income_type,
+                gross_amount: gross,
+                attributable_expense: expense,
+                pe_allocation_bps: pe_bps,
+                allocated_income: allocated,
+                withholding_tax: withholding,
+            },
+        )
+        .await?;
+        taxable_income += allocated;
+        withholding_total += withholding;
+        details.push(json!({
+            "income_type": income_type,
+            "gross_amount": gross,
+            "attributable_expense": expense,
+            "pe_allocation_bps": pe_bps,
+            "allocated_income": allocated,
+            "withholding_tax": withholding
+        }));
+    }
+    let mut items = Vec::new();
+    if taxable_income > 0 {
+        items.push(PreparedIncomeItem {
+            section: "FOREIGN_CORPORATION".to_string(),
+            item_code: "B16_DOMESTIC_SOURCE_INCOME".to_string(),
+            item_name: "Domestic source income allocated to PE".to_string(),
+            amount: taxable_income,
+            direction: "ADD".to_string(),
+            disposition: "OTHER".to_string(),
+            law_ref: Some("Foreign corporation domestic source income".to_string()),
+            metadata: json!({ "income_count": details.len() }),
+        });
+    }
+    Ok((
+        items,
+        taxable_income,
+        json!({
+            "foreign_mode": true,
+            "domestic_source_income": taxable_income,
+            "withholding_tax_total": withholding_total,
+            "incomes": details
+        }),
+    ))
+}
+
+async fn consolidated_tax_items(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    entities: Vec<ConsolidatedEntityInput>,
+    eliminations: Vec<ConsolidationEliminationInput>,
+    rates: &[TaxRate],
+) -> Result<(Vec<PreparedIncomeItem>, i64, Value)> {
+    if entities.len() < 2 {
+        return Err(anyhow!("at least two consolidated entities are required"));
+    }
+    if entities.iter().any(|entity| entity.ownership_bps != 10_000) {
+        return Err(anyhow!("consolidated entities must be 100 percent owned"));
+    }
+    let entity_income = entities
+        .iter()
+        .map(|entity| entity.taxable_income.max(0))
+        .sum::<i64>();
+    let mut elimination_total = 0;
+    let mut elimination_details = Vec::new();
+    for elimination in &eliminations {
+        let amount = elimination.amount.max(0);
+        let direction = elimination.direction.trim().to_ascii_uppercase();
+        if direction == "DEDUCT" {
+            elimination_total += amount;
+        } else if direction == "ADD" {
+            elimination_total -= amount;
+        }
+        insert_consolidation_elimination(pool, tenant, by_id, elimination, &direction).await?;
+        elimination_details.push(json!({
+            "elimination_type": elimination.elimination_type,
+            "direction": direction,
+            "amount": amount,
+            "description": elimination.description
+        }));
+    }
+    let consolidated_tax_base = (entity_income - elimination_total).max(0);
+    let consolidated_tax = calculate_corporate_tax(consolidated_tax_base, rates);
+    let mut entity_details = Vec::new();
+    for entity in &entities {
+        let ratio_bps = if entity_income > 0 {
+            ((entity.taxable_income.max(0) as i128) * 10_000 / i128::from(entity_income)) as i64
+        } else {
+            0
+        };
+        let allocated_tax = amount_by_bps(consolidated_tax, ratio_bps);
+        insert_consolidated_entity(pool, tenant, by_id, entity, allocated_tax).await?;
+        entity_details.push(json!({
+            "entity_code": entity.entity_code,
+            "entity_name": entity.entity_name,
+            "ownership_bps": entity.ownership_bps,
+            "taxable_income": entity.taxable_income,
+            "allocated_tax": allocated_tax
+        }));
+    }
+    let items = vec![PreparedIncomeItem {
+        section: "CONSOLIDATED_TAX".to_string(),
+        item_code: "B17_CONSOLIDATED_TAX_BASE".to_string(),
+        item_name: "Consolidated tax base after eliminations".to_string(),
+        amount: consolidated_tax_base,
+        direction: "INFO".to_string(),
+        disposition: "INTERNAL".to_string(),
+        law_ref: Some("Consolidated tax rule".to_string()),
+        metadata: json!({ "entity_count": entities.len(), "elimination_total": elimination_total }),
+    }];
+    Ok((
+        items,
+        consolidated_tax_base,
+        json!({
+            "entity_count": entities.len(),
+            "entity_income": entity_income,
+            "elimination_total": elimination_total,
+            "consolidated_tax_base": consolidated_tax_base,
+            "consolidated_tax": consolidated_tax,
+            "entities": entity_details,
+            "eliminations": elimination_details
+        }),
+    ))
+}
+
 async fn resolve_accounting_income(pool: &PgPool, tenant: &TenantRef, by_id: i64) -> Result<i64> {
     let schema = quote_ident(&tenant.schema_name)?;
     let sql = format!(
@@ -2663,6 +2931,42 @@ async fn clear_tax_amount_adjustment(
         "B14" => {
             sqlx::query(&format!(
                 "DELETE FROM {schema}.penalty_tax_items WHERE by_id = $1"
+            ))
+            .bind(by_id)
+            .execute(pool)
+            .await?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+async fn clear_special_adjustment(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    module_code: &str,
+) -> Result<()> {
+    clear_module_adjustment(pool, tenant, by_id, module_code).await?;
+    let schema = quote_ident(&tenant.schema_name)?;
+    match module_code {
+        "B16" => {
+            sqlx::query(&format!(
+                "DELETE FROM {schema}.foreign_income_items WHERE by_id = $1"
+            ))
+            .bind(by_id)
+            .execute(pool)
+            .await?;
+        }
+        "B17" => {
+            sqlx::query(&format!(
+                "DELETE FROM {schema}.consolidated_entities WHERE by_id = $1"
+            ))
+            .bind(by_id)
+            .execute(pool)
+            .await?;
+            sqlx::query(&format!(
+                "DELETE FROM {schema}.consolidation_eliminations WHERE by_id = $1"
             ))
             .bind(by_id)
             .execute(pool)
@@ -3392,6 +3696,108 @@ async fn insert_penalty_tax_item(
     .execute(pool)
     .await
     .context("failed to insert penalty tax item")?;
+    Ok(())
+}
+
+fn normalize_foreign_income_type(income_type: &str) -> Result<String> {
+    let normalized = income_type.trim().to_ascii_uppercase();
+    let allowed = [
+        "INTEREST",
+        "DIVIDEND",
+        "ROYALTY",
+        "SERVICE",
+        "REAL_ESTATE",
+        "CAPITAL_GAIN",
+    ];
+    if allowed.contains(&normalized.as_str()) {
+        Ok(normalized)
+    } else {
+        Err(anyhow!("invalid foreign income type"))
+    }
+}
+
+async fn insert_foreign_income_item(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    item: NewForeignIncomeItem<'_>,
+) -> Result<()> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    sqlx::query(&format!(
+        r#"
+        INSERT INTO {schema}.foreign_income_items (
+            by_id, income_type, gross_amount, attributable_expense,
+            pe_allocation_bps, allocated_income, withholding_tax
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        "#
+    ))
+    .bind(item.by_id)
+    .bind(item.income_type)
+    .bind(item.gross_amount)
+    .bind(item.attributable_expense)
+    .bind(item.pe_allocation_bps)
+    .bind(item.allocated_income)
+    .bind(item.withholding_tax)
+    .execute(pool)
+    .await
+    .context("failed to insert foreign income item")?;
+    Ok(())
+}
+
+async fn insert_consolidated_entity(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    entity: &ConsolidatedEntityInput,
+    allocated_tax: i64,
+) -> Result<()> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    sqlx::query(&format!(
+        r#"
+        INSERT INTO {schema}.consolidated_entities (
+            by_id, entity_code, entity_name, ownership_bps, taxable_income,
+            standalone_tax, allocated_tax
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        "#
+    ))
+    .bind(by_id)
+    .bind(entity.entity_code.trim().to_ascii_uppercase())
+    .bind(entity.entity_name.trim())
+    .bind(entity.ownership_bps)
+    .bind(entity.taxable_income)
+    .bind(entity.standalone_tax.unwrap_or(0).max(0))
+    .bind(allocated_tax)
+    .execute(pool)
+    .await
+    .context("failed to insert consolidated entity")?;
+    Ok(())
+}
+
+async fn insert_consolidation_elimination(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    elimination: &ConsolidationEliminationInput,
+    direction: &str,
+) -> Result<()> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    sqlx::query(&format!(
+        r#"
+        INSERT INTO {schema}.consolidation_eliminations (
+            by_id, elimination_type, amount, direction, description
+        )
+        VALUES ($1, $2, $3, $4, $5)
+        "#
+    ))
+    .bind(by_id)
+    .bind(elimination.elimination_type.trim().to_ascii_uppercase())
+    .bind(elimination.amount.max(0))
+    .bind(direction)
+    .bind(elimination.description.as_deref())
+    .execute(pool)
+    .await
+    .context("failed to insert consolidation elimination")?;
     Ok(())
 }
 

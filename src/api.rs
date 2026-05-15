@@ -24,8 +24,8 @@ use crate::{
         CreateVehicleUsageLogRequest, EnqueueEfilingRequest, EnqueueJobRequest,
         EvaluationAdjustmentRequest, FormMigrationRequest, HealthResponse,
         LawVersioningImpactRequest, LoginRequest, ResolveFormVersionQuery,
-        TaxAmountAdjustmentRequest, TransactionBasedAdjustmentRequest, UpdateAdminUserRequest,
-        UpdateAdminUserStatusRequest, UpdateBusinessYearStatusRequest,
+        SpecialTaxAdjustmentRequest, TaxAmountAdjustmentRequest, TransactionBasedAdjustmentRequest,
+        UpdateAdminUserRequest, UpdateAdminUserStatusRequest, UpdateBusinessYearStatusRequest,
         UpdateFormVersionStatusRequest, UpdateRolePermissionsRequest, UpdateTaxLawStatusRequest,
     },
     efiling,
@@ -191,6 +191,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/adjustments/tax/:module_code",
             get(list_tax_amount_adjustment_items).post(calculate_tax_amount_adjustment),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/adjustments/special/:module_code",
+            get(list_special_tax_adjustment_items).post(calculate_special_tax_adjustment),
         )
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/vehicle-usage-logs",
@@ -1056,6 +1060,39 @@ async fn calculate_tax_amount_adjustment(
 }
 
 async fn list_tax_amount_adjustment_items(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id, module_code)): Path<(String, i64, String)>,
+) -> AppResult<Json<Vec<crate::domain::AdjustmentItem>>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let items = tax::list_adjustment_items_by_module(&state.pool, &tenant_ref, by_id, &module_code)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(items))
+}
+
+async fn calculate_special_tax_adjustment(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id, module_code)): Path<(String, i64, String)>,
+    Json(request): Json<SpecialTaxAdjustmentRequest>,
+) -> AppResult<Json<crate::domain::SpecialTaxAdjustmentResult>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let result = tax::calculate_special_tax_adjustment(
+        &state.pool,
+        &tenant_ref,
+        by_id,
+        &module_code,
+        request,
+    )
+    .await
+    .map_err(map_anyhow)?;
+    Ok(Json(result))
+}
+
+async fn list_special_tax_adjustment_items(
     State(state): State<AppState>,
     Path((tenant_code, by_id, module_code)): Path<(String, i64, String)>,
 ) -> AppResult<Json<Vec<crate::domain::AdjustmentItem>>> {

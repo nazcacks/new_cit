@@ -1508,3 +1508,18 @@ FOR EACH ROW EXECUTE FUNCTION fn_audit_trigger();
 - `minimum_tax_results`는 B-13 과세표준, 일반세액, 최저한세, 추가세액을 저장한다.
 - `penalty_tax_items`는 B-14 가산세 유형, 기준세액, 세율, 지연일수, 감면율, 산출 가산세를 저장한다.
 - 세액공제율과 최저한세율은 `tax_limits(CREDIT|MINIMUM_TAX)` 항목으로 법령 버전별 관리한다.
+
+## 사용자-고객사 업무 권한 실제 구현 보완 (2026-05-15)
+
+- 테넌트별 고객사 마스터는 `{tenant_schema}.customers.work_scopes` 배열로 고객사가 수행 대상인 업무 범위를 저장한다.
+- 사용자별 고객사 접근은 public `user_customer_access`에 저장하고, 접근 등급은 `OWNER`, `CO_WORKER`, `REVIEWER`, `ASSISTANT`, `VIEWER`, `BLOCKED`로 제한한다.
+- 사용자별 고객사 업무 권한은 public `user_customer_work_scope`에 `access_id + work_scope`로 저장한다.
+- API는 사용자 생성/수정 시 `user_customer_work_scope.work_scope`가 해당 고객사의 `work_scopes` 부분집합인지 검증한다.
+- 운영 UI(`frontend/app.js`)는 사용자 등록/편집 화면에서 고객사별 대상 업무와 사용자 부여 업무를 동시에 보여주며, 대상 업무가 아닌 코드는 체크할 수 없게 비활성화한다.
+
+## Phase 13 특수 세무조정 DB 보완 (2026-05-15)
+
+- `foreign_income_items`는 B-16 외국법인 국내원천 소득 유형, 총수입, 귀속 비용, 고정사업장 배분율, 원천징수세액을 저장한다.
+- `consolidated_entities`는 B-17 연결납세 대상 법인의 법인코드, 법인명, 지분율, 과세소득을 저장한다.
+- `consolidation_eliminations`는 내부거래 이익 제거 등 연결 조정 제거 항목의 금액, 방향, 설명을 저장한다.
+- B-16/B-17 계산 결과는 공통 `adjustment_items`, `tax_adjustments`에 `source_module` 기준으로 저장되어 서식 생성과 감사 추적에서 같은 방식으로 조회된다.

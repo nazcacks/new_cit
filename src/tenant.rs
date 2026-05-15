@@ -469,6 +469,46 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
         CREATE INDEX IF NOT EXISTS idx_penalty_tax_items_by
             ON {schema}.penalty_tax_items(by_id, penalty_type);
 
+        CREATE TABLE IF NOT EXISTS {schema}.foreign_income_items (
+            foreign_income_item_id BIGSERIAL PRIMARY KEY,
+            by_id           BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
+            income_type     VARCHAR(50) NOT NULL,
+            gross_amount    BIGINT NOT NULL,
+            attributable_expense BIGINT NOT NULL DEFAULT 0,
+            pe_allocation_bps BIGINT NOT NULL DEFAULT 10000,
+            allocated_income BIGINT NOT NULL,
+            withholding_tax BIGINT NOT NULL DEFAULT 0,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_foreign_income_items_by
+            ON {schema}.foreign_income_items(by_id, income_type);
+
+        CREATE TABLE IF NOT EXISTS {schema}.consolidated_entities (
+            consolidated_entity_id BIGSERIAL PRIMARY KEY,
+            by_id           BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
+            entity_code     VARCHAR(50) NOT NULL,
+            entity_name     VARCHAR(200) NOT NULL,
+            ownership_bps   BIGINT NOT NULL,
+            taxable_income  BIGINT NOT NULL,
+            standalone_tax  BIGINT NOT NULL DEFAULT 0,
+            allocated_tax   BIGINT NOT NULL DEFAULT 0,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_consolidated_entities_by
+            ON {schema}.consolidated_entities(by_id, entity_code);
+
+        CREATE TABLE IF NOT EXISTS {schema}.consolidation_eliminations (
+            consolidation_elimination_id BIGSERIAL PRIMARY KEY,
+            by_id           BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
+            elimination_type VARCHAR(50) NOT NULL,
+            amount          BIGINT NOT NULL,
+            direction       VARCHAR(20) NOT NULL,
+            description     TEXT,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_consolidation_eliminations_by
+            ON {schema}.consolidation_eliminations(by_id, elimination_type);
+
         CREATE TABLE IF NOT EXISTS {schema}.tax_agents (
             tax_agent_id BIGSERIAL PRIMARY KEY,
             customer_id  BIGINT NOT NULL REFERENCES {schema}.customers(customer_id),

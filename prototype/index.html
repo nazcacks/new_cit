@@ -1205,7 +1205,7 @@ const AdminTenant = () => {
 
 const AdminCust = () => {
   const tenantName = (tenantId) => DUMMY_TENANTS.find(tenant => tenant.id === tenantId)?.name || tenantId;
-  const emptyCustomer = { tenantId:"ey001", code:"", name:"", biz:"", industry:"", type:"GENERAL" };
+  const emptyCustomer = { tenantId:"ey001", code:"", name:"", biz:"", industry:"", type:"GENERAL", workScopes:["INFO","ADJUST","FORM","VALIDATE","PRINT"] };
   const [customers,setCustomers] = useState(DUMMY_CUSTOMERS);
   const [tenantFilter,setTenantFilter] = useState("ALL");
   const [query,setQuery] = useState("");
@@ -1213,9 +1213,10 @@ const AdminCust = () => {
   const [showNew,setShowNew] = useState(false);
   const [newCustomer,setNewCustomer] = useState(emptyCustomer);
   const selected = customers.find(customer => customer.id === selectedId) || customers[0];
-  const [draft,setDraft] = useState(selected);
+  const customerWorkScopes = (customer) => customer?.workScopes || targetWorkScopesForCustomer(customer?.id);
+  const [draft,setDraft] = useState(selected ? { ...selected, workScopes: customerWorkScopes(selected) } : emptyCustomer);
   useEffect(() => {
-    if (selected) setDraft({ ...selected });
+    if (selected) setDraft({ ...selected, workScopes: customerWorkScopes(selected) });
   }, [selectedId, customers]);
   const filtered = customers.filter(customer => {
     const keyword = query.trim().toLowerCase();
@@ -1227,12 +1228,40 @@ const AdminCust = () => {
       customer.industry.toLowerCase().includes(keyword);
     return matchesTenant && matchesKeyword;
   });
+  const toggleDraftScope = (scopeCode) => {
+    setDraft(current => {
+      const scopes = current.workScopes || [];
+      const workScopes = scopes.includes(scopeCode) ? scopes.filter(code => code !== scopeCode) : [...scopes, scopeCode];
+      return { ...current, workScopes: workScopes.length ? workScopes : [scopeCode] };
+    });
+  };
+  const toggleNewScope = (scopeCode) => {
+    setNewCustomer(current => {
+      const scopes = current.workScopes || [];
+      const workScopes = scopes.includes(scopeCode) ? scopes.filter(code => code !== scopeCode) : [...scopes, scopeCode];
+      return { ...current, workScopes: workScopes.length ? workScopes : [scopeCode] };
+    });
+  };
+  const scopeBadges = (scopeCodes = []) => (
+    <div className="flex flex-wrap gap-1">
+      {scopeCodes.map(code => <Badge key={code} color="bg-indigo-100 text-indigo-700">{workScopeLabel(code)}</Badge>)}
+    </div>
+  );
+  const scopeChecklist = (scopeCodes = [], onToggle) => (
+    <div className="grid grid-cols-2 gap-1">
+      {WORK_SCOPE_OPTIONS.map(scope => (
+        <label key={scope.code} className="text-[11px] border rounded px-2 py-1 bg-white">
+          <input type="checkbox" className="mr-1" checked={scopeCodes.includes(scope.code)} onChange={()=>onToggle(scope.code)} />{scope.label}
+        </label>
+      ))}
+    </div>
+  );
   const saveCustomer = () => {
-    setCustomers(items => items.map(customer => customer.id === selectedId ? { ...draft } : customer));
+    setCustomers(items => items.map(customer => customer.id === selectedId ? { ...draft, workScopes: draft.workScopes?.length ? draft.workScopes : ["INFO"] } : customer));
   };
   const createCustomer = () => {
     if (!newCustomer.code.trim() || !newCustomer.name.trim()) return;
-    const created = { ...newCustomer, id: Math.max(...customers.map(customer => customer.id)) + 1 };
+    const created = { ...newCustomer, workScopes: newCustomer.workScopes?.length ? newCustomer.workScopes : ["INFO"], id: Math.max(...customers.map(customer => customer.id)) + 1 };
     setCustomers(items => [created, ...items]);
     setSelectedId(created.id);
     setShowNew(false);
@@ -1276,7 +1305,7 @@ const AdminCust = () => {
           </div>
           <table className="w-full text-sm">
             <thead className="text-xs text-slate-500 border-b">
-              <tr><th className="text-left py-1">코드</th><th className="text-left">고객사</th><th className="text-left">소속 테넌트</th><th>사업자번호</th><th>업종</th><th>유형</th></tr>
+              <tr><th className="text-left py-1">코드</th><th className="text-left">고객사</th><th className="text-left">소속 테넌트</th><th>사업자번호</th><th>업종</th><th className="text-left">대상 업무</th><th>유형</th></tr>
             </thead>
             <tbody>
               {filtered.map(customer => (
@@ -1286,6 +1315,7 @@ const AdminCust = () => {
                   <td>{tenantName(customer.tenantId)}</td>
                   <td className="text-center">{customer.biz}</td>
                   <td className="text-center">{customer.industry}</td>
+                  <td>{scopeBadges(customerWorkScopes(customer))}</td>
                   <td className="text-center"><Badge>{customer.type}</Badge></td>
                 </tr>
               ))}
@@ -1312,8 +1342,13 @@ const AdminCust = () => {
                 <div><label className="block text-xs text-slate-500">사업자번호</label><input className="w-full border rounded px-2 py-1" value={draft.biz || ""} onChange={e=>setDraft({...draft, biz:e.target.value})} /></div>
                 <div><label className="block text-xs text-slate-500">업종</label><input className="w-full border rounded px-2 py-1" value={draft.industry || ""} onChange={e=>setDraft({...draft, industry:e.target.value})} /></div>
               </div>
+              <div className="border rounded p-3 bg-slate-50">
+                <div className="text-xs font-semibold text-slate-600 mb-2">고객사 대상 업무</div>
+                {scopeChecklist(draft.workScopes || [], toggleDraftScope)}
+                <div className="text-[11px] text-slate-500 mt-2">사용자에게 부여할 수 있는 업무 권한의 상한입니다.</div>
+              </div>
               <div className="flex justify-end gap-2">
-                <Btn size="sm" variant="secondary" onClick={()=>setDraft({...selected})}>취소</Btn>
+                <Btn size="sm" variant="secondary" onClick={()=>setDraft({...selected, workScopes: customerWorkScopes(selected)})}>취소</Btn>
                 <Btn size="sm" onClick={saveCustomer}>저장</Btn>
               </div>
             </div>
@@ -1337,6 +1372,10 @@ const AdminCust = () => {
               <div><label className="block text-xs text-slate-500">사업자번호</label><input className="w-full border rounded px-2 py-1" value={newCustomer.biz} onChange={e=>setNewCustomer({...newCustomer, biz:e.target.value})}/></div>
               <div><label className="block text-xs text-slate-500">업종</label><input className="w-full border rounded px-2 py-1" value={newCustomer.industry} onChange={e=>setNewCustomer({...newCustomer, industry:e.target.value})}/></div>
               <div className="col-span-2"><label className="block text-xs text-slate-500">유형</label><select className="w-full border rounded px-2 py-1" value={newCustomer.type} onChange={e=>setNewCustomer({...newCustomer, type:e.target.value})}><option>GENERAL</option><option>FOREIGN</option><option>CONSOLIDATED</option></select></div>
+              <div className="col-span-2 border rounded p-3 bg-slate-50">
+                <div className="text-xs font-semibold text-slate-600 mb-2">고객사 대상 업무</div>
+                {scopeChecklist(newCustomer.workScopes || [], toggleNewScope)}
+              </div>
             </div>
             <div className="flex justify-end gap-2 mt-4">
               <Btn variant="secondary" size="sm" onClick={()=>setShowNew(false)}>취소</Btn>

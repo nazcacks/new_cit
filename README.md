@@ -74,6 +74,8 @@ Invoke-RestMethod -Method Post http://localhost:8080/api/admin/tenants/demo/user
   -Body '{"login_id":"tax01","password":"ChangeMe123!","user_name":"Tax User","roles":["TAX_EXPERT"],"customer_access":[{"customer_id":1,"access_level":"OWNER","work_scopes":["INFO","ADJUST","FORM"]}]}'
 ```
 
+The embedded Admin user screen now manages multiple customer access rows per user. Each row stores an access level plus `work_scopes`, and the selectable scopes are constrained by the target customer's own `work_scopes`.
+
 Update role permissions:
 
 ```powershell
@@ -95,7 +97,7 @@ Create a customer:
 ```powershell
 Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/customers `
   -ContentType "application/json" `
-  -Body '{"customer_code":"CUST001","customer_name":"서울테크 주식회사","biz_reg_no":"2208112345","corp_reg_no":"1101111234567","industry_code":"62010","is_sme":true}'
+  -Body '{"customer_code":"CUST001","customer_name":"서울테크 주식회사","biz_reg_no":"2208112345","corp_reg_no":"1101111234567","industry_code":"62010","is_sme":true,"work_scopes":["INFO","ADJUST","FORM","VALIDATE","PRINT"]}'
 ```
 
 Create a business year:
@@ -311,4 +313,21 @@ Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-y
 Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/adjustments/tax/B12 `
   -ContentType "application/json" `
   -Body '{"tax_base":500000000,"calculated_tax":70000000,"credits":[{"credit_type":"RND","base_amount":100000000,"rate_bps":2500}]}'
+```
+
+## Special Tax Adjustment API (2026-05-15)
+
+- Added B-16 foreign corporation and B-17 consolidated tax endpoints.
+- B-16 stores foreign-source income lines and calculates taxable income, attributable expense, PE allocation, and withholding tax totals.
+- B-17 stores consolidated entities plus eliminations and calculates the consolidated tax base.
+- The Admin user UI was also updated so tenant/customer/work-scope access can be edited per user, with user scopes limited to each customer's target work scopes.
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/adjustments/special/B16 `
+  -ContentType "application/json" `
+  -Body '{"foreign_incomes":[{"income_type":"INTEREST","gross_amount":100000000,"attributable_expense":20000000,"pe_allocation_bps":10000,"withholding_tax":5000000}]}'
+
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/adjustments/special/B17 `
+  -ContentType "application/json" `
+  -Body '{"consolidated_entities":[{"entity_code":"PARENT","entity_name":"Parent Co","ownership_bps":10000,"taxable_income":100000000},{"entity_code":"SUBA","entity_name":"Sub A","ownership_bps":10000,"taxable_income":200000000}],"eliminations":[{"elimination_type":"INTERCOMPANY_PROFIT","amount":50000000,"direction":"DEDUCT"}]}'
 ```

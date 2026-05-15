@@ -1038,3 +1038,27 @@
 - B-13은 일반 세액이 최저한세보다 낮은 경우 차액을 `ADD` 조정 항목으로 저장한다.
 - B-14는 감면율 적용 후 가산세를 `penalty_tax_items`와 조정 항목에 저장한다.
 - 최저한세 적용 케이스 5종 단위 테스트와 통합 테스트, JS 문법 검증, clippy를 통과한다.
+
+## 사용자-고객사 업무 권한 구현 보완 (2026-05-15)
+
+- 고객사 대상 업무는 테넌트 스키마의 `customers.work_scopes`로 관리한다.
+- 사용자별 고객사 접근은 `user_customer_access`, 사용자별 고객사 업무 권한은 `user_customer_work_scope`로 분리 저장한다.
+- 사용자 등록/수정 API는 요청된 `work_scope`가 고객사 대상 업무의 부분집합이 아니면 거부한다.
+- 운영 UI(`frontend/app.js`)의 사용자 관리 화면은 신규 등록과 편집 모두에서 다중 고객사를 선택하고, 고객사별 접근 등급/주담당/업무 권한을 저장한다.
+- 화면은 각 고객사의 대상 업무 목록을 보여주고, 대상 업무가 아닌 코드는 비활성화한다.
+
+### Phase 13 산출물 (2026-05-15 구현)
+
+- DB: 테넌트 스키마에 `foreign_income_items`, `consolidated_entities`, `consolidation_eliminations`를 추가.
+- API: `POST/GET /api/tenants/{tenant_code}/business-years/{by_id}/adjustments/special/{module_code}`로 B-16, B-17 계산/조회 구현.
+- 로직: B-16은 외국법인 국내원천 소득별 총수입, 귀속 비용, 고정사업장 배분율, 원천징수세액을 계산한다.
+- 로직: B-17은 연결 대상 법인 과세소득 합계에서 내부거래 제거 항목을 반영해 연결 과세표준을 산출한다.
+- 화면: 세무조정 메뉴에 외국법인, 연결납세 독립 화면을 연결.
+- 테스트: 통합 테스트에서 B-16 과세소득/원천징수 합계와 B-17 연결 과세표준을 검증한다.
+
+### Phase 13 완료 기준 확인
+
+- B-16 응답은 `foreign_income_count`, `withholding_tax_total`, 과세대상 소득 조정 항목을 반환한다.
+- B-17 응답은 연결 법인 수, 제거 항목 합계, 연결 과세표준을 반환한다.
+- B-16/B-17 입력 근거는 각 전용 테이블에 저장되고 결과는 공통 조정 항목에 저장된다.
+- JS 문법 검증, Rust 포맷/테스트, clippy, Docker API 빌드와 라이브 API 검증을 완료 대상으로 한다.

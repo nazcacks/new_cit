@@ -100,6 +100,8 @@ pub fn module_tree() -> Value {
                     submodule("adjustment.minimum-tax", "5.10", "최저한세", "/modules/adjustment/minimum-tax"),
                     submodule("adjustment.penalty-tax", "5.11", "가산세", "/modules/adjustment/penalty-tax"),
                     submodule("adjustment.capital-reserves", "5.12", "자본금과 적립금", "/modules/adjustment/capital-reserves"),
+                    submodule("adjustment.foreign-corporation", "5.13", "외국법인", "/modules/adjustment/foreign-corporation"),
+                    submodule("adjustment.consolidated-tax", "5.14", "연결납세", "/modules/adjustment/consolidated-tax"),
                 ],
             ),
             module(

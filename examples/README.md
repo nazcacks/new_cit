@@ -95,3 +95,33 @@ Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-y
   -ContentType "application/json" `
   -Body '{"tax_base":500000000,"calculated_tax":70000000,"credits":[{"credit_type":"RND","base_amount":100000000,"rate_bps":2500}]}'
 ```
+
+## 사용자-고객사 업무 권한 예시 (2026-05-15)
+
+- 고객사 생성 시 `work_scopes`로 그 고객사의 대상 업무를 지정한다.
+- 사용자 생성/수정 시 `customer_access[].work_scopes`는 해당 고객사의 `work_scopes` 안에서만 지정한다.
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/customers `
+  -ContentType "application/json" `
+  -Body '{"customer_code":"CUST_SCOPE","customer_name":"업무범위 고객사","biz_reg_no":"2208112345","is_sme":true,"work_scopes":["INFO","VALIDATE","APPROVE","POST"]}'
+
+Invoke-RestMethod -Method Post http://localhost:8080/api/admin/tenants/demo/users `
+  -ContentType "application/json" `
+  -Body '{"login_id":"review01","password":"ChangeMe123!","user_name":"검토 사용자","roles":["TAX_REVIEWER"],"customer_access":[{"customer_id":1,"access_level":"REVIEWER","is_primary":true,"work_scopes":["VALIDATE","APPROVE"]}]}'
+```
+
+## Phase 13 외국법인/연결 예시 (2026-05-15)
+
+- `POST /adjustments/special/B16`으로 외국법인 국내원천 소득을 계산한다.
+- `POST /adjustments/special/B17`로 연결 대상 법인과 내부거래 제거를 반영한다.
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/adjustments/special/B16 `
+  -ContentType "application/json" `
+  -Body '{"foreign_incomes":[{"income_type":"INTEREST","gross_amount":100000000,"attributable_expense":20000000,"pe_allocation_bps":10000,"withholding_tax":5000000}]}'
+
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/adjustments/special/B17 `
+  -ContentType "application/json" `
+  -Body '{"consolidated_entities":[{"entity_code":"PARENT","entity_name":"Parent Co","ownership_bps":10000,"taxable_income":100000000},{"entity_code":"SUBA","entity_name":"Sub A","ownership_bps":10000,"taxable_income":200000000},{"entity_code":"SUBB","entity_name":"Sub B","ownership_bps":10000,"taxable_income":300000000}],"eliminations":[{"elimination_type":"INTERCOMPANY_PROFIT","amount":50000000,"direction":"DEDUCT","description":"내부거래 이익 제거"}]}'
+```

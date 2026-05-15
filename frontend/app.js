@@ -7,6 +7,7 @@ const state = {
   efileJobId: "",
   activeLawPath: "/modules/law-versioning/laws",
   activeAdminPath: "/modules/admin/users",
+  selectedAdminLoginId: "",
   activeCustomerPath: "/modules/customer/profile",
   activeTaxDataPath: "/modules/tax-data/financial-statements",
   activeAdjustmentPath: "/modules/adjustment/income",
@@ -600,14 +601,14 @@ function badgeList(items, variant = "") {
     .join("")}</div>`;
 }
 
-function workScopeCheckboxes(prefix, selected = [], allowed = allWorkScopeCodes) {
+function workScopeCheckboxes(prefix, selected = [], allowed = allWorkScopeCodes, disabled = false) {
   return `<div class="scope-grid">${workScopeOptions
     .map(
       ([code, label]) => {
         const isAllowed = allowed.includes(code);
         return `
         <label>
-          <input name="${prefix}WorkScope" type="checkbox" value="${code}" ${selected.includes(code) && isAllowed ? "checked" : ""} ${isAllowed ? "" : "disabled"} />
+          <input name="${prefix}WorkScope" type="checkbox" value="${code}" data-scope-allowed="${isAllowed ? "true" : "false"}" ${selected.includes(code) && isAllowed ? "checked" : ""} ${isAllowed && !disabled ? "" : "disabled"} />
           ${escapeHtml(label)}${isAllowed ? "" : " (미대상)"}
         </label>
       `;
@@ -620,28 +621,165 @@ function checkedWorkScopes(prefix) {
   return [...document.querySelectorAll(`input[name="${prefix}WorkScope"]:checked:not(:disabled)`)].map((input) => input.value);
 }
 
+function defaultScopeSelection(allowed) {
+  const defaults = ["INFO", "ADJUST", "FORM", "VALIDATE", "PRINT"].filter((scope) =>
+    allowed.includes(scope),
+  );
+  return defaults.length ? defaults : allowed.slice(0, 1);
+}
+
+function roleCheckboxes(prefix, roles, selected = []) {
+  const selectedSet = new Set(selected);
+  return `<div class="role-grid">${roles
+    .map(
+      (role) => `
+        <label>
+          <input name="${prefix}Role" type="checkbox" value="${escapeHtml(role.role_code)}" ${selectedSet.has(role.role_code) ? "checked" : ""} />
+          ${escapeHtml(role.role_code)}
+        </label>
+      `,
+    )
+    .join("")}</div>`;
+}
+
+function checkedRoles(prefix) {
+  return [...document.querySelectorAll(`input[name="${prefix}Role"]:checked`)].map((input) => input.value);
+}
+
+function customerLabel(customer) {
+  if (!customer) {
+    return "-";
+  }
+  return `${customer.customer_code} · ${customer.customer_name}`;
+}
+
+function customerAccessEditor(prefix, customers, accessItems = []) {
+  if (!customers.length) {
+    return `<p class="form-help">등록된 고객사가 없어 고객사별 업무 권한을 지정할 수 없습니다.</p>`;
+  }
+
+  const accessByCustomer = new Map(
+    accessItems.map((item) => [Number(item.customer_id), item]),
+  );
+  const accessLevels = ["OWNER", "CO_WORKER", "REVIEWER", "ASSISTANT", "VIEWER", "BLOCKED"];
+
+  return `<div class="access-scope-list">${customers
+    .map((customer) => {
+      const customerId = Number(customer.customer_id);
+      const access = accessByCustomer.get(customerId);
+      const checked = Boolean(access);
+      const allowed = customerAllowedWorkScopes(customer);
+      const selected = (access?.work_scopes || []).filter((scope) => allowed.includes(scope));
+      const selectedScopes = selected.length ? selected : defaultScopeSelection(allowed);
+      const scopePrefix = `${prefix}${customerId}`;
+      return `
+        <section class="access-card ${checked ? "selected" : ""}" data-access-card="${prefix}" data-customer-id="${customerId}">
+          <label class="access-card-head">
+            <input name="${prefix}Customer" type="checkbox" value="${customerId}" ${checked ? "checked" : ""} />
+            <span>
+              <strong>${escapeHtml(customerLabel(customer))}</strong>
+              <small>대상 업무 ${allowed.length}개 · ${escapeHtml((customer.industry_code || customer.status || "-").toString())}</small>
+            </span>
+          </label>
+          <div class="access-card-body">
+            <div class="access-card-controls">
+              <label>접근 등급
+                <select name="${prefix}AccessLevel${customerId}" ${checked ? "" : "disabled"}>
+                  ${accessLevels
+                    .map(
+                      (level) =>
+                        `<option value="${level}" ${level === (access?.access_level || "VIEWER") ? "selected" : ""}>${level}</option>`,
+                    )
+                    .join("")}
+                </select>
+              </label>
+              <label class="inline-check">
+                <input name="${prefix}Primary${customerId}" type="checkbox" ${access?.is_primary ? "checked" : ""} ${checked ? "" : "disabled"} />
+                주담당
+              </label>
+            </div>
+            <p class="form-help">고객사 대상 업무: ${workScopeLabels(allowed).map(escapeHtml).join(", ")}</p>
+            ${workScopeCheckboxes(scopePrefix, selectedScopes, allowed, !checked)}
+          </div>
+        </section>
+      `;
+    })
+    .join("")}</div>`;
+}
+
+function wireCustomerAccessEditor(prefix) {
+  document.querySelectorAll(`input[name="${prefix}Customer"]`).forEach((checkbox) => {
+    const update = () => {
+      const card = checkbox.closest(".access-card");
+      if (!card) {
+        return;
+      }
+      card.classList.toggle("selected", checkbox.checked);
+      card.querySelectorAll("select, input[type='checkbox']").forEach((input) => {
+        if (input === checkbox) {
+          return;
+        }
+        const isScope = input.name?.endsWith("WorkScope");
+        input.disabled = !checkbox.checked || (isScope && input.dataset.scopeAllowed !== "true");
+      });
+    };
+    checkbox.addEventListener("change", update);
+    update();
+  });
+}
+
+function collectCustomerAccess(prefix) {
+  const access = [...document.querySelectorAll(`input[name="${prefix}Customer"]:checked`)].map((input) => {
+    const customerId = Number(input.value);
+    const scopePrefix = `${prefix}${customerId}`;
+    let scopes = checkedWorkScopes(scopePrefix);
+    if (!scopes.length) {
+      scopes = [...document.querySelectorAll(`input[name="${scopePrefix}WorkScope"][data-scope-allowed="true"]`)]
+        .map((scopeInput) => scopeInput.value)
+        .slice(0, 1);
+    }
+    return {
+      customer_id: customerId,
+      access_level: document.querySelector(`[name="${prefix}AccessLevel${customerId}"]`)?.value || "VIEWER",
+      is_primary: Boolean(document.querySelector(`[name="${prefix}Primary${customerId}"]`)?.checked),
+      work_scopes: scopes,
+    };
+  });
+
+  if (access.length && !access.some((item) => item.is_primary)) {
+    access[0].is_primary = true;
+  }
+  return access;
+}
+
 async function renderAdminUsersScreen() {
   const tenantCode = currentTenantCode();
-  el("adminScreenTitle").textContent = "사용자 / 테넌트 / 고객사 업무 권한";
+  el("adminScreenTitle").textContent = "사용자 / 테넌트 / 고객사별 업무 권한";
   const [users, roles, customers] = await Promise.all([
     request(`/api/admin/tenants/${tenantCode}/users`),
     request("/api/admin/roles"),
     optionalRequest(`/api/tenants/${tenantCode}/customers`, []),
   ]);
-  const roleOptions = roles
-    .map((role) => `<option value="${escapeHtml(role.role_code)}">${escapeHtml(role.role_code)}</option>`)
-    .join("");
-  const customerOptions = customers
-    .map(
-      (customer) =>
-        `<option value="${customer.customer_id}">${escapeHtml(customer.customer_code)} · ${escapeHtml(customer.customer_name)}</option>`,
-    )
-    .join("");
   const customerById = new Map(customers.map((customer) => [Number(customer.customer_id), customer]));
   const initialCustomer = customers[0] || null;
   const initialAllowedScopes = customerAllowedWorkScopes(initialCustomer);
-  const initialSelectedScopes = ["INFO", "ADJUST", "FORM"].filter((scope) =>
-    initialAllowedScopes.includes(scope),
+  const initialAccess = initialCustomer
+    ? [
+        {
+          customer_id: Number(initialCustomer.customer_id),
+          access_level: "OWNER",
+          is_primary: true,
+          work_scopes: defaultScopeSelection(initialAllowedScopes),
+        },
+      ]
+    : [];
+  if (users.length && !users.some((user) => user.login_id === state.selectedAdminLoginId)) {
+    state.selectedAdminLoginId = users[0].login_id;
+  }
+  const selectedUser = users.find((user) => user.login_id === state.selectedAdminLoginId) || null;
+  const customerTargetScopeCount = customers.reduce(
+    (sum, customer) => sum + customerAllowedWorkScopes(customer).length,
+    0,
   );
   const rows = users.length
     ? users
@@ -651,10 +789,11 @@ async function renderAdminUsersScreen() {
           const accessLabels = access.map((item) => {
             const customer = customerById.get(Number(item.customer_id));
             const allowed = customerAllowedWorkScopes(customer);
-            return `${item.customer_id}:${item.access_level} ${item.work_scopes?.length || 0}/${allowed.length}`;
+            const code = customer?.customer_code || item.customer_id;
+            return `${code}:${item.access_level} ${item.work_scopes?.length || 0}/${allowed.length}`;
           });
           return `
-            <tr>
+            <tr class="${user.login_id === state.selectedAdminLoginId ? "selected-row" : ""}">
               <td><strong>${escapeHtml(user.user_name)}</strong><br><span class="muted">${escapeHtml(user.login_id)} · ${escapeHtml(user.email || "-")}</span></td>
               <td>${escapeHtml(user.tenant_code)}</td>
               <td>${badgeList(user.roles)}</td>
@@ -662,7 +801,8 @@ async function renderAdminUsersScreen() {
               <td>${badgeList(workScopeLabels([...new Set(scopes)]))}</td>
               <td><span class="status-pill ${user.locked ? "dead_letter" : "active"}">${escapeHtml(user.locked ? "LOCKED" : user.status)}</span></td>
               <td class="table-actions">
-                <button class="secondary-btn compact" type="button" data-lock-user="${escapeHtml(user.login_id)}">잠금</button>
+                <button class="secondary-btn compact" type="button" data-edit-user="${escapeHtml(user.login_id)}">편집</button>
+                <button class="secondary-btn compact" type="button" data-status-user="${escapeHtml(user.login_id)}" data-lock-value="${user.locked ? "false" : "true"}">${user.locked ? "잠금 해제" : "잠금"}</button>
                 <button class="secondary-btn compact" type="button" data-reset-user="${escapeHtml(user.login_id)}">2FA 리셋</button>
               </td>
             </tr>
@@ -672,23 +812,20 @@ async function renderAdminUsersScreen() {
     : `<tr><td colspan="7">등록된 사용자가 없습니다.</td></tr>`;
 
   el("adminScreenBody").innerHTML = `
-    <div class="admin-layout">
+    <div class="admin-layout user-access-layout">
       <form id="adminUserCreateForm" class="admin-form">
         <h3>사용자 등록</h3>
         <label>로그인 ID<input id="adminLoginId" value="user${Date.now().toString(36).slice(-4)}" /></label>
         <label>이름<input id="adminUserName" value="신규 사용자" /></label>
         <label>이메일<input id="adminEmail" value="user@example.local" /></label>
         <label>초기 비밀번호<input id="adminPassword" type="password" value="ChangeMe123!" /></label>
-        <label>역할<select id="adminRole">${roleOptions}</select></label>
-        <label>고객사${customers.length ? `<select id="adminCustomerId">${customerOptions}</select>` : `<input id="adminCustomerId" type="number" placeholder="고객사 ID" />`}</label>
-        <label>접근 등급
-          <select id="adminAccessLevel">
-            <option>OWNER</option><option>CO_WORKER</option><option>REVIEWER</option><option>ASSISTANT</option><option>VIEWER</option><option>BLOCKED</option>
-          </select>
-        </label>
         <div>
-          <p class="form-help">고객사별 대상 업무</p>
-          <div id="adminCreateScopes">${workScopeCheckboxes("adminCreate", initialSelectedScopes, initialAllowedScopes)}</div>
+          <p class="form-help">역할</p>
+          ${roleCheckboxes("adminCreate", roles, roles.some((role) => role.role_code === "TAX_EXPERT") ? ["TAX_EXPERT"] : roles.slice(0, 1).map((role) => role.role_code))}
+        </div>
+        <div>
+          <p class="form-help">고객사별 접근 / 대상 업무</p>
+          ${customerAccessEditor("adminCreate", customers, initialAccess)}
         </div>
         <button class="primary-btn" type="submit">등록</button>
       </form>
@@ -697,7 +834,7 @@ async function renderAdminUsersScreen() {
           <label>테넌트<input value="${escapeHtml(tenantCode)}" readonly /></label>
           <label>사용자 수<input value="${users.length}" readonly /></label>
           <label>역할 수<input value="${roles.length}" readonly /></label>
-          <label>고객사 수<input value="${customers.length}" readonly /></label>
+          <label>고객사/업무<input value="${customers.length} / ${customerTargetScopeCount}" readonly /></label>
         </div>
         <div class="table-wrap">
           <table>
@@ -705,62 +842,107 @@ async function renderAdminUsersScreen() {
             <tbody>${rows}</tbody>
           </table>
         </div>
+        ${
+          selectedUser
+            ? `
+          <form id="adminUserEditForm" class="admin-edit-panel">
+            <div class="panel-subhead">
+              <div>
+                <p class="eyebrow">User Detail</p>
+                <h3>${escapeHtml(selectedUser.user_name)} 편집</h3>
+              </div>
+              <span class="status-pill ${selectedUser.locked ? "dead_letter" : "active"}">${escapeHtml(selectedUser.locked ? "LOCKED" : selectedUser.status)}</span>
+            </div>
+            <div class="form-grid two-col">
+              <label>로그인 ID<input id="editAdminLoginId" value="${escapeHtml(selectedUser.login_id)}" readonly /></label>
+              <label>이름<input id="editAdminUserName" value="${escapeHtml(selectedUser.user_name)}" /></label>
+              <label>이메일<input id="editAdminEmail" value="${escapeHtml(selectedUser.email || "")}" /></label>
+              <label>전화<input id="editAdminPhone" value="${escapeHtml(selectedUser.phone || "")}" /></label>
+            </div>
+            <label class="inline-check edit-security">
+              <input id="editAdminUse2fa" type="checkbox" ${selectedUser.use_2fa ? "checked" : ""} />
+              2FA 사용
+            </label>
+            <p class="form-help">역할</p>
+            ${roleCheckboxes("adminEdit", roles, selectedUser.roles || [])}
+            <p class="form-help">사용자는 소속 테넌트의 고객사만 선택할 수 있고, 사용자 업무 권한은 각 고객사의 대상 업무 안에서만 저장됩니다.</p>
+            ${customerAccessEditor("adminEdit", customers, selectedUser.customer_access || [])}
+            <div class="table-actions edit-actions">
+              <button class="primary-btn" type="submit">사용자 저장</button>
+              <button class="secondary-btn" type="button" data-status-user="${escapeHtml(selectedUser.login_id)}" data-lock-value="${selectedUser.locked ? "false" : "true"}">${selectedUser.locked ? "잠금 해제" : "사용자 잠금"}</button>
+              <button class="secondary-btn" type="button" data-reset-user="${escapeHtml(selectedUser.login_id)}">2FA 리셋</button>
+            </div>
+          </form>
+        `
+            : `<p class="screen-placeholder">편집할 사용자를 선택하세요.</p>`
+        }
       </div>
     </div>
   `;
 
-  const customerInput = el("adminCustomerId");
-  if (customerInput && customers.length) {
-    customerInput.addEventListener("change", () => {
-      const selectedCustomer = customerById.get(Number(customerInput.value));
-      const allowed = customerAllowedWorkScopes(selectedCustomer);
-      const current = checkedWorkScopes("adminCreate").filter((scope) => allowed.includes(scope));
-      const fallback = ["INFO", "ADJUST", "FORM"].filter((scope) => allowed.includes(scope));
-      el("adminCreateScopes").innerHTML = workScopeCheckboxes(
-        "adminCreate",
-        current.length ? current : fallback,
-        allowed,
-      );
-    });
-  }
+  wireCustomerAccessEditor("adminCreate");
+  wireCustomerAccessEditor("adminEdit");
 
   el("adminUserCreateForm").addEventListener("submit", async (event) => {
     event.preventDefault();
-    const customerId = Number(el("adminCustomerId").value || 0);
+    const selectedRoles = checkedRoles("adminCreate");
     const body = {
       login_id: el("adminLoginId").value.trim(),
       password: el("adminPassword").value,
       user_name: el("adminUserName").value.trim(),
       email: el("adminEmail").value.trim(),
       use_2fa: true,
-      roles: [el("adminRole").value],
-      customer_access: customerId
-        ? [
-            {
-              customer_id: customerId,
-              access_level: el("adminAccessLevel").value,
-              is_primary: true,
-              work_scopes: checkedWorkScopes("adminCreate"),
-            },
-          ]
-        : [],
+      roles: selectedRoles.length ? selectedRoles : undefined,
+      customer_access: collectCustomerAccess("adminCreate"),
     };
     const created = await request(`/api/admin/tenants/${tenantCode}/users`, {
       method: "POST",
       body: JSON.stringify(body),
     });
     log("사용자 등록 완료", created);
+    state.selectedAdminLoginId = created.login_id;
     await renderAdminUsersScreen();
   });
 
-  document.querySelectorAll("[data-lock-user]").forEach((button) => {
+  const editForm = el("adminUserEditForm");
+  if (editForm && selectedUser) {
+    editForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const selectedRoles = checkedRoles("adminEdit");
+      const updated = await request(`/api/admin/tenants/${tenantCode}/users/${selectedUser.login_id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          user_name: el("editAdminUserName").value.trim(),
+          email: el("editAdminEmail").value.trim(),
+          phone: el("editAdminPhone").value.trim(),
+          use_2fa: el("editAdminUse2fa").checked,
+          roles: selectedRoles.length ? selectedRoles : [],
+          customer_access: collectCustomerAccess("adminEdit"),
+        }),
+      });
+      log("사용자 편집 완료", updated);
+      state.selectedAdminLoginId = updated.login_id;
+      await renderAdminUsersScreen();
+    });
+  }
+
+  document.querySelectorAll("[data-edit-user]").forEach((button) => {
     button.addEventListener("click", async () => {
-      const loginId = button.dataset.lockUser;
+      state.selectedAdminLoginId = button.dataset.editUser;
+      await renderAdminUsersScreen();
+    });
+  });
+
+  document.querySelectorAll("[data-status-user]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const loginId = button.dataset.statusUser;
+      const locked = button.dataset.lockValue === "true";
       const updated = await request(`/api/admin/tenants/${tenantCode}/users/${loginId}/status`, {
         method: "POST",
-        body: JSON.stringify({ status: "LOCKED", locked: true }),
+        body: JSON.stringify({ status: locked ? "LOCKED" : "ACTIVE", locked }),
       });
-      log("사용자 잠금 완료", updated);
+      log(locked ? "사용자 잠금 완료" : "사용자 잠금 해제 완료", updated);
+      state.selectedAdminLoginId = updated.login_id;
       await renderAdminUsersScreen();
     });
   });
@@ -772,6 +954,7 @@ async function renderAdminUsersScreen() {
         body: "{}",
       });
       log("2FA 리셋 완료", updated);
+      state.selectedAdminLoginId = updated.login_id;
       await renderAdminUsersScreen();
     });
   });
@@ -1480,6 +1663,10 @@ async function renderAdjustmentScreen() {
     await renderTaxAmountAdjustmentScreen();
     return;
   }
+  if (specialTaxModuleForPath(state.activeAdjustmentPath)) {
+    await renderSpecialTaxAdjustmentScreen();
+    return;
+  }
   await renderAssetBasedAdjustmentScreen();
 }
 
@@ -1497,6 +1684,13 @@ function taxAmountModuleForPath(path) {
     "/modules/adjustment/tax-credits": ["B12", "B-12 세액공제·감면"],
     "/modules/adjustment/minimum-tax": ["B13", "B-13 최저한세"],
     "/modules/adjustment/penalty-tax": ["B14", "B-14 가산세"],
+  }[path];
+}
+
+function specialTaxModuleForPath(path) {
+  return {
+    "/modules/adjustment/foreign-corporation": ["B16", "B-16 외국법인"],
+    "/modules/adjustment/consolidated-tax": ["B17", "B-17 연결납세"],
   }[path];
 }
 
@@ -1881,6 +2075,106 @@ function collectTaxAmountPayload(moduleCode) {
         credit_type: el("creditType").value,
         base_amount: Number(el("creditBaseAmount").value || 0),
         rate_bps: Number(el("creditRateBps").value || 0),
+      },
+    ],
+  };
+}
+
+async function renderSpecialTaxAdjustmentScreen() {
+  const context = await loadTaxDataContext();
+  const [moduleCode, title] = specialTaxModuleForPath(state.activeAdjustmentPath);
+  el("adjustmentScreenTitle").textContent = title;
+  if (!context.byId) {
+    el("adjustmentScreenBody").innerHTML = taxDataYearSelector(context);
+    return;
+  }
+  const root = `/api/tenants/${context.tenantCode}/business-years/${context.byId}`;
+  const items = await optionalRequest(`${root}/adjustments/special/${moduleCode}`, []);
+  const itemRows = items.length
+    ? items
+        .map(
+          (item) => `
+            <tr>
+              <td>${escapeHtml(item.item_code)}<br><span class="muted">${escapeHtml(item.item_name)}</span></td>
+              <td>${money.format(item.amount)}</td>
+              <td>${escapeHtml(item.direction)}</td>
+            </tr>
+          `,
+        )
+        .join("")
+    : `<tr><td colspan="3">저장된 특수 세무조정 항목이 없습니다.</td></tr>`;
+  el("adjustmentScreenBody").innerHTML = `
+    ${taxDataYearSelector(context)}
+    <div class="law-layout">
+      <form id="specialTaxAdjustmentForm" class="law-form">
+        <h3>${escapeHtml(title)} 계산</h3>
+        ${specialTaxFormMarkup(moduleCode)}
+        <button class="primary-btn" type="submit">계산/저장</button>
+      </form>
+      <div class="law-table-panel">
+        <h3>특수 세무조정 결과</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>항목</th><th>금액</th><th>방향</th></tr></thead>
+            <tbody>${itemRows}</tbody>
+          </table>
+        </div>
+        <pre id="specialTaxAdjustmentResult" class="json-result">{}</pre>
+      </div>
+    </div>
+  `;
+  attachTaxDataYearSelector();
+  el("specialTaxAdjustmentForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const result = await request(`${root}/adjustments/special/${moduleCode}`, {
+      method: "POST",
+      body: JSON.stringify(collectSpecialTaxPayload(moduleCode)),
+    });
+    el("specialTaxAdjustmentResult").textContent = JSON.stringify(result, null, 2);
+    log(`${moduleCode} 특수 세무조정 완료`, { taxable_income: result.taxable_income });
+    await renderSpecialTaxAdjustmentScreen();
+  });
+}
+
+function specialTaxFormMarkup(moduleCode) {
+  if (moduleCode === "B17") {
+    return `
+      <label>모회사 과세소득<input id="conParentIncome" type="number" value="100000000" /></label>
+      <label>자회사 A 과세소득<input id="conSubAIncome" type="number" value="200000000" /></label>
+      <label>자회사 B 과세소득<input id="conSubBIncome" type="number" value="300000000" /></label>
+      <label>내부거래 제거액<input id="conElimination" type="number" value="50000000" /></label>
+    `;
+  }
+  return `
+    <label>소득 유형<input id="foreignIncomeType" value="INTEREST" /></label>
+    <label>국내원천 총수입<input id="foreignGrossAmount" type="number" value="100000000" /></label>
+    <label>귀속 비용<input id="foreignExpense" type="number" value="20000000" /></label>
+    <label>고정사업장 배분율(bps)<input id="foreignPeBps" type="number" value="10000" /></label>
+    <label>원천징수세액<input id="foreignWithholdingTax" type="number" value="5000000" /></label>
+  `;
+}
+
+function collectSpecialTaxPayload(moduleCode) {
+  if (moduleCode === "B17") {
+    return {
+      consolidated_entities: [
+        { entity_code: "PARENT", entity_name: "Parent Co", ownership_bps: 10000, taxable_income: Number(el("conParentIncome").value || 0) },
+        { entity_code: "SUBA", entity_name: "Sub A", ownership_bps: 10000, taxable_income: Number(el("conSubAIncome").value || 0) },
+        { entity_code: "SUBB", entity_name: "Sub B", ownership_bps: 10000, taxable_income: Number(el("conSubBIncome").value || 0) },
+      ],
+      eliminations: [
+        { elimination_type: "INTERCOMPANY_PROFIT", amount: Number(el("conElimination").value || 0), direction: "DEDUCT", description: "내부거래 이익 제거" },
+      ],
+    };
+  }
+  return {
+    foreign_incomes: [
+      {
+        income_type: el("foreignIncomeType").value,
+        gross_amount: Number(el("foreignGrossAmount").value || 0),
+        attributable_expense: Number(el("foreignExpense").value || 0),
+        pe_allocation_bps: Number(el("foreignPeBps").value || 0),
+        withholding_tax: Number(el("foreignWithholdingTax").value || 0),
       },
     ],
   };

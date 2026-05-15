@@ -142,6 +142,7 @@ async fn api_flow_persists_to_postgres_generates_efiling_and_handles_dlq() {
     assert_evaluation_carryforward_reserve_modules_work(&client, &base_url, &tenant_code, by_id)
         .await;
     assert_tax_amount_adjustment_modules_work(&client, &base_url, &tenant_code, by_id).await;
+    assert_special_tax_adjustment_modules_work(&client, &base_url, &tenant_code, by_id).await;
     assert_form_versioning_module_works(&client, &base_url, &tenant_code, by_id).await;
     assert_business_year_workflow_works(&client, &base_url, &tenant_code, by_id).await;
 
@@ -1252,6 +1253,65 @@ async fn assert_tax_amount_adjustment_modules_work(
     assert_eq!(penalty["determined_tax"], 5_000_000_i64);
 }
 
+async fn assert_special_tax_adjustment_modules_work(
+    client: &Client,
+    base_url: &str,
+    tenant_code: &str,
+    by_id: i64,
+) {
+    let root = format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}");
+    let foreign = post_json(
+        client,
+        &format!("{root}/adjustments/special/B16"),
+        json!({
+            "foreign_incomes": [
+                {
+                    "income_type": "INTEREST",
+                    "gross_amount": 100000000_i64,
+                    "attributable_expense": 20000000_i64,
+                    "pe_allocation_bps": 10000,
+                    "withholding_tax": 5000000_i64
+                },
+                {
+                    "income_type": "ROYALTY",
+                    "gross_amount": 50000000_i64,
+                    "attributable_expense": 10000000_i64,
+                    "pe_allocation_bps": 5000,
+                    "withholding_tax": 2000000_i64
+                }
+            ]
+        }),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(foreign["module_code"], "B16");
+    assert_eq!(foreign["taxable_income"], 100_000_000_i64);
+    assert_eq!(foreign["details"]["withholding_tax_total"], 7_000_000_i64);
+
+    let consolidated = post_json(
+        client,
+        &format!("{root}/adjustments/special/B17"),
+        json!({
+            "consolidated_entities": [
+                {"entity_code": "PARENT", "entity_name": "Parent", "ownership_bps": 10000, "taxable_income": 100000000_i64},
+                {"entity_code": "SUBA", "entity_name": "Sub A", "ownership_bps": 10000, "taxable_income": 200000000_i64},
+                {"entity_code": "SUBB", "entity_name": "Sub B", "ownership_bps": 10000, "taxable_income": 300000000_i64}
+            ],
+            "eliminations": [
+                {"elimination_type": "INTERCOMPANY_PROFIT", "amount": 50000000_i64, "direction": "DEDUCT", "description": "intercompany profit"}
+            ]
+        }),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(consolidated["module_code"], "B17");
+    assert_eq!(consolidated["details"]["entity_count"], 3);
+    assert_eq!(
+        consolidated["details"]["consolidated_tax_base"],
+        550_000_000_i64
+    );
+}
+
 async fn assert_form_versioning_module_works(
     client: &Client,
     base_url: &str,
@@ -1405,7 +1465,7 @@ fn assert_module_tree_matches_design(tree: &Value) {
     assert_eq!(modules.len(), 9);
     assert_eq!(
         modules.iter().map(child_count).sum::<usize>(),
-        48,
+        50,
         "detailed module count including law-versioning menus"
     );
 
@@ -1485,6 +1545,8 @@ fn assert_module_tree_matches_design(tree: &Value) {
             "5.10 최저한세",
             "5.11 가산세",
             "5.12 자본금과 적립금",
+            "5.13 외국법인",
+            "5.14 연결납세",
         ],
     );
     assert_children(

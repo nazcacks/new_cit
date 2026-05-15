@@ -730,6 +730,52 @@ pub struct TaxAmountAdjustmentResult {
     pub details: Value,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct ForeignIncomeInput {
+    pub income_type: String,
+    pub gross_amount: i64,
+    pub attributable_expense: Option<i64>,
+    pub pe_allocation_bps: Option<i64>,
+    pub withholding_tax: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConsolidatedEntityInput {
+    pub entity_code: String,
+    pub entity_name: String,
+    pub ownership_bps: i64,
+    pub taxable_income: i64,
+    pub standalone_tax: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConsolidationEliminationInput {
+    pub elimination_type: String,
+    pub amount: i64,
+    pub direction: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SpecialTaxAdjustmentRequest {
+    pub foreign_incomes: Option<Vec<ForeignIncomeInput>>,
+    pub consolidated_entities: Option<Vec<ConsolidatedEntityInput>>,
+    pub eliminations: Option<Vec<ConsolidationEliminationInput>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SpecialTaxAdjustmentResult {
+    pub module_code: String,
+    pub addbacks: i64,
+    pub deductions: i64,
+    pub taxable_income: i64,
+    pub calculated_tax: i64,
+    pub snapshot_id: i64,
+    pub law_banner: Value,
+    pub items: Vec<AdjustmentItem>,
+    pub details: Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalculationResult {
     pub accounting_income: i64,
