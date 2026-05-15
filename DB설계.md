@@ -1493,3 +1493,11 @@ FOR EACH ROW EXECUTE FUNCTION fn_audit_trigger();
 - `loan_interest_facts`는 B-9 지급이자 계산용 가지급금 적수/평균잔액, 가중평균 이자율, 인정이자 계산액을 저장한다.
 - B-2/B-3/B-9 결과는 공통 `adjustment_items`와 `tax_adjustments`에 `source_module`(`B2`, `B3`, `B9`)로 저장한다.
 - 법령 버전별 한도율은 `tax_limits`의 `DONATION_*`, `ENTERTAINMENT_*`, `INTEREST_DEEMED_RATE_BPS` 항목으로 관리한다.
+
+## Phase 11 평가·이월·유보 DB 보완 (2026-05-15)
+
+- `valuation_positions`는 B-7/B-8 평가대상, 평가방법, 장부금액, 세법평가액, 조정금액을 저장한다.
+- `carryforward_loss`는 사용액(`used_amount`), 만료액(`expired_amount`), 갱신시각(`updated_at`)을 포함해 결손금 잔액을 연도별로 관리한다.
+- `capital_changes`는 B-15 자본금 변동일, 변동유형, 금액, 설명을 사업연도별로 저장한다.
+- B-15 집계는 `reserves`의 모든 모듈 유보를 `source_module + reserve_code + direction` 기준으로 합산한다.
+- 이월결손금 공제한도율은 `tax_limits(LOSS_DEDUCTION_LIMIT_BPS_SME|GENERAL)`로 법령 버전별 관리한다.

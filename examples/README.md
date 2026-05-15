@@ -71,3 +71,15 @@ Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-y
   -ContentType "application/json" `
   -Body '{"taxable_income_before_donation":500000000}'
 ```
+
+## Phase 11 평가·이월·유보 예시 (2026-05-15)
+
+- `POST /adjustments/evaluation/B7`과 `B8`로 평가 포지션별 조정과 유보를 계산한다.
+- `POST /adjustments/evaluation/B11`로 이월결손금 공제와 만료 알림을 확인한다.
+- `POST /adjustments/evaluation/B15`로 자본 변동을 저장하고 전체 유보를 집계한다.
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/adjustments/evaluation/B11 `
+  -ContentType "application/json" `
+  -Body '{"taxable_income_before_loss":300000000,"loss_carryforwards":[{"origin_year":2025,"original_amount":400000000,"remaining_amount":400000000,"expires_year":2026}]}'
+```

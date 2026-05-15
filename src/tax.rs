@@ -6,13 +6,15 @@ use crate::{
     db::quote_ident,
     domain::{
         AdjustmentItem, AssetBasedAdjustmentRequest, AssetBasedAdjustmentResult,
-        CalculateAdjustmentRequest, CalculationResult, CreateIncomeAdjustmentRequest,
-        CreateLawAmendmentRequest, CreateTaxLawRequest, CreateTaxLimitRequest,
-        CreateTaxRateRequest, CreateVehicleUsageLogRequest, DonationCarryforward, FormData,
+        CalculateAdjustmentRequest, CalculationResult, CapitalChange, CapitalChangeInput,
+        CreateIncomeAdjustmentRequest, CreateLawAmendmentRequest, CreateTaxLawRequest,
+        CreateTaxLimitRequest, CreateTaxRateRequest, CreateVehicleUsageLogRequest,
+        DonationCarryforward, EvaluationAdjustmentRequest, EvaluationAdjustmentResult, FormData,
         IncomeAdjustmentItemInput, IncomeAdjustmentResult, LawAmendmentHistory, LawSnapshot,
-        LawVersioningImpactRequest, ReserveRecord, RevenueBreakdownInput, TaxAdjustment,
-        TaxLawVersion, TaxLimit, TaxRate, TenantRef, TransactionBasedAdjustmentRequest,
-        TransactionBasedAdjustmentResult, UpdateTaxLawStatusRequest, VehicleUsageLog,
+        LawVersioningImpactRequest, LossCarryforwardInput, LossCarryforwardRecord, ReserveRecord,
+        RevenueBreakdownInput, TaxAdjustment, TaxLawVersion, TaxLimit, TaxRate, TenantRef,
+        TransactionBasedAdjustmentRequest, TransactionBasedAdjustmentResult,
+        UpdateTaxLawStatusRequest, ValuationPositionInput, VehicleUsageLog,
     },
     tenant,
 };
@@ -1036,6 +1038,128 @@ pub async fn calculate_transaction_based_adjustment(
     })
 }
 
+pub async fn calculate_evaluation_adjustment(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    module_code: &str,
+    request: EvaluationAdjustmentRequest,
+) -> Result<EvaluationAdjustmentResult> {
+    let by = tenant::get_business_year(pool, tenant, by_id).await?;
+    let snapshot = ensure_law_snapshot(pool, tenant, by_id).await?;
+    let module_code = normalize_evaluation_module(module_code)?;
+    let law_banner = json!({
+        "snapshot_id": snapshot.snapshot_id,
+        "locked": snapshot.locked,
+        "law": snapshot.snapshot_data.get("law").cloned().unwrap_or_else(|| json!({}))
+    });
+
+    clear_evaluation_adjustment(pool, tenant, by_id, &module_code).await?;
+    let (items, details) = match module_code.as_str() {
+        "B7" => {
+            valuation_adjustment_items(
+                pool,
+                tenant,
+                by_id,
+                "B7",
+                request.positions.unwrap_or_default(),
+            )
+            .await?
+        }
+        "B8" => {
+            valuation_adjustment_items(
+                pool,
+                tenant,
+                by_id,
+                "B8",
+                request.positions.unwrap_or_default(),
+            )
+            .await?
+        }
+        "B11" => {
+            loss_carryforward_items(pool, tenant, &by, snapshot.law_version_id, request).await?
+        }
+        "B15" => capital_reserve_items(pool, tenant, by_id, request.capital_changes).await?,
+        _ => return Err(anyhow!("invalid evaluation adjustment module")),
+    };
+    let addbacks = items
+        .iter()
+        .filter(|item| item.direction == "ADD")
+        .map(|item| item.amount)
+        .sum();
+    let deductions = items
+        .iter()
+        .filter(|item| item.direction == "DEDUCT")
+        .map(|item| item.amount)
+        .sum();
+    let summary_amount = if module_code == "B15" {
+        details
+            .get("reserve_total")
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+    } else {
+        addbacks - deductions
+    };
+    let summary_id = insert_tax_adjustment(
+        pool,
+        tenant,
+        by_id,
+        NewAdjustment {
+            category: "EVALUATION_ADJUSTMENT",
+            code: match module_code.as_str() {
+                "B7" => "B7_FX_VALUATION_SUMMARY",
+                "B8" => "B8_ASSET_VALUATION_SUMMARY",
+                "B11" => "B11_LOSS_CARRYFORWARD_SUMMARY",
+                "B15" => "B15_CAPITAL_RESERVE_SUMMARY",
+                _ => "EVALUATION_SUMMARY",
+            },
+            amount: summary_amount,
+            direction: "INFO",
+            description: "Evaluation and carryforward adjustment",
+            snapshot_id: snapshot.snapshot_id,
+            metadata: json!({
+                "module": module_code,
+                "law_banner": law_banner,
+                "details": details
+            }),
+        },
+    )
+    .await?;
+
+    let mut saved_items = Vec::new();
+    let mut reserves_created = Vec::new();
+    for item in &items {
+        let saved =
+            insert_adjustment_item(pool, tenant, by_id, summary_id, &module_code, item).await?;
+        if item.disposition == "RESERVE" && item.amount > 0 {
+            reserves_created.push(
+                insert_reserve(
+                    pool,
+                    tenant,
+                    by_id,
+                    summary_id,
+                    &module_code,
+                    item,
+                    by.year_label + 1,
+                )
+                .await?,
+            );
+        }
+        saved_items.push(saved);
+    }
+
+    Ok(EvaluationAdjustmentResult {
+        module_code,
+        addbacks,
+        deductions,
+        snapshot_id: snapshot.snapshot_id,
+        law_banner,
+        items: saved_items,
+        reserves_created,
+        details,
+    })
+}
+
 pub async fn calculate_adjustments(
     pool: &PgPool,
     tenant: &TenantRef,
@@ -1278,8 +1402,24 @@ fn normalize_transaction_module(module_code: &str) -> Result<String> {
     }
 }
 
+fn normalize_evaluation_module(module_code: &str) -> Result<String> {
+    let normalized = module_code
+        .trim()
+        .to_ascii_uppercase()
+        .replace(['-', '_'], "");
+    match normalized.as_str() {
+        "B7" | "FOREIGNCURRENCY" | "FXVALUATION" => Ok("B7".to_string()),
+        "B8" | "INVENTORY" | "SECURITIES" | "VALUATION" => Ok("B8".to_string()),
+        "B11" | "LOSSCARRYFORWARD" | "CARRYFORWARDLOSS" => Ok("B11".to_string()),
+        "B15" | "CAPITALRESERVE" | "RESERVESCHEDULE" => Ok("B15".to_string()),
+        _ => Err(anyhow!("invalid evaluation adjustment module")),
+    }
+}
+
 fn normalize_any_adjustment_module(module_code: &str) -> Result<String> {
-    normalize_asset_module(module_code).or_else(|_| normalize_transaction_module(module_code))
+    normalize_asset_module(module_code)
+        .or_else(|_| normalize_transaction_module(module_code))
+        .or_else(|_| normalize_evaluation_module(module_code))
 }
 
 async fn depreciation_items(
@@ -1494,6 +1634,15 @@ struct NewDonationCarryforward<'a> {
     amount: i64,
     expires_year: i32,
     adjustment_item_id: Option<i64>,
+}
+
+struct NewValuationPosition<'a> {
+    by_id: i64,
+    module_code: &'a str,
+    input: &'a ValuationPositionInput,
+    valuation_method: &'a str,
+    tax_amount: i64,
+    adjustment_amount: i64,
 }
 
 async fn donation_adjustment_items(
@@ -1818,6 +1967,237 @@ async fn interest_adjustment_items(
     ))
 }
 
+async fn valuation_adjustment_items(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    module_code: &str,
+    positions: Vec<ValuationPositionInput>,
+) -> Result<(Vec<PreparedIncomeItem>, Value)> {
+    let mut items = Vec::new();
+    let mut details = Vec::new();
+    for input in positions {
+        let item_code = input.item_code.trim().to_ascii_uppercase();
+        if item_code.is_empty() || input.item_name.trim().is_empty() {
+            return Err(anyhow!("invalid valuation position"));
+        }
+        let monetary = input.monetary.unwrap_or(true);
+        let method = input
+            .valuation_method
+            .clone()
+            .unwrap_or_else(|| {
+                if module_code == "B7" && monetary {
+                    "CLOSING_RATE".to_string()
+                } else {
+                    "BOOK_METHOD".to_string()
+                }
+            })
+            .trim()
+            .to_ascii_uppercase();
+        let tax_amount = input.tax_amount.unwrap_or_else(|| {
+            let foreign_amount = input.foreign_amount.unwrap_or(0.0);
+            let rate = if method.contains("CLOSING") {
+                input.closing_rate.or(input.book_rate).unwrap_or(1.0)
+            } else {
+                input.book_rate.or(input.closing_rate).unwrap_or(1.0)
+            };
+            (foreign_amount * rate).round() as i64
+        });
+        let adjustment = input.book_amount - tax_amount;
+        insert_valuation_position(
+            pool,
+            tenant,
+            NewValuationPosition {
+                by_id,
+                module_code,
+                input: &input,
+                valuation_method: &method,
+                tax_amount,
+                adjustment_amount: adjustment,
+            },
+        )
+        .await?;
+        details.push(json!({
+            "item_code": item_code,
+            "item_name": input.item_name,
+            "position_type": input.position_type.clone().unwrap_or_else(|| "GENERAL".to_string()),
+            "monetary": monetary,
+            "valuation_method": method,
+            "book_amount": input.book_amount,
+            "tax_amount": tax_amount,
+            "adjustment_amount": adjustment
+        }));
+        if adjustment != 0 {
+            let direction = if adjustment > 0 { "ADD" } else { "DEDUCT" };
+            items.push(PreparedIncomeItem {
+                section: if direction == "ADD" {
+                    "LOSS_DISALLOWANCE"
+                } else {
+                    "LOSS_INCLUSION"
+                }
+                .to_string(),
+                item_code: format!("{module_code}_{item_code}"),
+                item_name: input.item_name,
+                amount: adjustment.abs(),
+                direction: direction.to_string(),
+                disposition: "RESERVE".to_string(),
+                law_ref: Some("CIT valuation rule".to_string()),
+                metadata: json!({
+                    "valuation_method": method,
+                    "monetary": monetary,
+                    "tax_amount": tax_amount
+                }),
+            });
+        }
+    }
+    Ok((
+        items,
+        json!({
+            "module": module_code,
+            "position_count": details.len(),
+            "positions": details
+        }),
+    ))
+}
+
+async fn loss_carryforward_items(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by: &crate::domain::BusinessYear,
+    law_version_id: i64,
+    request: EvaluationAdjustmentRequest,
+) -> Result<(Vec<PreparedIncomeItem>, Value)> {
+    if let Some(losses) = request.loss_carryforwards {
+        upsert_loss_carryforwards(pool, tenant, by.customer_id, &losses, by.year_label).await?;
+    }
+    expire_loss_carryforwards(pool, tenant, by.customer_id, by.year_label).await?;
+    let taxable_income = match request.taxable_income_before_loss {
+        Some(value) => value.max(0),
+        None => resolve_accounting_income(pool, tenant, by.by_id)
+            .await?
+            .max(0),
+    };
+    let is_sme = load_customer_is_sme(pool, tenant, by.customer_id).await?;
+    let limit_code = if is_sme {
+        "LOSS_DEDUCTION_LIMIT_BPS_SME"
+    } else {
+        "LOSS_DEDUCTION_LIMIT_BPS_GENERAL"
+    };
+    let limit_bps = tax_limit_amount(
+        pool,
+        law_version_id,
+        limit_code,
+        if is_sme { 10_000 } else { 8_000 },
+    )
+    .await?;
+    let deduction_limit = amount_by_bps(taxable_income, limit_bps);
+    let (deducted, allocations) =
+        allocate_loss_carryforwards(pool, tenant, by.customer_id, by.year_label, deduction_limit)
+            .await?;
+    let current_losses = list_loss_carryforwards(pool, tenant, by.customer_id).await?;
+    let expiration_alerts = current_losses
+        .iter()
+        .filter(|loss| loss.remaining_amount > 0 && loss.expires_year <= by.year_label + 1)
+        .map(|loss| {
+            json!({
+                "origin_year": loss.origin_year,
+                "remaining_amount": loss.remaining_amount,
+                "expires_year": loss.expires_year
+            })
+        })
+        .collect::<Vec<_>>();
+    let items = if deducted > 0 {
+        vec![PreparedIncomeItem {
+            section: "LOSS_INCLUSION".to_string(),
+            item_code: "B11_LOSS_CARRYFORWARD_DEDUCTION".to_string(),
+            item_name: "Loss carryforward deduction".to_string(),
+            amount: deducted,
+            direction: "DEDUCT".to_string(),
+            disposition: "OTHER".to_string(),
+            law_ref: Some("CIT loss carryforward rule".to_string()),
+            metadata: json!({ "allocations": allocations }),
+        }]
+    } else {
+        Vec::new()
+    };
+    Ok((
+        items,
+        json!({
+            "taxable_income_before_loss": taxable_income,
+            "is_sme": is_sme,
+            "limit_bps": limit_bps,
+            "deduction_limit": deduction_limit,
+            "deducted": deducted,
+            "allocations": allocations,
+            "losses": current_losses,
+            "expiration_alerts": expiration_alerts
+        }),
+    ))
+}
+
+async fn capital_reserve_items(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    capital_changes: Option<Vec<CapitalChangeInput>>,
+) -> Result<(Vec<PreparedIncomeItem>, Value)> {
+    if let Some(changes) = capital_changes {
+        replace_capital_changes(pool, tenant, by_id, &changes).await?;
+    }
+    let changes = list_capital_changes(pool, tenant, by_id).await?;
+    let reserve_rows = aggregate_reserves(pool, tenant, by_id).await?;
+    let reserve_total = reserve_rows
+        .iter()
+        .map(|row| row.get("amount").and_then(Value::as_i64).unwrap_or(0))
+        .sum::<i64>();
+    let mut items = reserve_rows
+        .iter()
+        .map(|row| PreparedIncomeItem {
+            section: "CAPITAL_RESERVE_SCHEDULE".to_string(),
+            item_code: format!(
+                "B15_{}",
+                row.get("reserve_code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("RESERVE")
+            ),
+            item_name: format!(
+                "{} reserve rollforward",
+                row.get("source_module")
+                    .and_then(Value::as_str)
+                    .unwrap_or("MODULE")
+            ),
+            amount: row.get("amount").and_then(Value::as_i64).unwrap_or(0),
+            direction: "INFO".to_string(),
+            disposition: "INTERNAL".to_string(),
+            law_ref: Some("Capital and reserve schedule".to_string()),
+            metadata: row.clone(),
+        })
+        .collect::<Vec<_>>();
+    for change in &changes {
+        items.push(PreparedIncomeItem {
+            section: "CAPITAL_CHANGE".to_string(),
+            item_code: format!("B15_CAPITAL_{}", change.capital_change_id),
+            item_name: change.change_type.clone(),
+            amount: change.amount,
+            direction: "INFO".to_string(),
+            disposition: "INTERNAL".to_string(),
+            law_ref: Some("Capital change".to_string()),
+            metadata: json!({
+                "change_date": change.change_date,
+                "description": change.description
+            }),
+        });
+    }
+    Ok((
+        items,
+        json!({
+            "reserve_total": reserve_total,
+            "reserves": reserve_rows,
+            "capital_changes": changes
+        }),
+    ))
+}
+
 async fn resolve_accounting_income(pool: &PgPool, tenant: &TenantRef, by_id: i64) -> Result<i64> {
     let schema = quote_ident(&tenant.schema_name)?;
     let sql = format!(
@@ -1911,6 +2291,26 @@ async fn clear_transaction_adjustment(
         let schema = quote_ident(&tenant.schema_name)?;
         let sql = format!("DELETE FROM {schema}.donation_carryforwards WHERE by_id = $1");
         sqlx::query(&sql).bind(by_id).execute(pool).await?;
+    }
+    Ok(())
+}
+
+async fn clear_evaluation_adjustment(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    module_code: &str,
+) -> Result<()> {
+    clear_module_adjustment(pool, tenant, by_id, module_code).await?;
+    if matches!(module_code, "B7" | "B8") {
+        let schema = quote_ident(&tenant.schema_name)?;
+        sqlx::query(&format!(
+            "DELETE FROM {schema}.valuation_positions WHERE by_id = $1 AND module_code = $2"
+        ))
+        .bind(by_id)
+        .bind(module_code)
+        .execute(pool)
+        .await?;
     }
     Ok(())
 }
@@ -2255,6 +2655,288 @@ async fn insert_loan_interest_fact(
         .await
         .context("failed to insert loan interest fact")?;
     Ok(())
+}
+
+async fn insert_valuation_position(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    new_position: NewValuationPosition<'_>,
+) -> Result<()> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let input = new_position.input;
+    let sql = format!(
+        r#"
+        INSERT INTO {schema}.valuation_positions (
+            by_id, module_code, item_code, item_name, position_type, monetary,
+            valuation_method, book_amount, tax_amount, adjustment_amount, metadata
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        "#
+    );
+    sqlx::query(&sql)
+        .bind(new_position.by_id)
+        .bind(new_position.module_code)
+        .bind(input.item_code.trim().to_ascii_uppercase())
+        .bind(input.item_name.trim())
+        .bind(input.position_type.as_deref().unwrap_or("GENERAL"))
+        .bind(input.monetary.unwrap_or(true))
+        .bind(new_position.valuation_method)
+        .bind(input.book_amount)
+        .bind(new_position.tax_amount)
+        .bind(new_position.adjustment_amount)
+        .bind(json!({
+            "foreign_amount": input.foreign_amount,
+            "book_rate": input.book_rate,
+            "closing_rate": input.closing_rate
+        }))
+        .execute(pool)
+        .await
+        .context("failed to insert valuation position")?;
+    Ok(())
+}
+
+async fn upsert_loss_carryforwards(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    customer_id: i64,
+    losses: &[LossCarryforwardInput],
+    current_year: i32,
+) -> Result<()> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        INSERT INTO {schema}.carryforward_loss (
+            customer_id, origin_year, original_amount, remaining_amount, expires_year
+        )
+        VALUES ($1, $2, $3, $4, $5)
+        "#
+    );
+    for loss in losses {
+        let original = loss.original_amount.max(0);
+        let remaining = loss.remaining_amount.unwrap_or(original).max(0);
+        let expires_year = loss.expires_year.unwrap_or(loss.origin_year + 15);
+        if original == 0 || loss.origin_year > current_year {
+            continue;
+        }
+        sqlx::query(&sql)
+            .bind(customer_id)
+            .bind(loss.origin_year)
+            .bind(original)
+            .bind(remaining.min(original))
+            .bind(expires_year)
+            .execute(pool)
+            .await
+            .context("failed to insert loss carryforward")?;
+    }
+    Ok(())
+}
+
+async fn expire_loss_carryforwards(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    customer_id: i64,
+    year_label: i32,
+) -> Result<()> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        UPDATE {schema}.carryforward_loss
+        SET expired_amount = expired_amount + remaining_amount,
+            remaining_amount = 0,
+            updated_at = NOW()
+        WHERE customer_id = $1
+          AND expires_year < $2
+          AND remaining_amount > 0
+        "#
+    );
+    sqlx::query(&sql)
+        .bind(customer_id)
+        .bind(year_label)
+        .execute(pool)
+        .await
+        .context("failed to expire loss carryforwards")?;
+    Ok(())
+}
+
+async fn allocate_loss_carryforwards(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    customer_id: i64,
+    year_label: i32,
+    deduction_limit: i64,
+) -> Result<(i64, Vec<Value>)> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let rows = sqlx::query(&format!(
+        r#"
+        SELECT loss_id, origin_year, remaining_amount, expires_year
+        FROM {schema}.carryforward_loss
+        WHERE customer_id = $1
+          AND origin_year < $2
+          AND expires_year >= $2
+          AND remaining_amount > 0
+        ORDER BY expires_year, origin_year, loss_id
+        "#
+    ))
+    .bind(customer_id)
+    .bind(year_label)
+    .fetch_all(pool)
+    .await
+    .context("failed to load loss carryforwards")?;
+    let mut remaining_limit = deduction_limit.max(0);
+    let mut used_total = 0;
+    let mut allocations = Vec::new();
+    for row in rows {
+        if remaining_limit <= 0 {
+            break;
+        }
+        let loss_id = row.get::<i64, _>("loss_id");
+        let origin_year = row.get::<i32, _>("origin_year");
+        let remaining_amount = row.get::<i64, _>("remaining_amount");
+        let expires_year = row.get::<i32, _>("expires_year");
+        let used = remaining_amount.min(remaining_limit);
+        sqlx::query(&format!(
+            r#"
+            UPDATE {schema}.carryforward_loss
+            SET used_amount = used_amount + $1,
+                remaining_amount = remaining_amount - $1,
+                updated_at = NOW()
+            WHERE loss_id = $2
+            "#
+        ))
+        .bind(used)
+        .bind(loss_id)
+        .execute(pool)
+        .await
+        .context("failed to allocate loss carryforward")?;
+        remaining_limit -= used;
+        used_total += used;
+        allocations.push(json!({
+            "loss_id": loss_id,
+            "origin_year": origin_year,
+            "used": used,
+            "expires_year": expires_year
+        }));
+    }
+    Ok((used_total, allocations))
+}
+
+async fn list_loss_carryforwards(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    customer_id: i64,
+) -> Result<Vec<LossCarryforwardRecord>> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    sqlx::query_as::<_, LossCarryforwardRecord>(&format!(
+        r#"
+        SELECT loss_id, customer_id, origin_year, original_amount, used_amount,
+               expired_amount, remaining_amount, expires_year, created_at, updated_at
+        FROM {schema}.carryforward_loss
+        WHERE customer_id = $1
+        ORDER BY expires_year, origin_year, loss_id
+        "#
+    ))
+    .bind(customer_id)
+    .fetch_all(pool)
+    .await
+    .context("failed to list loss carryforwards")
+}
+
+async fn load_customer_is_sme(pool: &PgPool, tenant: &TenantRef, customer_id: i64) -> Result<bool> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    sqlx::query_scalar::<_, bool>(&format!(
+        "SELECT is_sme FROM {schema}.customers WHERE customer_id = $1"
+    ))
+    .bind(customer_id)
+    .fetch_one(pool)
+    .await
+    .context("failed to load customer SME flag")
+}
+
+async fn replace_capital_changes(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    changes: &[CapitalChangeInput],
+) -> Result<()> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    sqlx::query(&format!(
+        "DELETE FROM {schema}.capital_changes WHERE by_id = $1"
+    ))
+    .bind(by_id)
+    .execute(pool)
+    .await?;
+    let sql = format!(
+        r#"
+        INSERT INTO {schema}.capital_changes (
+            by_id, change_date, change_type, amount, description
+        )
+        VALUES ($1, $2, $3, $4, $5)
+        "#
+    );
+    for change in changes.iter().filter(|change| change.amount != 0) {
+        sqlx::query(&sql)
+            .bind(by_id)
+            .bind(change.change_date)
+            .bind(change.change_type.trim().to_ascii_uppercase())
+            .bind(change.amount)
+            .bind(change.description.as_deref())
+            .execute(pool)
+            .await
+            .context("failed to insert capital change")?;
+    }
+    Ok(())
+}
+
+async fn list_capital_changes(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+) -> Result<Vec<CapitalChange>> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    sqlx::query_as::<_, CapitalChange>(&format!(
+        r#"
+        SELECT capital_change_id, by_id, change_date, change_type, amount, description, created_at
+        FROM {schema}.capital_changes
+        WHERE by_id = $1
+        ORDER BY change_date, capital_change_id
+        "#
+    ))
+    .bind(by_id)
+    .fetch_all(pool)
+    .await
+    .context("failed to list capital changes")
+}
+
+async fn aggregate_reserves(pool: &PgPool, tenant: &TenantRef, by_id: i64) -> Result<Vec<Value>> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let rows = sqlx::query(&format!(
+        r#"
+        SELECT source_module, reserve_code, direction,
+               COALESCE(SUM(amount), 0)::BIGINT AS amount,
+               MAX(carryforward_to) AS carryforward_to
+        FROM {schema}.reserves
+        WHERE by_id = $1
+          AND source_module <> 'B15'
+        GROUP BY source_module, reserve_code, direction
+        ORDER BY source_module, reserve_code
+        "#
+    ))
+    .bind(by_id)
+    .fetch_all(pool)
+    .await
+    .context("failed to aggregate reserves")?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            json!({
+                "source_module": row.get::<String, _>("source_module"),
+                "reserve_code": row.get::<String, _>("reserve_code"),
+                "direction": row.get::<String, _>("direction"),
+                "amount": row.get::<i64, _>("amount"),
+                "carryforward_to": row.get::<Option<i32>, _>("carryforward_to")
+            })
+        })
+        .collect())
 }
 
 async fn depreciation_tax_life(pool: &PgPool, law_version_id: i64, category: &str) -> Result<i32> {

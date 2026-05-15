@@ -615,6 +615,81 @@ pub struct TransactionBasedAdjustmentResult {
     pub details: Value,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct ValuationPositionInput {
+    pub item_code: String,
+    pub item_name: String,
+    pub position_type: Option<String>,
+    pub monetary: Option<bool>,
+    pub valuation_method: Option<String>,
+    pub book_amount: i64,
+    pub tax_amount: Option<i64>,
+    pub foreign_amount: Option<f64>,
+    pub book_rate: Option<f64>,
+    pub closing_rate: Option<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LossCarryforwardInput {
+    pub origin_year: i32,
+    pub original_amount: i64,
+    pub remaining_amount: Option<i64>,
+    pub expires_year: Option<i32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CapitalChangeInput {
+    pub change_date: NaiveDate,
+    pub change_type: String,
+    pub amount: i64,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EvaluationAdjustmentRequest {
+    pub positions: Option<Vec<ValuationPositionInput>>,
+    pub taxable_income_before_loss: Option<i64>,
+    pub loss_carryforwards: Option<Vec<LossCarryforwardInput>>,
+    pub capital_changes: Option<Vec<CapitalChangeInput>>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct LossCarryforwardRecord {
+    pub loss_id: i64,
+    pub customer_id: i64,
+    pub origin_year: i32,
+    pub original_amount: i64,
+    pub used_amount: i64,
+    pub expired_amount: i64,
+    pub remaining_amount: i64,
+    pub expires_year: i32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct CapitalChange {
+    pub capital_change_id: i64,
+    pub by_id: i64,
+    pub change_date: NaiveDate,
+    pub change_type: String,
+    pub amount: i64,
+    pub description: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EvaluationAdjustmentResult {
+    pub module_code: String,
+    pub addbacks: i64,
+    pub deductions: i64,
+    pub snapshot_id: i64,
+    pub law_banner: Value,
+    pub items: Vec<AdjustmentItem>,
+    pub reserves_created: Vec<ReserveRecord>,
+    pub details: Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalculationResult {
     pub accounting_income: i64,

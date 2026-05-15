@@ -283,3 +283,19 @@ Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-y
   -ContentType "application/json" `
   -Body '{"weighted_average_loan_balance":100000000,"weighted_average_interest_rate_bps":460}'
 ```
+
+## Evaluation / Carryforward / Reserve API (2026-05-15)
+
+- Added B-7 foreign currency valuation, B-8 inventory/securities valuation, B-11 loss carryforward, and B-15 capital/reserve schedule endpoints.
+- B-11 manages yearly loss balances, deduction use, expiration, and SME/general deduction limit rates.
+- B-15 aggregates all module reserves for the business year and stores capital changes.
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/adjustments/evaluation/B11 `
+  -ContentType "application/json" `
+  -Body '{"taxable_income_before_loss":300000000,"loss_carryforwards":[{"origin_year":2025,"original_amount":400000000,"remaining_amount":400000000,"expires_year":2026}]}'
+
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/adjustments/evaluation/B15 `
+  -ContentType "application/json" `
+  -Body '{"capital_changes":[{"change_date":"2026-06-30","change_type":"PAID_IN_CAPITAL","amount":50000000,"description":"Paid-in capital increase"}]}'
+```

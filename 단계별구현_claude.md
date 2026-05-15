@@ -1002,3 +1002,21 @@
 - 접대비 한도는 사업연도 스냅샷의 `law_version_id`에 연결된 `tax_limits(ENTERTAINMENT_*)` 값을 사용한다.
 - 지급이자는 거래 설명 기반 4유형과 입력된 가지급금 적수/평균잔액을 모두 조정 항목으로 저장한다.
 - 거래 기반 세무조정 화면은 독립 메뉴 화면으로 열리고 통합 테스트 및 JS 문법 검증을 통과한다.
+
+### Phase 11 산출물 (2026-05-15 구현)
+
+- DB: 테넌트 스키마에 `valuation_positions`, `capital_changes`를 추가하고 `carryforward_loss`에 사용액, 만료액, 갱신시각을 보강.
+- DB: Phase 4 `tax_limits`에 중소기업/일반법인 이월결손금 공제한도율(`LOSS_DEDUCTION_LIMIT_BPS_*`)을 추가.
+- API: `POST/GET /api/tenants/{tenant_code}/business-years/{by_id}/adjustments/evaluation/{module_code}`로 B-7, B-8, B-11, B-15 계산/조회 구현.
+- 로직: B-7/B-8은 평가 포지션별 장부금액과 세법평가액 차이를 조정 항목과 유보로 저장.
+- 로직: B-11은 고객사별 이월결손금 잔액, 사용액, 만료액을 관리하고 중소기업 100%, 일반법인 80% 한도율을 적용.
+- 로직: B-15는 해당 사업연도의 모든 모듈 유보를 집계하고 자본 변동 내역을 함께 자본금과 적립금 명세로 저장.
+- 화면: 세무조정 메뉴에 외화평가, 재고·유가증권 평가, 이월결손금, 자본금과 적립금 독립 화면을 추가.
+- 테스트: 통합 테스트에서 B-7/B-8 유보 생성, B-11 결손금 만료 알림, B-15 유보 집계 일치를 검증.
+
+### Phase 11 완료 기준 확인
+
+- B-15 집계 금액은 `GET /reserves`의 사업연도 유보 합계와 일치한다.
+- B-11은 만료연도가 현재 사업연도 또는 다음 사업연도인 잔여 결손금을 `expiration_alerts`로 반환한다.
+- B-7/B-8 평가 차이는 `valuation_positions`, `adjustment_items`, `reserves`에 함께 저장된다.
+- 평가·이월·유보 화면은 메뉴별 독립 화면으로 열리고 통합 테스트, JS 문법 검증, clippy를 통과한다.

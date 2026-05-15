@@ -318,6 +318,24 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
         CREATE INDEX IF NOT EXISTS idx_loan_interest_facts_by
             ON {schema}.loan_interest_facts(by_id, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS {schema}.valuation_positions (
+            valuation_position_id BIGSERIAL PRIMARY KEY,
+            by_id           BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
+            module_code     VARCHAR(20) NOT NULL,
+            item_code       VARCHAR(80) NOT NULL,
+            item_name       VARCHAR(200) NOT NULL,
+            position_type   VARCHAR(40) NOT NULL DEFAULT 'GENERAL',
+            monetary        BOOLEAN NOT NULL DEFAULT TRUE,
+            valuation_method VARCHAR(40) NOT NULL DEFAULT 'CLOSING_RATE',
+            book_amount     BIGINT NOT NULL,
+            tax_amount      BIGINT NOT NULL,
+            adjustment_amount BIGINT NOT NULL,
+            metadata        JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_valuation_positions_by
+            ON {schema}.valuation_positions(by_id, module_code, item_code);
+
         CREATE TABLE IF NOT EXISTS {schema}.by_law_snapshot (
             snapshot_id      BIGSERIAL PRIMARY KEY,
             by_id            BIGINT NOT NULL UNIQUE REFERENCES {schema}.business_years(by_id),
@@ -384,10 +402,31 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
             customer_id    BIGINT NOT NULL REFERENCES {schema}.customers(customer_id),
             origin_year    INT NOT NULL,
             original_amount BIGINT NOT NULL,
+            used_amount    BIGINT NOT NULL DEFAULT 0,
+            expired_amount BIGINT NOT NULL DEFAULT 0,
             remaining_amount BIGINT NOT NULL,
             expires_year   INT NOT NULL,
-            created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+        ALTER TABLE {schema}.carryforward_loss
+            ADD COLUMN IF NOT EXISTS used_amount BIGINT NOT NULL DEFAULT 0;
+        ALTER TABLE {schema}.carryforward_loss
+            ADD COLUMN IF NOT EXISTS expired_amount BIGINT NOT NULL DEFAULT 0;
+        ALTER TABLE {schema}.carryforward_loss
+            ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+        CREATE TABLE IF NOT EXISTS {schema}.capital_changes (
+            capital_change_id BIGSERIAL PRIMARY KEY,
+            by_id           BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
+            change_date     DATE NOT NULL,
+            change_type     VARCHAR(40) NOT NULL,
+            amount          BIGINT NOT NULL,
+            description     TEXT,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_capital_changes_by
+            ON {schema}.capital_changes(by_id, change_date, capital_change_id);
 
         CREATE TABLE IF NOT EXISTS {schema}.tax_agents (
             tax_agent_id BIGSERIAL PRIMARY KEY,

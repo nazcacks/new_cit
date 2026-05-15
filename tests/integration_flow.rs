@@ -139,6 +139,8 @@ async fn api_flow_persists_to_postgres_generates_efiling_and_handles_dlq() {
     assert_income_adjustment_engine_works(&client, &base_url, &tenant_code, by_id).await;
     assert_asset_based_adjustment_modules_work(&client, &base_url, &tenant_code, by_id).await;
     assert_transaction_based_adjustment_modules_work(&client, &base_url, &tenant_code, by_id).await;
+    assert_evaluation_carryforward_reserve_modules_work(&client, &base_url, &tenant_code, by_id)
+        .await;
     assert_form_versioning_module_works(&client, &base_url, &tenant_code, by_id).await;
     assert_business_year_workflow_works(&client, &base_url, &tenant_code, by_id).await;
 
@@ -1088,6 +1090,106 @@ async fn assert_transaction_based_adjustment_modules_work(
         .any(|row| row["item_code"] == "B9_DEEMED_LOAN_INTEREST"));
 }
 
+async fn assert_evaluation_carryforward_reserve_modules_work(
+    client: &Client,
+    base_url: &str,
+    tenant_code: &str,
+    by_id: i64,
+) {
+    let root = format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}");
+    let fx = post_json(
+        client,
+        &format!("{root}/adjustments/evaluation/B7"),
+        json!({
+            "positions": [{
+                "item_code": "USD_AR",
+                "item_name": "USD receivable",
+                "position_type": "MONETARY",
+                "monetary": true,
+                "valuation_method": "CLOSING_RATE",
+                "book_amount": 120000000_i64,
+                "tax_amount": 100000000_i64
+            }]
+        }),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(fx["module_code"], "B7");
+    assert_eq!(fx["addbacks"], 20_000_000_i64);
+    assert_eq!(fx["reserves_created"][0]["reserve_code"], "B7_USD_AR");
+
+    let valuation = post_json(
+        client,
+        &format!("{root}/adjustments/evaluation/B8"),
+        json!({
+            "positions": [{
+                "item_code": "INV_FINISHED",
+                "item_name": "Finished goods",
+                "position_type": "INVENTORY",
+                "monetary": false,
+                "valuation_method": "LOWER_OF_COST_OR_MARKET",
+                "book_amount": 80000000_i64,
+                "tax_amount": 90000000_i64
+            }]
+        }),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(valuation["module_code"], "B8");
+    assert_eq!(valuation["deductions"], 10_000_000_i64);
+
+    let loss = post_json(
+        client,
+        &format!("{root}/adjustments/evaluation/B11"),
+        json!({
+            "taxable_income_before_loss": 300000000_i64,
+            "loss_carryforwards": [{
+                "origin_year": 2025,
+                "original_amount": 400000000_i64,
+                "remaining_amount": 400000000_i64,
+                "expires_year": 2026
+            }]
+        }),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(loss["module_code"], "B11");
+    assert_eq!(loss["deductions"], 300_000_000_i64);
+    assert!(!loss["details"]["expiration_alerts"]
+        .as_array()
+        .expect("expiration alerts")
+        .is_empty());
+
+    let reserves = get_json(client, &format!("{root}/reserves")).await;
+    let reserve_total = reserves
+        .as_array()
+        .expect("reserves")
+        .iter()
+        .map(|row| row["amount"].as_i64().unwrap_or_default())
+        .sum::<i64>();
+    let capital = post_json(
+        client,
+        &format!("{root}/adjustments/evaluation/B15"),
+        json!({
+            "capital_changes": [{
+                "change_date": "2026-06-30",
+                "change_type": "PAID_IN_CAPITAL",
+                "amount": 50000000_i64,
+                "description": "Paid-in capital increase"
+            }]
+        }),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(capital["module_code"], "B15");
+    assert_eq!(capital["details"]["reserve_total"], reserve_total);
+    assert!(capital["items"]
+        .as_array()
+        .expect("b15 items")
+        .iter()
+        .any(|row| row["section"] == "CAPITAL_CHANGE"));
+}
+
 async fn assert_form_versioning_module_works(
     client: &Client,
     base_url: &str,
@@ -1241,7 +1343,7 @@ fn assert_module_tree_matches_design(tree: &Value) {
     assert_eq!(modules.len(), 9);
     assert_eq!(
         modules.iter().map(child_count).sum::<usize>(),
-        44,
+        47,
         "detailed module count including law-versioning menus"
     );
 
@@ -1314,9 +1416,12 @@ fn assert_module_tree_matches_design(tree: &Value) {
             "5.3 감가상각",
             "5.4 퇴직급여충당금",
             "5.5 대손충당금",
-            "5.6 이월결손금",
-            "5.7 세액공제/감면",
-            "5.8 가산세",
+            "5.6 외화평가",
+            "5.7 재고·유가증권 평가",
+            "5.8 이월결손금",
+            "5.9 세액공제/감면",
+            "5.10 가산세",
+            "5.11 자본금과 적립금",
         ],
     );
     assert_children(

@@ -1472,7 +1472,20 @@ async function renderAdjustmentScreen() {
     await renderTransactionBasedAdjustmentScreen();
     return;
   }
+  if (evaluationModuleForPath(state.activeAdjustmentPath)) {
+    await renderEvaluationAdjustmentScreen();
+    return;
+  }
   await renderAssetBasedAdjustmentScreen();
+}
+
+function evaluationModuleForPath(path) {
+  return {
+    "/modules/adjustment/fx-valuation": ["B7", "B-7 외화평가"],
+    "/modules/adjustment/inventory-valuation": ["B8", "B-8 재고·유가증권 평가"],
+    "/modules/adjustment/carryforward-loss": ["B11", "B-11 이월결손금"],
+    "/modules/adjustment/capital-reserves": ["B15", "B-15 자본금과 적립금"],
+  }[path];
 }
 
 function assetModuleForPath(path) {
@@ -1480,7 +1493,6 @@ function assetModuleForPath(path) {
     "/modules/adjustment/depreciation": ["B4", "B-4 감가상각"],
     "/modules/adjustment/retirement-reserve": ["B5", "B-5 퇴직급여충당금"],
     "/modules/adjustment/bad-debt-reserve": ["B6", "B-6 대손충당금"],
-    "/modules/adjustment/carryforward-loss": ["B6", "이월결손금"],
     "/modules/adjustment/tax-credits": ["B6", "세액공제"],
     "/modules/adjustment/penalty-tax": ["B6", "가산세"],
   }[path] || ["B10", "B-10 업무용승용차"];
@@ -1617,6 +1629,135 @@ async function postTransactionAdjustment(root, moduleCode, body) {
   el("transactionAdjustmentResult").textContent = JSON.stringify(result, null, 2);
   log(`${moduleCode} 거래 기반 조정 완료`, { addbacks: result.addbacks, deductions: result.deductions });
   await renderTransactionBasedAdjustmentScreen();
+}
+
+async function renderEvaluationAdjustmentScreen() {
+  const context = await loadTaxDataContext();
+  const [moduleCode, title] = evaluationModuleForPath(state.activeAdjustmentPath);
+  el("adjustmentScreenTitle").textContent = title;
+  if (!context.byId) {
+    el("adjustmentScreenBody").innerHTML = taxDataYearSelector(context);
+    return;
+  }
+  const root = `/api/tenants/${context.tenantCode}/business-years/${context.byId}`;
+  const [items, reserves] = await Promise.all([
+    optionalRequest(`${root}/adjustments/evaluation/${moduleCode}`, []),
+    optionalRequest(`${root}/reserves`, []),
+  ]);
+  const itemRows = items.length
+    ? items
+        .map(
+          (item) => `
+            <tr>
+              <td>${escapeHtml(item.item_code)}<br><span class="muted">${escapeHtml(item.item_name)}</span></td>
+              <td>${money.format(item.amount)}</td>
+              <td>${escapeHtml(item.direction)}</td>
+              <td>${escapeHtml(item.disposition)}</td>
+            </tr>
+          `,
+        )
+        .join("")
+    : `<tr><td colspan="4">저장된 평가·이월·유보 조정 항목이 없습니다.</td></tr>`;
+  const form = evaluationFormMarkup(moduleCode);
+  el("adjustmentScreenBody").innerHTML = `
+    ${taxDataYearSelector(context)}
+    <div class="law-layout">
+      <form id="evaluationAdjustmentForm" class="law-form">
+        <h3>${escapeHtml(title)} 계산</h3>
+        ${form}
+        <button class="primary-btn" type="submit">계산/저장</button>
+      </form>
+      <div class="law-table-panel">
+        <h3>조정 결과</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>항목</th><th>금액</th><th>방향</th><th>처분</th></tr></thead>
+            <tbody>${itemRows}</tbody>
+          </table>
+        </div>
+        <pre id="evaluationAdjustmentResult" class="json-result">${JSON.stringify({ reserves }, null, 2)}</pre>
+      </div>
+    </div>
+  `;
+  attachTaxDataYearSelector();
+  el("evaluationAdjustmentForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const body = collectEvaluationPayload(moduleCode);
+    const result = await request(`${root}/adjustments/evaluation/${moduleCode}`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    el("evaluationAdjustmentResult").textContent = JSON.stringify(result, null, 2);
+    log(`${moduleCode} 평가·이월·유보 조정 완료`, { addbacks: result.addbacks, deductions: result.deductions });
+    await renderEvaluationAdjustmentScreen();
+  });
+}
+
+function evaluationFormMarkup(moduleCode) {
+  if (moduleCode === "B11") {
+    return `
+      <label>공제 전 소득금액<input id="evalTaxableIncome" type="number" value="300000000" /></label>
+      <label>결손 발생연도<input id="lossOriginYear" type="number" value="2025" /></label>
+      <label>이월결손금 잔액<input id="lossRemainingAmount" type="number" value="120000000" /></label>
+      <label>만료연도<input id="lossExpiresYear" type="number" value="2026" /></label>
+    `;
+  }
+  if (moduleCode === "B15") {
+    return `
+      <label>변동일<input id="capitalChangeDate" type="date" value="2026-06-30" /></label>
+      <label>변동 유형<input id="capitalChangeType" value="PAID_IN_CAPITAL" /></label>
+      <label>변동 금액<input id="capitalChangeAmount" type="number" value="50000000" /></label>
+      <label>설명<input id="capitalChangeDescription" value="유상증자" /></label>
+    `;
+  }
+  return `
+    <label>항목 코드<input id="valuationItemCode" value="${moduleCode === "B7" ? "USD_AR" : "INV_FINISHED"}" /></label>
+    <label>항목명<input id="valuationItemName" value="${moduleCode === "B7" ? "USD receivable" : "Finished goods"}" /></label>
+    <label>장부금액<input id="valuationBookAmount" type="number" value="120000000" /></label>
+    <label>세법평가액<input id="valuationTaxAmount" type="number" value="100000000" /></label>
+    <label>평가방법<input id="valuationMethod" value="${moduleCode === "B7" ? "CLOSING_RATE" : "LOWER_OF_COST_OR_MARKET"}" /></label>
+  `;
+}
+
+function collectEvaluationPayload(moduleCode) {
+  if (moduleCode === "B11") {
+    return {
+      taxable_income_before_loss: Number(el("evalTaxableIncome").value || 0),
+      loss_carryforwards: [
+        {
+          origin_year: Number(el("lossOriginYear").value || 0),
+          original_amount: Number(el("lossRemainingAmount").value || 0),
+          remaining_amount: Number(el("lossRemainingAmount").value || 0),
+          expires_year: Number(el("lossExpiresYear").value || 0),
+        },
+      ],
+    };
+  }
+  if (moduleCode === "B15") {
+    return {
+      capital_changes: [
+        {
+          change_date: el("capitalChangeDate").value,
+          change_type: el("capitalChangeType").value,
+          amount: Number(el("capitalChangeAmount").value || 0),
+          description: el("capitalChangeDescription").value,
+        },
+      ],
+    };
+  }
+  return {
+    positions: [
+      {
+        item_code: el("valuationItemCode").value,
+        item_name: el("valuationItemName").value,
+        position_type: moduleCode === "B7" ? "MONETARY" : "INVENTORY",
+        monetary: moduleCode === "B7",
+        valuation_method: el("valuationMethod").value,
+        book_amount: Number(el("valuationBookAmount").value || 0),
+        tax_amount: Number(el("valuationTaxAmount").value || 0),
+      },
+    ],
+  };
 }
 
 async function renderAssetBasedAdjustmentScreen() {

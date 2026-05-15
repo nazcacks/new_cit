@@ -22,10 +22,11 @@ use crate::{
         CreateLawAmendmentRequest, CreateTaxFormRequest, CreateTaxLawRequest,
         CreateTaxLimitRequest, CreateTaxRateRequest, CreateTenantRequest,
         CreateVehicleUsageLogRequest, EnqueueEfilingRequest, EnqueueJobRequest,
-        FormMigrationRequest, HealthResponse, LawVersioningImpactRequest, LoginRequest,
-        ResolveFormVersionQuery, TransactionBasedAdjustmentRequest, UpdateAdminUserRequest,
-        UpdateAdminUserStatusRequest, UpdateBusinessYearStatusRequest,
-        UpdateFormVersionStatusRequest, UpdateRolePermissionsRequest, UpdateTaxLawStatusRequest,
+        EvaluationAdjustmentRequest, FormMigrationRequest, HealthResponse,
+        LawVersioningImpactRequest, LoginRequest, ResolveFormVersionQuery,
+        TransactionBasedAdjustmentRequest, UpdateAdminUserRequest, UpdateAdminUserStatusRequest,
+        UpdateBusinessYearStatusRequest, UpdateFormVersionStatusRequest,
+        UpdateRolePermissionsRequest, UpdateTaxLawStatusRequest,
     },
     efiling,
     error::{AppError, AppResult},
@@ -182,6 +183,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/adjustments/transactions/:module_code",
             get(list_transaction_adjustment_items).post(calculate_transaction_based_adjustment),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/adjustments/evaluation/:module_code",
+            get(list_evaluation_adjustment_items).post(calculate_evaluation_adjustment),
         )
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/vehicle-usage-logs",
@@ -981,6 +986,39 @@ async fn calculate_transaction_based_adjustment(
 }
 
 async fn list_transaction_adjustment_items(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id, module_code)): Path<(String, i64, String)>,
+) -> AppResult<Json<Vec<crate::domain::AdjustmentItem>>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let items = tax::list_adjustment_items_by_module(&state.pool, &tenant_ref, by_id, &module_code)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(items))
+}
+
+async fn calculate_evaluation_adjustment(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id, module_code)): Path<(String, i64, String)>,
+    Json(request): Json<EvaluationAdjustmentRequest>,
+) -> AppResult<Json<crate::domain::EvaluationAdjustmentResult>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let result = tax::calculate_evaluation_adjustment(
+        &state.pool,
+        &tenant_ref,
+        by_id,
+        &module_code,
+        request,
+    )
+    .await
+    .map_err(map_anyhow)?;
+    Ok(Json(result))
+}
+
+async fn list_evaluation_adjustment_items(
     State(state): State<AppState>,
     Path((tenant_code, by_id, module_code)): Path<(String, i64, String)>,
 ) -> AppResult<Json<Vec<crate::domain::AdjustmentItem>>> {
