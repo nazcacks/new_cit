@@ -1,0 +1,7 @@
+{
+  "job_type": "unsupported_job",
+  "payload": {
+    "reason": "exercise DLQ behavior"
+  },
+  "max_attempts": 1
+}

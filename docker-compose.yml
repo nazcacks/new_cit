@@ -1,0 +1,70 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: cit
+      POSTGRES_USER: cit
+      POSTGRES_PASSWORD: cit
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cit -d cit"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgres://cit:cit@postgres:5432/cit
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8080
+      ENABLE_WORKER: "true"
+      JOB_POLL_SECONDS: 1
+      RUST_LOG: cit_system=info,tower_http=info
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  test:
+    image: rust:1-bookworm
+    profiles: ["tools"]
+    working_dir: /workspace
+    environment:
+      DATABASE_URL: postgres://cit:cit@postgres:5432/cit
+      RUST_LOG: cit_system=debug
+    volumes:
+      - .:/workspace
+      - cargo_registry:/usr/local/cargo/registry
+      - cargo_git:/usr/local/cargo/git
+      - target_cache:/workspace/target
+    command: cargo test --all --all-targets
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  clippy:
+    image: rust:1-bookworm
+    profiles: ["tools"]
+    working_dir: /workspace
+    environment:
+      DATABASE_URL: postgres://cit:cit@postgres:5432/cit
+    volumes:
+      - .:/workspace
+      - cargo_registry:/usr/local/cargo/registry
+      - cargo_git:/usr/local/cargo/git
+      - target_cache:/workspace/target
+    command: bash -lc "export PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin && rustup component add clippy && cargo clippy --all-targets --all-features -- -D warnings"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  cargo_registry:
+  cargo_git:
+  target_cache:

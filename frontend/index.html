@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CIT 세무조정 시스템</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <section id="loginView" class="login-view">
+      <div class="login-panel">
+        <div class="brand login-brand">
+          <div class="brand-mark">CIT</div>
+          <div>
+            <strong>법인세 세무조정</strong>
+            <span>Corporate Income Tax</span>
+          </div>
+        </div>
+        <form id="loginForm" class="login-form">
+          <label>
+            테넌트
+            <input id="loginTenant" autocomplete="organization" value="demo" />
+          </label>
+          <label>
+            로그인 ID
+            <input id="loginId" autocomplete="username" value="admin" />
+          </label>
+          <label>
+            비밀번호
+            <input id="loginPassword" type="password" autocomplete="current-password" value="admin123!" />
+          </label>
+          <button id="loginBtn" class="primary-btn" type="submit">로그인</button>
+          <p id="loginMessage" class="login-message" aria-live="polite"></p>
+        </form>
+      </div>
+    </section>
+
+    <div id="appView" class="app-shell hidden">
+      <aside class="sidebar" aria-label="주요 메뉴">
+        <div class="brand">
+          <div class="brand-mark">CIT</div>
+          <div>
+            <strong>법인세 세무조정</strong>
+            <span id="signedTenant">-</span>
+          </div>
+        </div>
+        <nav id="moduleMenu"></nav>
+      </aside>
+
+      <main>
+        <section id="dashboard" class="topbar">
+          <div>
+            <p class="eyebrow">운영 콘솔</p>
+            <h1>법인세 세무조정계산서 시스템</h1>
+          </div>
+          <div class="top-actions">
+            <div id="healthBadge" class="health-badge pending">
+              <span class="dot"></span>
+              <span id="healthText">확인 중</span>
+            </div>
+            <button id="logoutBtn" class="secondary-btn" type="button">로그아웃</button>
+          </div>
+        </section>
+
+        <section class="metrics" aria-label="시스템 상태 요약">
+          <article>
+            <span>API</span>
+            <strong id="apiStatus">-</strong>
+          </article>
+          <article>
+            <span>로그인</span>
+            <strong id="loginStatus">-</strong>
+          </article>
+          <article>
+            <span>테넌트</span>
+            <strong id="tenantCount">-</strong>
+          </article>
+          <article>
+            <span>DLQ</span>
+            <strong id="dlqCount">-</strong>
+          </article>
+        </section>
+
+        <section id="module-structure" class="panel module-panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Module Structure</p>
+              <h2>설계서 3.1 모듈 구조</h2>
+            </div>
+            <span id="moduleCount" class="count-pill">0개</span>
+          </div>
+          <div id="moduleCards" class="module-grid"></div>
+        </section>
+
+        <section id="lawVersioningWorkspace" class="law-workspace" aria-label="Tax Law Versioning">
+          <section id="law-screen-laws" class="panel law-screen-panel active" data-law-path="/modules/law-versioning/laws">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Tax Law Versioning</p>
+                <h2>법령 버전 마스터</h2>
+              </div>
+              <button class="secondary-btn law-screen-refresh" type="button">새로고침</button>
+            </div>
+            <div class="law-summary-grid" data-law-summary></div>
+            <div id="law-screen-laws-body" class="law-screen-body">
+              <p class="screen-placeholder">법령 버전 마스터 메뉴를 선택하면 이 화면에서 기능이 열립니다.</p>
+            </div>
+          </section>
+
+          <section id="law-screen-rates" class="panel law-screen-panel" data-law-path="/modules/law-versioning/rates">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Tax Law Versioning</p>
+                <h2>법인세율표</h2>
+              </div>
+              <button class="secondary-btn law-screen-refresh" type="button">새로고침</button>
+            </div>
+            <div class="law-summary-grid" data-law-summary></div>
+            <div id="law-screen-rates-body" class="law-screen-body">
+              <p class="screen-placeholder">법인세율표 메뉴를 선택하면 이 화면에서 기능이 열립니다.</p>
+            </div>
+          </section>
+
+          <section id="law-screen-limits" class="panel law-screen-panel" data-law-path="/modules/law-versioning/limits">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Tax Law Versioning</p>
+                <h2>한도·공제표</h2>
+              </div>
+              <button class="secondary-btn law-screen-refresh" type="button">새로고침</button>
+            </div>
+            <div class="law-summary-grid" data-law-summary></div>
+            <div id="law-screen-limits-body" class="law-screen-body">
+              <p class="screen-placeholder">한도·공제표 메뉴를 선택하면 이 화면에서 기능이 열립니다.</p>
+            </div>
+          </section>
+
+          <section id="law-screen-credits" class="panel law-screen-panel" data-law-path="/modules/law-versioning/credits">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Tax Law Versioning</p>
+                <h2>세액공제·감면 공제표</h2>
+              </div>
+              <button class="secondary-btn law-screen-refresh" type="button">새로고침</button>
+            </div>
+            <div class="law-summary-grid" data-law-summary></div>
+            <div id="law-screen-credits-body" class="law-screen-body">
+              <p class="screen-placeholder">세액공제·감면 공제표 메뉴를 선택하면 이 화면에서 기능이 열립니다.</p>
+            </div>
+          </section>
+
+          <section id="law-screen-depreciation-lives" class="panel law-screen-panel" data-law-path="/modules/law-versioning/depreciation-lives">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Tax Law Versioning</p>
+                <h2>기준내용연수표</h2>
+              </div>
+              <button class="secondary-btn law-screen-refresh" type="button">새로고침</button>
+            </div>
+            <div class="law-summary-grid" data-law-summary></div>
+            <div id="law-screen-depreciation-lives-body" class="law-screen-body">
+              <p class="screen-placeholder">기준내용연수표 메뉴를 선택하면 이 화면에서 기능이 열립니다.</p>
+            </div>
+          </section>
+
+          <section id="law-screen-sme-criteria" class="panel law-screen-panel" data-law-path="/modules/law-versioning/sme-criteria">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Tax Law Versioning</p>
+                <h2>중소기업 판정기준</h2>
+              </div>
+              <button class="secondary-btn law-screen-refresh" type="button">새로고침</button>
+            </div>
+            <div class="law-summary-grid" data-law-summary></div>
+            <div id="law-screen-sme-criteria-body" class="law-screen-body">
+              <p class="screen-placeholder">중소기업 판정기준 메뉴를 선택하면 이 화면에서 기능이 열립니다.</p>
+            </div>
+          </section>
+
+          <section id="law-screen-loss-rules" class="panel law-screen-panel" data-law-path="/modules/law-versioning/loss-rules">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Tax Law Versioning</p>
+                <h2>결손금 공제규정</h2>
+              </div>
+              <button class="secondary-btn law-screen-refresh" type="button">새로고침</button>
+            </div>
+            <div class="law-summary-grid" data-law-summary></div>
+            <div id="law-screen-loss-rules-body" class="law-screen-body">
+              <p class="screen-placeholder">결손금 공제규정 메뉴를 선택하면 이 화면에서 기능이 열립니다.</p>
+            </div>
+          </section>
+
+          <section id="law-screen-snapshots" class="panel law-screen-panel" data-law-path="/modules/law-versioning/snapshots">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Tax Law Versioning</p>
+                <h2>사업연도별 적용 스냅샷</h2>
+              </div>
+              <button class="secondary-btn law-screen-refresh" type="button">새로고침</button>
+            </div>
+            <div class="law-summary-grid" data-law-summary></div>
+            <div id="law-screen-snapshots-body" class="law-screen-body">
+              <p class="screen-placeholder">사업연도별 적용 스냅샷 메뉴를 선택하면 이 화면에서 기능이 열립니다.</p>
+            </div>
+          </section>
+
+          <section id="law-screen-impact" class="panel law-screen-panel" data-law-path="/modules/law-versioning/impact">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Tax Law Versioning</p>
+                <h2>영향 시뮬레이션</h2>
+              </div>
+              <button class="secondary-btn law-screen-refresh" type="button">새로고침</button>
+            </div>
+            <div class="law-summary-grid" data-law-summary></div>
+            <div id="law-screen-impact-body" class="law-screen-body">
+              <p class="screen-placeholder">영향 시뮬레이션 메뉴를 선택하면 이 화면에서 기능이 열립니다.</p>
+            </div>
+          </section>
+
+          <section id="law-screen-history" class="panel law-screen-panel" data-law-path="/modules/law-versioning/history">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Tax Law Versioning</p>
+                <h2>개정 공지/이력</h2>
+              </div>
+              <button class="secondary-btn law-screen-refresh" type="button">새로고침</button>
+            </div>
+            <div class="law-summary-grid" data-law-summary></div>
+            <div id="law-screen-history-body" class="law-screen-body">
+              <p class="screen-placeholder">개정 공지/이력 메뉴를 선택하면 이 화면에서 기능이 열립니다.</p>
+            </div>
+          </section>
+        </section>
+
+        <section class="workspace">
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Tax Adjustment</p>
+                <h2>데모 세무조정 실행</h2>
+              </div>
+              <button id="runDemoBtn" class="primary-btn" type="button">실행</button>
+            </div>
+            <div class="form-grid" id="workflow">
+              <label>
+                회계상 당기순이익
+                <input id="accountingIncome" type="number" value="500000000" />
+              </label>
+              <label>
+                수입금액
+                <input id="grossRevenue" type="number" value="3000000000" />
+              </label>
+              <label>
+                기부금
+                <input id="donations" type="number" value="70000000" />
+              </label>
+              <label>
+                접대비
+                <input id="entertainmentExpense" type="number" value="30000000" />
+              </label>
+              <label>
+                회계상 감가상각비
+                <input id="depreciationBook" type="number" value="90000000" />
+              </label>
+              <label>
+                세법상 감가상각 한도
+                <input id="depreciationTaxLimit" type="number" value="65000000" />
+              </label>
+              <label>
+                이월결손금
+                <input id="carryforwardLoss" type="number" value="50000000" />
+              </label>
+              <label>
+                세액공제
+                <input id="taxCredits" type="number" value="3000000" />
+              </label>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Result</p>
+                <h2>계산 결과</h2>
+              </div>
+              <button id="refreshBtn" class="secondary-btn" type="button">새로고침</button>
+            </div>
+            <dl class="result-list">
+              <div>
+                <dt>사용자</dt>
+                <dd id="signedUser">-</dd>
+              </div>
+              <div>
+                <dt>작업 테넌트</dt>
+                <dd id="tenantCode">-</dd>
+              </div>
+              <div>
+                <dt>사업연도 ID</dt>
+                <dd id="businessYearId">-</dd>
+              </div>
+              <div>
+                <dt>과세표준</dt>
+                <dd id="taxableIncome">-</dd>
+              </div>
+              <div>
+                <dt>총 납부세액</dt>
+                <dd id="totalTaxDue">-</dd>
+              </div>
+              <div id="efile">
+                <dt>전자신고 작업</dt>
+                <dd id="efileJob">-</dd>
+              </div>
+            </dl>
+          </div>
+        </section>
+
+        <section class="workspace">
+          <div class="panel table-panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Tenants</p>
+                <h2>테넌트 목록</h2>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>코드</th>
+                    <th>이름</th>
+                    <th>스키마</th>
+                    <th>상태</th>
+                  </tr>
+                </thead>
+                <tbody id="tenantRows"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="panel table-panel" id="jobs">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Queue</p>
+                <h2>최근 작업</h2>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>작업 ID</th>
+                    <th>유형</th>
+                    <th>상태</th>
+                    <th>시도</th>
+                  </tr>
+                </thead>
+                <tbody id="jobRows"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel log-panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Trace</p>
+              <h2>실행 로그</h2>
+            </div>
+            <button id="clearLogBtn" class="secondary-btn" type="button">지우기</button>
+          </div>
+          <pre id="logOutput" aria-live="polite"></pre>
+        </section>
+      </main>
+    </div>
+    <script src="/app.js"></script>
+  </body>
+</html>

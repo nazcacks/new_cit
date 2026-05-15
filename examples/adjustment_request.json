@@ -1,0 +1,10 @@
+{
+  "accounting_income": 500000000,
+  "gross_revenue": 3000000000,
+  "donations": 70000000,
+  "entertainment_expense": 30000000,
+  "depreciation_book": 90000000,
+  "depreciation_tax_limit": 65000000,
+  "carryforward_loss": 50000000,
+  "tax_credits": 3000000
+}
