@@ -347,3 +347,16 @@ Invoke-RestMethod -Method Put http://localhost:8080/api/tenants/demo/business-ye
   -ContentType "application/json" `
   -Body '{"fields":{"tax_credits":3000001},"reason":"manual review adjustment","changed_by":"reviewer"}'
 ```
+
+## Form Attachments / PDF API (2026-05-15)
+
+- Added a dedicated `6.2 100여 종 부속서식` UI route for attachment status and output actions.
+- `GET /api/tenants/{tenant_code}/business-years/{by_id}/forms/attachments` returns generated status, validation count, representative amount, and updated time for FORM3, FORM15, and FORM22.
+- `GET /api/tenants/{tenant_code}/business-years/{by_id}/forms/{form_code}/pdf` generates a PDF with a DRAFT/APPROVED watermark.
+- `GET /api/tenants/{tenant_code}/business-years/{by_id}/forms/pdf-bundle/download` returns a ZIP bundle of the main form PDFs.
+
+```powershell
+Invoke-RestMethod http://localhost:8080/api/tenants/demo/business-years/1/forms/attachments
+Invoke-WebRequest http://localhost:8080/api/tenants/demo/business-years/1/forms/FORM3/pdf -OutFile FORM3.pdf
+Invoke-WebRequest http://localhost:8080/api/tenants/demo/business-years/1/forms/pdf-bundle/download -OutFile forms.zip
+```

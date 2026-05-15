@@ -1079,3 +1079,21 @@
 - 미리보기 응답은 자동연동 필드와 수동 수정 필드를 구분할 수 있는 `_meta`와 필드 출처를 제공한다.
 - 수동 수정 시 `form_data_history`에 `MANUAL_UPDATE` 이력이 남는다.
 - 서식 검증 결과와 변경 이력이 UI와 API에서 함께 조회된다.
+
+### Phase 15 산출물 (2026-05-15 구현)
+
+- API: `GET /forms/attachments`로 FORM3/FORM15/FORM22 부속서식 진행상태, 검증 오류 수, 대표 금액, 수정시각을 조회한다.
+- API: `GET /forms/{form_code}/pdf`로 사업연도 스냅샷과 현재 서식 데이터를 반영한 PDF를 다운로드한다.
+- API: `GET /forms/pdf-bundle/download`로 주요 부속서식 PDF를 ZIP으로 일괄 생성한다.
+- 로직: PDF 출력 시 서식이 없으면 자동 생성하고, 서식 상태에 따라 `DRAFT`/`APPROVED` 워터마크를 부여한다.
+- 로직: 현재 구현은 외부 JasperReports 런타임 대신 내장 PDF 렌더러와 ZIP 번들러로 동작하며, 추후 `form_versions.template_json`의 템플릿 메타를 확장해 100여 종 서식으로 확대한다.
+- 화면: `6.2 100여 종 부속서식` 메뉴를 독립 화면으로 연결하고, 생성/PDF/ZIP 다운로드 조치를 제공한다.
+- 프로토타입: `prototype/index.html`의 서식 작성 화면에 부속서식 상태표, 검증 수, PDF/ZIP 조치를 반영했다.
+- 테스트: 통합 테스트에서 부속서식 목록, FORM3 PDF 바이트(`%PDF`), ZIP 바이트(`PK`)를 검증한다.
+
+### Phase 15 완료 기준 확인
+
+- 부속서식 목록은 사업연도별 생성 여부와 검증 오류 수를 반환한다.
+- 개별 PDF 다운로드는 유효한 `application/pdf` 응답과 PDF 헤더를 반환한다.
+- 일괄 다운로드는 `application/zip` 응답과 ZIP 헤더를 반환한다.
+- `6.2 부속서식` 메뉴 클릭 시 숨김 처리된 단일 화면이 아니라 독립 부속서식 화면으로 열린다.

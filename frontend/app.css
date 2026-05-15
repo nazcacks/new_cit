@@ -667,6 +667,14 @@ h2 {
   font-weight: 700;
 }
 
+a.primary-btn,
+a.secondary-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
 .primary-btn {
   border: 1px solid var(--blue);
   background: var(--blue);
@@ -691,6 +699,10 @@ h2 {
   min-height: 30px;
   padding: 0 9px;
   font-size: 12px;
+}
+
+.field-action {
+  margin-top: 4px;
 }
 
 .button-row,

@@ -206,8 +206,20 @@ pub fn router(state: AppState) -> Router {
             get(list_reserves),
         )
         .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/forms/attachments",
+            get(list_form_attachments),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/forms/pdf-bundle/download",
+            get(download_form_pdf_bundle),
+        )
+        .route(
             "/api/tenants/:tenant_code/business-years/:by_id/forms/:form_code",
             get(get_form).post(generate_form).put(update_form_data),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/forms/:form_code/pdf",
+            get(download_form_pdf),
         )
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/forms/:form_code/preview",
@@ -1201,6 +1213,69 @@ async fn preview_form(
         .await
         .map_err(map_anyhow)?;
     Ok(Json(form))
+}
+
+async fn list_form_attachments(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+) -> AppResult<Json<Vec<crate::domain::FormAttachmentSummary>>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let attachments = tax::list_form_attachments(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(attachments))
+}
+
+async fn download_form_pdf(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id, form_code)): Path<(String, i64, String)>,
+) -> AppResult<Response<Body>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let file = tax::generate_form_pdf(&state.pool, &tenant_ref, by_id, &form_code)
+        .await
+        .map_err(map_anyhow)?;
+
+    let mut response = Response::new(Body::from(file.contents));
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_str(&file.content_type)
+            .map_err(|error| AppError::bad_request(error.to_string()))?,
+    );
+    response.headers_mut().insert(
+        CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("attachment; filename=\"{}\"", file.file_name))
+            .map_err(|error| AppError::bad_request(error.to_string()))?,
+    );
+    Ok(response)
+}
+
+async fn download_form_pdf_bundle(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+) -> AppResult<Response<Body>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let file = tax::generate_form_pdf_bundle(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+
+    let mut response = Response::new(Body::from(file.contents));
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_str(&file.content_type)
+            .map_err(|error| AppError::bad_request(error.to_string()))?,
+    );
+    response.headers_mut().insert(
+        CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("attachment; filename=\"{}\"", file.file_name))
+            .map_err(|error| AppError::bad_request(error.to_string()))?,
+    );
+    Ok(response)
 }
 
 async fn enqueue_efiling(

@@ -1531,3 +1531,11 @@ FOR EACH ROW EXECUTE FUNCTION fn_audit_trigger();
 - `form_relationships`는 서식 간 자동연동 규칙을 관리하며, FORM3 생성 시 기존 원천 서식 데이터가 있으면 대상 필드에 반영한다.
 - `form_validations`는 필수값, 최소값, 필드 일치 같은 서식 검증 규칙을 저장하고 미리보기 API에서 평가한다.
 - FORM3 데이터 JSON은 필드 값과 `_meta` 출처 정보를 함께 보관해 자동연동 필드와 수동입력 필드를 구분한다.
+
+## Phase 15 부속서식/PDF DB 보완 (2026-05-15)
+
+- 부속서식 출력은 기존 `form_data`, `form_versions`, `form_validations`, `form_relationships`, `form_data_history`를 그대로 사용한다.
+- 별도 출력 파일 저장 테이블은 아직 만들지 않고, 요청 시 현재 사업연도 서식 데이터를 읽어 PDF/ZIP 바이트를 즉시 생성한다.
+- `form_data.status`가 `APPROVED`이면 PDF 워터마크는 `APPROVED`, 그 외 상태는 `DRAFT`로 표시한다.
+- 부속서식 일람 API는 FORM3, FORM15, FORM22의 생성 여부, 검증 오류 수, 대표 금액, `updated_at`을 반환한다.
+- 추후 100여 종 확장 시 `form_templates` 또는 `form_versions.template_json`에 출력 템플릿 식별자, 출력 순서, 묶음 그룹, 필드 좌표를 추가한다.

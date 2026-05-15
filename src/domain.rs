@@ -865,6 +865,24 @@ pub struct FormPreviewResult {
     pub history: Vec<FormDataHistory>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct FormAttachmentSummary {
+    pub form_code: String,
+    pub form_name: String,
+    pub generated: bool,
+    pub status: String,
+    pub validation_count: usize,
+    pub total_amount: i64,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FormOutputFile {
+    pub file_name: String,
+    pub content_type: String,
+    pub contents: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct TaxForm {
     pub form_id: i64,

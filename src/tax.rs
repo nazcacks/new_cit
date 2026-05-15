@@ -1,3 +1,5 @@
+use std::io::{Cursor, Write};
+
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
@@ -10,15 +12,16 @@ use crate::{
         ConsolidatedEntityInput, ConsolidationEliminationInput, CreateIncomeAdjustmentRequest,
         CreateLawAmendmentRequest, CreateTaxLawRequest, CreateTaxLimitRequest,
         CreateTaxRateRequest, CreateVehicleUsageLogRequest, DonationCarryforward,
-        EvaluationAdjustmentRequest, EvaluationAdjustmentResult, ForeignIncomeInput, FormData,
-        FormDataHistory, FormPreviewField, FormPreviewResult, FormValidationIssue,
-        IncomeAdjustmentItemInput, IncomeAdjustmentResult, LawAmendmentHistory, LawSnapshot,
-        LawVersioningImpactRequest, LossCarryforwardInput, LossCarryforwardRecord, PenaltyTaxInput,
-        ReserveRecord, RevenueBreakdownInput, SpecialTaxAdjustmentRequest,
-        SpecialTaxAdjustmentResult, TaxAdjustment, TaxAmountAdjustmentRequest,
-        TaxAmountAdjustmentResult, TaxCreditInput, TaxLawVersion, TaxLimit, TaxRate, TenantRef,
-        TransactionBasedAdjustmentRequest, TransactionBasedAdjustmentResult, UpdateFormDataRequest,
-        UpdateTaxLawStatusRequest, ValuationPositionInput, VehicleUsageLog,
+        EvaluationAdjustmentRequest, EvaluationAdjustmentResult, ForeignIncomeInput,
+        FormAttachmentSummary, FormData, FormDataHistory, FormOutputFile, FormPreviewField,
+        FormPreviewResult, FormValidationIssue, IncomeAdjustmentItemInput, IncomeAdjustmentResult,
+        LawAmendmentHistory, LawSnapshot, LawVersioningImpactRequest, LossCarryforwardInput,
+        LossCarryforwardRecord, PenaltyTaxInput, ReserveRecord, RevenueBreakdownInput,
+        SpecialTaxAdjustmentRequest, SpecialTaxAdjustmentResult, TaxAdjustment,
+        TaxAmountAdjustmentRequest, TaxAmountAdjustmentResult, TaxCreditInput, TaxLawVersion,
+        TaxLimit, TaxRate, TenantRef, TransactionBasedAdjustmentRequest,
+        TransactionBasedAdjustmentResult, UpdateFormDataRequest, UpdateTaxLawStatusRequest,
+        ValuationPositionInput, VehicleUsageLog,
     },
     tenant,
 };
@@ -4486,6 +4489,238 @@ pub async fn preview_form(
         validations,
         history,
     })
+}
+
+pub async fn list_form_attachments(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+) -> Result<Vec<FormAttachmentSummary>> {
+    let forms = [
+        ("FORM3", "과세표준 및 세액조정계산서"),
+        ("FORM15", "소득금액조정명세서"),
+        ("FORM22", "기부금 조정명세서"),
+    ];
+    let mut summaries = Vec::with_capacity(forms.len());
+    for (form_code, form_name) in forms {
+        let form = load_form_optional(pool, tenant, by_id, form_code).await?;
+        let (status, validation_count, total_amount, updated_at) = if let Some(form) = form {
+            let validations =
+                validate_form_data(pool, form.form_version_id, &form.data_json).await?;
+            (
+                form.status,
+                validations.len(),
+                form_total_amount(&form.data_json),
+                Some(form.updated_at),
+            )
+        } else {
+            ("NOT_GENERATED".to_string(), 0, 0, None)
+        };
+        summaries.push(FormAttachmentSummary {
+            form_code: form_code.to_string(),
+            form_name: form_name.to_string(),
+            generated: status != "NOT_GENERATED",
+            status,
+            validation_count,
+            total_amount,
+            updated_at,
+        });
+    }
+    Ok(summaries)
+}
+
+pub async fn generate_form_pdf(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    form_code: &str,
+) -> Result<FormOutputFile> {
+    let preview = preview_form(pool, tenant, by_id, form_code).await?;
+    let watermark = if preview.form.status == "APPROVED" {
+        "APPROVED"
+    } else {
+        "DRAFT"
+    };
+    let title = format!("CIT {form_code} {}", preview.form.form_code);
+    let mut lines = vec![
+        format!("Tenant: {}", tenant.tenant_code),
+        format!("Business year id: {by_id}"),
+        format!("Status: {}", preview.form.status),
+        format!("Watermark: {watermark}"),
+    ];
+    for field in &preview.fields {
+        lines.push(format!(
+            "{} = {} [{}]",
+            field.label,
+            pdf_value(&field.value),
+            field.source
+        ));
+    }
+    if !preview.validations.is_empty() {
+        lines.push("Validation issues:".to_string());
+        for issue in &preview.validations {
+            lines.push(format!(
+                "{} {} {}",
+                issue.severity, issue.field_path, issue.message
+            ));
+        }
+    }
+    let contents = render_simple_pdf(&title, &lines, watermark);
+    Ok(FormOutputFile {
+        file_name: format!("{}_{}_{}.pdf", tenant.tenant_code, by_id, form_code),
+        content_type: "application/pdf".to_string(),
+        contents,
+    })
+}
+
+pub async fn generate_form_pdf_bundle(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+) -> Result<FormOutputFile> {
+    let mut cursor = Cursor::new(Vec::new());
+    {
+        let mut writer = zip::ZipWriter::new(&mut cursor);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for form_code in ["FORM3", "FORM15", "FORM22"] {
+            let file = generate_form_pdf(pool, tenant, by_id, form_code).await?;
+            writer
+                .start_file(file.file_name, options)
+                .context("failed to start zip entry")?;
+            writer
+                .write_all(&file.contents)
+                .context("failed to write zip entry")?;
+        }
+        writer.finish().context("failed to finalize pdf bundle")?;
+    }
+    Ok(FormOutputFile {
+        file_name: format!("{}_{}_forms.zip", tenant.tenant_code, by_id),
+        content_type: "application/zip".to_string(),
+        contents: cursor.into_inner(),
+    })
+}
+
+fn form_total_amount(data_json: &Value) -> i64 {
+    for key in [
+        "total_tax_due",
+        "taxable_income",
+        "corporate_tax",
+        "accounting_income",
+        "addbacks",
+        "donations",
+    ] {
+        let total = data_json.get(key).map(numeric_total).unwrap_or_default();
+        if total != 0 {
+            return total;
+        }
+    }
+    numeric_total(data_json)
+}
+
+fn numeric_total(value: &Value) -> i64 {
+    match value {
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| number.as_f64().map(|value| value.round() as i64))
+            .unwrap_or_default(),
+        Value::Array(items) => items.iter().map(numeric_total).sum(),
+        Value::Object(object) => object
+            .iter()
+            .filter(|(key, _)| key.as_str() != "_meta")
+            .map(|(_, value)| numeric_total(value))
+            .sum(),
+        _ => 0,
+    }
+}
+
+fn pdf_value(value: &Value) -> String {
+    let rendered = match value {
+        Value::Null => "-".to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::String(value) => value.clone(),
+        Value::Array(_) | Value::Object(_) => serde_json::to_string(value).unwrap_or_default(),
+    };
+    if rendered.chars().count() > 140 {
+        format!("{}...", rendered.chars().take(140).collect::<String>())
+    } else {
+        rendered
+    }
+}
+
+fn render_simple_pdf(title: &str, lines: &[String], watermark: &str) -> Vec<u8> {
+    let mut content_lines = vec![
+        "BT".to_string(),
+        "/F1 18 Tf".to_string(),
+        "50 792 Td".to_string(),
+        format!("({}) Tj", escape_pdf_text(title)),
+        "/F1 10 Tf".to_string(),
+        "0 -18 Td".to_string(),
+        format!("(Watermark: {}) Tj", escape_pdf_text(watermark)),
+    ];
+    let max_lines = 48;
+    for line in lines.iter().take(max_lines) {
+        content_lines.push("0 -14 Td".to_string());
+        content_lines.push(format!("({}) Tj", escape_pdf_text(line)));
+    }
+    if lines.len() > max_lines {
+        content_lines.push("0 -14 Td".to_string());
+        content_lines.push(format!("(... {} more lines) Tj", lines.len() - max_lines));
+    }
+    content_lines.push("ET".to_string());
+    let content = content_lines.join("\n");
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        format!(
+            "<< /Length {} >>\nstream\n{}\nendstream",
+            content.len(),
+            content
+        ),
+    ];
+
+    let mut bytes = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::with_capacity(objects.len());
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(bytes.len());
+        bytes.extend_from_slice(format!("{} 0 obj\n{}\nendobj\n", index + 1, object).as_bytes());
+    }
+    let xref_start = bytes.len();
+    bytes.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for offset in offsets {
+        bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    bytes.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+            objects.len() + 1,
+            xref_start
+        )
+        .as_bytes(),
+    );
+    bytes
+}
+
+fn escape_pdf_text(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_graphic() || character == ' ' {
+                character
+            } else {
+                '?'
+            }
+        })
+        .flat_map(|character| match character {
+            '(' | ')' | '\\' => vec!['\\', character],
+            _ => vec![character],
+        })
+        .collect()
 }
 
 fn summarize_adjustments(adjustments: &[TaxAdjustment]) -> Value {

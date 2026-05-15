@@ -3,6 +3,7 @@ use std::env;
 use axum::serve;
 use cit_system::{db, queue, router, AppState, Config};
 use reqwest::{
+    header::CONTENT_TYPE,
     multipart::{Form, Part},
     Client, StatusCode,
 };
@@ -189,6 +190,51 @@ async fn api_flow_persists_to_postgres_generates_efiling_and_handles_dlq() {
         .expect("form history")
         .iter()
         .any(|row| row["change_type"] == "MANUAL_UPDATE"));
+    let attachments = get_json(
+        &client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/forms/attachments"),
+    )
+    .await;
+    assert_eq!(attachments.as_array().expect("attachments").len(), 3);
+    assert!(attachments
+        .as_array()
+        .expect("attachments")
+        .iter()
+        .any(|row| row["form_code"] == "FORM3" && row["generated"] == true));
+    let form_pdf = client
+        .get(format!(
+            "{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/forms/FORM3/pdf"
+        ))
+        .send()
+        .await
+        .expect("form pdf response")
+        .error_for_status()
+        .expect("form pdf success");
+    assert!(form_pdf
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .starts_with("application/pdf"));
+    let form_pdf_bytes = form_pdf.bytes().await.expect("form pdf bytes");
+    assert!(form_pdf_bytes.starts_with(b"%PDF"));
+    let bundle = client
+        .get(format!(
+            "{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/forms/pdf-bundle/download"
+        ))
+        .send()
+        .await
+        .expect("form bundle response")
+        .error_for_status()
+        .expect("form bundle success");
+    assert!(bundle
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .starts_with("application/zip"));
+    let bundle_bytes = bundle.bytes().await.expect("form bundle bytes");
+    assert!(bundle_bytes.starts_with(b"PK"));
     assert_tax_data_input_module_works(&client, &base_url, &tenant_code, customer_id, by_id).await;
     assert_income_adjustment_engine_works(&client, &base_url, &tenant_code, by_id).await;
     assert_asset_based_adjustment_modules_work(&client, &base_url, &tenant_code, by_id).await;

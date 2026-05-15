@@ -517,6 +517,10 @@ async function navigateFormRoute(path) {
     "/modules/forms/relationships",
     "/modules/forms/migrations",
     "/modules/forms/resolver",
+    "/modules/forms/form3",
+    "/modules/forms/attachments",
+    "/modules/forms/linkage",
+    "/modules/forms/preview",
   ];
   state.activeFormPath = supported.includes(path) ? path : "/modules/forms/versions";
   highlightFormMenu();
@@ -2365,6 +2369,10 @@ async function renderFormScreen() {
     await renderFormMigrationScreen();
   } else if (state.activeFormPath === "/modules/forms/resolver") {
     await renderFormResolverScreen();
+  } else if (state.activeFormPath === "/modules/forms/attachments") {
+    await renderFormAttachmentsScreen();
+  } else if (state.activeFormPath === "/modules/forms/linkage") {
+    await renderFormRelationshipsScreen();
   } else if (
     state.activeFormPath === "/modules/forms/form3" ||
     state.activeFormPath === "/modules/forms/preview"
@@ -2564,6 +2572,77 @@ async function renderFormResolverScreen() {
     const result = await request(`/api/form-versioning/resolve?${params.toString()}`);
     el("formResolverOutput").textContent = JSON.stringify(result, null, 2);
     log("적용 서식 버전 조회", result);
+  });
+}
+
+async function renderFormAttachmentsScreen() {
+  const context = await loadTaxDataContext();
+  el("formScreenTitle").textContent = "부속서식 일람 / PDF 출력";
+  if (!context.byId) {
+    el("formScreenBody").innerHTML = taxDataYearSelector(context);
+    attachTaxDataYearSelector();
+    return;
+  }
+  const root = `/api/tenants/${context.tenantCode}/business-years/${context.byId}/forms`;
+  const attachments = await request(`${root}/attachments`);
+  const generatedCount = attachments.filter((attachment) => attachment.generated).length;
+  const validationCount = attachments.reduce((sum, attachment) => sum + Number(attachment.validation_count || 0), 0);
+  const rows = attachments.length
+    ? attachments
+        .map((attachment) => {
+          const statusClass = attachment.validation_count
+            ? "error"
+            : attachment.generated
+              ? "active"
+              : "dead_letter";
+          return `
+            <tr>
+              <td>
+                <strong>${escapeHtml(attachment.form_code)}</strong><br>
+                <span class="muted">${escapeHtml(attachment.form_name)}</span>
+              </td>
+              <td><span class="status-pill ${statusClass}">${escapeHtml(attachment.status)}</span></td>
+              <td>${attachment.generated ? "생성됨" : "미생성"}</td>
+              <td>${money.format(Number(attachment.total_amount || 0))}</td>
+              <td>${money.format(Number(attachment.validation_count || 0))}</td>
+              <td>${formatDateTime(attachment.updated_at)}</td>
+              <td class="table-actions">
+                <button class="secondary-btn compact" type="button" data-generate-form="${escapeHtml(attachment.form_code)}">생성</button>
+                <a class="secondary-btn compact" href="${escapeHtml(`${root}/${attachment.form_code}/pdf`)}">PDF</a>
+              </td>
+            </tr>
+          `;
+        })
+        .join("")
+    : `<tr><td colspan="7">부속서식 목록이 없습니다.</td></tr>`;
+
+  el("formScreenBody").innerHTML = `
+    ${taxDataYearSelector(context)}
+    <div class="law-table-panel">
+      <div class="admin-toolbar">
+        <label>대상 서식<input value="${attachments.length}" readonly /></label>
+        <label>생성 완료<input value="${generatedCount}" readonly /></label>
+        <label>검증 오류<input value="${validationCount}" readonly /></label>
+        <label>일괄 파일<a class="secondary-btn compact field-action" href="${escapeHtml(`${root}/pdf-bundle/download`)}">ZIP 다운로드</a></label>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>서식</th><th>상태</th><th>생성</th><th>대표 금액</th><th>검증</th><th>수정시각</th><th>조치</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+  attachTaxDataYearSelector();
+  document.querySelectorAll("[data-generate-form]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const generated = await request(`${root}/${button.dataset.generateForm}`, {
+        method: "POST",
+        body: "{}",
+      });
+      log("부속서식 생성 완료", { form_code: generated.form_code, status: generated.status });
+      await renderFormAttachmentsScreen();
+    });
   });
 }
 

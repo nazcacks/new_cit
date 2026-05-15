@@ -142,3 +142,18 @@ Invoke-RestMethod -Method Put http://localhost:8080/api/tenants/demo/business-ye
   -ContentType "application/json" `
   -Body '{"fields":{"tax_credits":3000001},"reason":"검토자 수동 조정","changed_by":"review01"}'
 ```
+
+## Phase 15 부속서식/PDF 예시 (2026-05-15)
+
+- 부속서식 일람으로 생성 여부와 검증 오류 수를 확인한다.
+- 개별 PDF 또는 ZIP 일괄 파일을 다운로드한다.
+
+```powershell
+Invoke-RestMethod http://localhost:8080/api/tenants/demo/business-years/1/forms/attachments
+
+Invoke-WebRequest http://localhost:8080/api/tenants/demo/business-years/1/forms/FORM3/pdf `
+  -OutFile FORM3.pdf
+
+Invoke-WebRequest http://localhost:8080/api/tenants/demo/business-years/1/forms/pdf-bundle/download `
+  -OutFile forms.zip
+```
