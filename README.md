@@ -1,5 +1,7 @@
 # CIT Corporate Income Tax Adjustment System
 
+새로운 법인세개발
+
 Rust implementation of the 법인세 세무조정계산서 system described in `법인세_세무조정계산서_시스템_설계서.md`.
 
 ## What Is Implemented
