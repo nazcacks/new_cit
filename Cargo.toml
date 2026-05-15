@@ -16,9 +16,11 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-axum = { version = "0.7", features = ["json", "macros"] }
+axum = { version = "0.7", features = ["json", "macros", "multipart"] }
 base64 = "0.22"
+calamine = "0.26"
 chrono = { version = "0.4", features = ["clock", "serde"] }
+csv = "1"
 dotenvy = "0.15"
 encoding_rs = "0.8"
 serde = { version = "1", features = ["derive"] }
@@ -32,7 +34,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 
 [dev-dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 
 [profile.release]
 codegen-units = 1

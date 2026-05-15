@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod api;
 pub mod auth;
 pub mod config;
@@ -5,10 +6,12 @@ pub mod db;
 pub mod domain;
 pub mod efiling;
 pub mod error;
+pub mod forms;
 pub mod modules;
 pub mod queue;
 pub mod state;
 pub mod tax;
+pub mod tax_data;
 pub mod tenant;
 pub mod web;
 

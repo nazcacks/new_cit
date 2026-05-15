@@ -1,0 +1,2407 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1280, initial-scale=1" />
+<title>CIT System — 법인세 세무조정계산서 (프로토타입)</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; }
+  .scroll-thin::-webkit-scrollbar { width:6px; height:6px; }
+  .scroll-thin::-webkit-scrollbar-thumb { background:#cbd5e1; border-radius:10px; }
+  .scroll-thin::-webkit-scrollbar-track { background:transparent; }
+  .step-line { background-image:linear-gradient(to right,#cbd5e1 50%,transparent 0%); background-size:8px 1px; background-repeat:repeat-x; background-position:center; }
+  .fade-in { animation: fadeIn 0.4s ease-out forwards; opacity: 0; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+  .glass { background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(16px); border: 1px solid rgba(255, 255, 255, 0.1); box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3); }
+  .animate-blob { animation: blob 7s infinite; }
+  .animation-delay-2000 { animation-delay: 2s; }
+  @keyframes blob { 0% { transform: translate(0px, 0px) scale(1); } 33% { transform: translate(30px, -50px) scale(1.1); } 66% { transform: translate(-20px, 20px) scale(0.9); } 100% { transform: translate(0px, 0px) scale(1); } }
+</style>
+</head>
+<body class="bg-slate-50 text-slate-800 antialiased selection:bg-indigo-100 selection:text-indigo-900">
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useMemo, useEffect, createContext, useContext, Fragment } = React;
+
+/* ============================================================
+   더미 데이터
+   ============================================================ */
+const DUMMY_USER = { id: "ksc", name: "강수", role: "TAX_EXPERT", tenant: "EY 회계법인" };
+
+const DUMMY_TENANTS = [
+  { id:"ey001", name:"EY 회계법인", type:"ACCOUNTING_FIRM", bizNo:"101-81-00001", owner:"이OO", users:48, customers:320, plan:"Enterprise", status:"ACTIVE", contract:"2026-01-01 ~ 2026-12-31" },
+  { id:"taxon", name:"택스온 세무법인", type:"TAX_CORP", bizNo:"220-88-12345", owner:"박OO", users:22, customers:145, plan:"Business", status:"ACTIVE", contract:"2026-03-01 ~ 2027-02-28" },
+  { id:"hanacct", name:"한빛 세무사사무소", type:"TAX_ACCOUNTANT_OFFICE", bizNo:"305-17-54321", owner:"김OO", users:6, customers:58, plan:"Starter", status:"ACTIVE", contract:"2026-01-15 ~ 2027-01-14" },
+  { id:"blue-tax", name:"블루 세무법인", type:"TAX_CORP", bizNo:"110-86-90123", owner:"최OO", users:14, customers:88, plan:"Business", status:"SUSPENDED", contract:"2025-11-01 ~ 2026-10-31" },
+];
+
+const DUMMY_CUSTOMERS = [
+  { id: 10, tenantId:"ey001", code: "C001", name: "㈜OOO 제조",        biz: "123-45-67890", industry: "제조업",   type: "GENERAL" },
+  { id: 11, tenantId:"ey001", code: "C002", name: "△△사 유통",        biz: "234-56-78901", industry: "도소매",   type: "GENERAL" },
+  { id: 12, tenantId:"taxon", code: "C003", name: "□□㈜ 소프트웨어",   biz: "345-67-89012", industry: "정보통신", type: "GENERAL" },
+  { id: 13, tenantId:"hanacct", code: "C004", name: "☆☆ 글로벌",      biz: "456-78-90123", industry: "제조업",   type: "FOREIGN" },
+  { id: 14, tenantId:"blue-tax", code: "C005", name: "◆◆ 그룹 (연결)", biz: "567-89-01234", industry: "지주",     type: "CONSOLIDATED" },
+];
+
+const WORK_SCOPE_OPTIONS = [
+  { code:"INFO", label:"기초정보" },
+  { code:"ADJUST", label:"세무조정" },
+  { code:"FORM", label:"서식작성" },
+  { code:"VALIDATE", label:"검증" },
+  { code:"APPROVE", label:"결재/검토" },
+  { code:"PRINT", label:"출력" },
+  { code:"EFILE", label:"전자신고" },
+  { code:"POST", label:"사후관리" },
+];
+const ALL_WORK_SCOPES = WORK_SCOPE_OPTIONS.map(scope => scope.code);
+const CUSTOMER_TARGET_WORK_SCOPES = {
+  10: ["INFO","ADJUST","FORM","VALIDATE","APPROVE","PRINT","EFILE","POST"],
+  11: ["INFO","ADJUST","FORM","VALIDATE","PRINT"],
+  12: ["INFO","ADJUST","FORM","VALIDATE","APPROVE","EFILE"],
+  13: ["INFO","FORM","PRINT","POST"],
+  14: ["INFO","VALIDATE","APPROVE","POST"],
+};
+const targetWorkScopesForCustomer = (customerId) => CUSTOMER_TARGET_WORK_SCOPES[Number(customerId)] || ALL_WORK_SCOPES;
+const workScopeLabel = (code) => WORK_SCOPE_OPTIONS.find(scope => scope.code === code)?.label || code;
+
+const STATUS_LABEL = {
+  DRAFT:     { ko: "작성중",   color: "bg-amber-100 text-amber-800" },
+  IN_REVIEW: { ko: "검증대기", color: "bg-sky-100 text-sky-800" },
+  APPROVED:  { ko: "결재완료", color: "bg-violet-100 text-violet-800" },
+  FILED:     { ko: "신고완료", color: "bg-emerald-100 text-emerald-800" },
+  AMENDED:   { ko: "수정신고", color: "bg-pink-100 text-pink-800" },
+};
+
+const DUMMY_BYS = [
+  { id: 101, customerId: 10, fy: 2025, period: "2025-01-01 ~ 2025-12-31", status: "DRAFT",     progress: 65, snapshot: { cit: "v2025-01", entLimit: "v2025-01", rnd: "v2025-01", form3: "v2025-01" } },
+  { id: 102, customerId: 11, fy: 2025, period: "2025-01-01 ~ 2025-12-31", status: "IN_REVIEW", progress: 90, snapshot: { cit: "v2025-01", entLimit: "v2025-01", rnd: "v2025-01", form3: "v2025-01" } },
+  { id: 103, customerId: 12, fy: 2025, period: "2025-01-01 ~ 2025-12-31", status: "APPROVED",  progress:100, snapshot: { cit: "v2025-01", entLimit: "v2025-01", rnd: "v2025-01", form3: "v2025-01" } },
+  { id: 104, customerId: 13, fy: 2025, period: "2025-04-01 ~ 2026-03-31", status: "FILED",     progress:100, snapshot: { cit: "v2024-01", entLimit: "v2024-01", rnd: "v2024-01", form3: "v2024-01" } },
+  { id: 105, customerId: 10, fy: 2024, period: "2024-01-01 ~ 2024-12-31", status: "FILED",     progress:100, snapshot: { cit: "v2024-01", entLimit: "v2024-01", rnd: "v2024-01", form3: "v2024-01" } },
+];
+
+const TAX_MODULES = [
+  { code: "B-1",  no: "2-1",  name: "소득금액조정명세서",      form: "별지 제15호",     group: "통합" },
+  { code: "B-2",  no: "2-2",  name: "기부금 조정",            form: "별지 제22호",     group: "거래기반" },
+  { code: "B-3",  no: "2-3",  name: "접대비 조정",            form: "별지 제23호",     group: "거래기반" },
+  { code: "B-4",  no: "2-4",  name: "감가상각비 조정",        form: "별지 제20호",     group: "자산기반" },
+  { code: "B-5",  no: "2-5",  name: "퇴직급여/퇴직연금",      form: "별지 제32/33호",  group: "자산기반" },
+  { code: "B-6",  no: "2-6",  name: "대손충당금/대손금",      form: "별지 제34호",     group: "자산기반" },
+  { code: "B-7",  no: "2-7",  name: "외화 평가",              form: "별지 제40호",     group: "평가" },
+  { code: "B-8",  no: "2-8",  name: "재고·유가증권 평가",     form: "별지 제41호",     group: "평가" },
+  { code: "B-9",  no: "2-9",  name: "지급이자 손금불산입",    form: "별지 제29호",     group: "거래기반" },
+  { code: "B-10", no: "2-10", name: "업무용승용차",           form: "별지 제29호의2",  group: "자산기반" },
+  { code: "B-11", no: "2-11", name: "이월결손금 공제",        form: "별지 제8호",      group: "평가" },
+  { code: "B-12", no: "2-12", name: "세액공제·감면",          form: "별지 제8호 부표", group: "세액" },
+  { code: "B-13", no: "2-13", name: "최저한세",                form: "별지 제4호",      group: "세액" },
+  { code: "B-14", no: "2-14", name: "가산세",                  form: "별지 제5호",      group: "세액" },
+  { code: "B-15", no: "2-15", name: "자본금과 적립금",         form: "별지 제50호 갑/을",group: "유보" },
+  { code: "B-16", no: "2-16", name: "외국법인 세무조정",       form: "—",               group: "특수" },
+  { code: "B-17", no: "2-17", name: "연결납세",                 form: "—",               group: "특수" },
+];
+
+const WORKSPACE_STEPS = [
+  { id: "info",  no: "1", name: "세무정보 입력" },
+  { id: "adj",   no: "2", name: "세무조정" },
+  { id: "form",  no: "3", name: "서식 작성" },
+  { id: "val",   no: "4", name: "검증" },
+  { id: "appr",  no: "5", name: "결재" },
+  { id: "print", no: "6", name: "출력" },
+  { id: "file",  no: "7", name: "전자신고" },
+];
+
+/* ============================================================
+   AppContext
+   ============================================================ */
+const AppCtx = createContext(null);
+const useApp = () => useContext(AppCtx);
+
+/* ============================================================
+   메뉴 정의
+   ============================================================ */
+const MENU = [
+  { key: "dashboard", label: "① 대시보드", icon: "📊" },
+  { key: "workspace", label: "② 신고 작업", icon: "📝", children: [
+    { key: "ws-start", label: "0. 작업 시작" },
+    { key: "ws-info",  label: "1. 세무정보 입력" },
+    { key: "ws-adj",   label: "2. 세무조정" },
+    { key: "ws-form",  label: "3. 서식 작성" },
+    { key: "ws-val",   label: "4. 검증" },
+    { key: "ws-appr",  label: "5. 결재" },
+    { key: "ws-print", label: "6. 출력" },
+    { key: "ws-file",  label: "7. 전자신고" },
+  ] },
+  { key: "post", label: "③ 사후 관리", icon: "🗂", children: [
+    { key: "post-hist", label: "신고 이력" },
+    { key: "post-amend", label: "수정신고/경정청구" },
+  ] },
+  { key: "reports", label: "④ 분석/보고서", icon: "📈", children: [
+    { key: "rp-compare", label: "사업연도 비교" },
+    { key: "rp-burden",  label: "세부담 분석" },
+    { key: "rp-reserve", label: "유보 잔액 추이" },
+  ] },
+  { key: "admin", label: "⑤ 관리", icon: "⚙", children: [
+    { key: "ad-tenant",   label: "5-0 테넌트 관리" },
+    { key: "ad-cust",     label: "5-A 고객사 관리" },
+    { key: "ad-user-list",label: "5-B 사용자 관리" },
+    { key: "ad-role",     label: "5-C 역할 / 권한 매트릭스" },
+    { key: "ad-menu-fn",  label: "5-D 메뉴 / 기능 관리" },
+    { key: "ad-cacc",     label: "5-E 담당 법인 권한" },
+    { key: "ad-law",      label: "5-F 법령·세율 버전" },
+    { key: "ad-form",     label: "5-G 서식 버전" },
+    { key: "ad-audit",    label: "5-H 감사·로그" },
+  ] },
+];
+
+/* ============================================================
+   공통 UI
+   ============================================================ */
+const Badge = ({ children, color="bg-slate-100 text-slate-700 border-slate-200" }) =>
+  <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${color} shadow-sm transition-all duration-200`}>{children}</span>;
+
+const Card = ({ title, action, children, className="" }) => (
+  <div className={`bg-white rounded-xl border border-slate-200/60 shadow-[0_2px_10px_-3px_rgba(6,81,237,0.1)] hover:shadow-[0_8px_20px_-6px_rgba(6,81,237,0.15)] transition-shadow duration-300 ${className}`}>
+    {(title || action) && (
+      <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+        <h3 className="font-semibold text-slate-800 tracking-tight">{title}</h3>
+        <div>{action}</div>
+      </div>
+    )}
+    <div className="p-5">{children}</div>
+  </div>
+);
+
+const Btn = ({ children, onClick, variant="primary", size="md", disabled=false, className="" }) => {
+  const base = "inline-flex items-center justify-center font-medium rounded-lg transition-all duration-200 active:scale-95";
+  const sizes = { sm:"px-3 py-1.5 text-xs", md:"px-4 py-2 text-sm", lg:"px-6 py-3 text-base" };
+  const variants = {
+    primary: "bg-gradient-to-r from-indigo-600 to-blue-600 text-white shadow-md shadow-indigo-500/30 hover:shadow-lg hover:shadow-indigo-500/40 hover:-translate-y-0.5",
+    secondary:"bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 hover:border-slate-400 shadow-sm",
+    danger:  "bg-gradient-to-r from-rose-500 to-red-600 text-white shadow-md shadow-rose-500/30 hover:shadow-lg hover:shadow-rose-500/40 hover:-translate-y-0.5",
+    ghost:   "bg-transparent text-slate-600 hover:bg-slate-100 hover:text-slate-900",
+    success: "bg-gradient-to-r from-emerald-500 to-teal-600 text-white shadow-md shadow-emerald-500/30 hover:shadow-lg hover:shadow-emerald-500/40 hover:-translate-y-0.5",
+  };
+  return <button disabled={disabled}
+    className={`${base} ${sizes[size]} ${variants[variant]} ${disabled?'opacity-50 cursor-not-allowed transform-none shadow-none':''} ${className}`}
+    onClick={onClick}>{children}</button>;
+};
+
+/* ============================================================
+   Login + 2FA
+   ============================================================ */
+const Login = ({ onLogin }) => {
+  const [step, setStep] = useState("creds"); // creds | otp
+  const [id, setId] = useState("ksc");
+  const [pw, setPw] = useState("demo");
+  const [otp, setOtp] = useState("");
+  const submitCreds = (e) => { e.preventDefault(); setStep("otp"); };
+  const submitOtp   = (e) => { e.preventDefault(); if (otp.length === 6) onLogin(); };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-[conic-gradient(at_bottom_left,_var(--tw-gradient-stops))] from-slate-900 via-indigo-900 to-slate-900 relative overflow-hidden">
+      <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] opacity-10 mix-blend-overlay"></div>
+      <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-indigo-500 rounded-full mix-blend-multiply filter blur-3xl opacity-30 animate-blob"></div>
+      <div className="absolute top-1/3 right-1/4 w-96 h-96 bg-purple-500 rounded-full mix-blend-multiply filter blur-3xl opacity-30 animate-blob animation-delay-2000"></div>
+      
+      <div className="glass shadow-2xl rounded-2xl p-10 w-[420px] relative z-10 fade-in border border-white/20">
+        <div className="text-center mb-8">
+          <div className="text-4xl mb-3 inline-block p-4 rounded-2xl bg-white/10 shadow-inner backdrop-blur-md">📊</div>
+          <h1 className="text-2xl font-bold text-white tracking-tight mt-2">CIT System</h1>
+          <p className="text-sm text-indigo-200 mt-1">법인세 세무조정계산서 시스템 v1.0</p>
+        </div>
+
+        {step === "creds" && (
+          <form className="space-y-5 fade-in" style={{ animationDelay: '100ms' }} onSubmit={submitCreds}>
+            <div>
+              <label className="block text-xs font-medium text-indigo-100 mb-1.5 ml-1">회사 코드</label>
+              <input className="w-full bg-white/10 border border-indigo-200/20 rounded-xl px-4 py-3 text-sm text-white placeholder-indigo-200/50 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white/20 transition-all" defaultValue="EY001" />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-indigo-100 mb-1.5 ml-1">아이디</label>
+              <input className="w-full bg-white/10 border border-indigo-200/20 rounded-xl px-4 py-3 text-sm text-white placeholder-indigo-200/50 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white/20 transition-all" value={id} onChange={e=>setId(e.target.value)} />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-indigo-100 mb-1.5 ml-1">비밀번호</label>
+              <input type="password" className="w-full bg-white/10 border border-indigo-200/20 rounded-xl px-4 py-3 text-sm text-white placeholder-indigo-200/50 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white/20 transition-all" value={pw} onChange={e=>setPw(e.target.value)} />
+            </div>
+            <div className="pt-2">
+              <button className="w-full bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-400 hover:to-purple-500 text-white font-semibold rounded-xl px-4 py-3 shadow-lg shadow-indigo-500/30 hover:shadow-indigo-500/50 hover:-translate-y-0.5 transition-all duration-200">로그인</button>
+            </div>
+            <p className="text-xs text-indigo-200/60 text-center mt-4">데모용 — 어떤 값을 입력해도 진행됩니다</p>
+          </form>
+        )}
+
+        {step === "otp" && (
+          <form className="space-y-5 fade-in" onSubmit={submitOtp}>
+            <div className="bg-white/10 border border-amber-500/30 text-amber-100 text-xs p-4 rounded-xl shadow-inner backdrop-blur-sm">2단계 인증 (TOTP) — 인증 앱 6자리 코드를 입력하세요</div>
+            <input
+              className="w-full bg-white/10 border border-indigo-200/20 rounded-xl px-4 py-4 text-center text-3xl tracking-[0.5em] text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white/20 transition-all"
+              value={otp} onChange={e=>setOtp(e.target.value.replace(/\D/g,"").slice(0,6))}
+              placeholder="000000" autoFocus />
+            <div className="pt-2">
+              <button disabled={otp.length!==6} className="w-full bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-400 hover:to-purple-500 disabled:from-slate-600 disabled:to-slate-700 text-white font-semibold rounded-xl px-4 py-3 shadow-lg shadow-indigo-500/30 transition-all duration-200 disabled:shadow-none disabled:transform-none">인증 확인</button>
+            </div>
+            <button type="button" className="text-xs text-indigo-200 hover:text-white underline w-full text-center transition-colors" onClick={()=>setStep("creds")}>← 다시 입력</button>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+};
+
+/* ============================================================
+   Sidebar
+   ============================================================ */
+const Sidebar = () => {
+  const { menuKey, navigate, current } = useApp();
+  const [open, setOpen] = useState({ workspace:true, admin:false, post:false, reports:false });
+
+  const wsEnabled = !!current.byId;
+
+  return (
+    <aside className="w-64 bg-slate-900 border-r border-slate-800 text-slate-300 flex flex-col shadow-2xl z-20">
+      <div className="px-6 py-5 border-b border-slate-800/50 bg-slate-900/50 backdrop-blur-md">
+        <div className="font-bold text-white tracking-wide flex items-center gap-2"><span className="p-1.5 bg-indigo-500/20 text-indigo-400 rounded-lg">📊</span> CIT System</div>
+        <div className="text-xs text-slate-500 mt-1 ml-9">법인세 세무조정</div>
+      </div>
+      <nav className="flex-1 overflow-y-auto scroll-thin py-4 px-3 space-y-1">
+        {MENU.map(m => (
+          <div key={m.key} className="mb-1">
+            <button
+              className={`w-full text-left px-3 py-2.5 rounded-lg flex items-center justify-between text-sm transition-all duration-200
+                ${menuKey===m.key && !m.children ? "bg-indigo-500/10 text-indigo-400 font-medium":"hover:bg-slate-800/50 hover:text-slate-100"}`}
+              onClick={()=>{
+                if (m.children) setOpen({...open, [m.key]:!open[m.key]});
+                else navigate(m.key);
+              }}>
+              <span className="flex items-center gap-3"><span className={`${menuKey===m.key?"opacity-100":"opacity-70"}`}>{m.icon}</span>{m.label}</span>
+              {m.children && <span className="text-xs text-slate-500 transition-transform duration-200" style={{transform: open[m.key]?'rotate(180deg)':'rotate(0)'}}>▾</span>}
+            </button>
+            {m.children && (
+              <div className={`overflow-hidden transition-all duration-300 ${open[m.key] ? "max-h-96 opacity-100 mt-1" : "max-h-0 opacity-0"}`}>
+                <div className="ml-4 pl-3 border-l border-slate-800 space-y-1 py-1">
+                  {m.children.map(c => {
+                    const disabled = m.key==="workspace" && !wsEnabled && c.key !== "ws-start";
+                    return (
+                      <button
+                        key={c.key}
+                        disabled={disabled}
+                        className={`w-full text-left px-3 py-2 rounded-md text-xs flex items-center transition-all duration-200
+                          ${menuKey===c.key ? "text-indigo-400 bg-indigo-500/10 font-medium":"text-slate-400 hover:text-slate-200 hover:bg-slate-800/50"}
+                          ${disabled?"opacity-30 cursor-not-allowed":""}`}
+                        onClick={()=>!disabled && navigate(c.key)}>
+                        {c.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      </nav>
+      <div className="p-4 m-3 rounded-xl bg-slate-800/30 border border-slate-700/50 text-xs">
+        {current.byId
+          ? <div className="space-y-2">
+              <div className="flex items-center gap-1.5 text-slate-300 font-medium"><span className="text-indigo-400">📌</span> {current.customerName}</div>
+              <div className="flex items-center justify-between pl-5">
+                <span className="text-slate-500">{current.fy}년도</span>
+                <Badge color="bg-indigo-500/20 text-indigo-300 border-indigo-500/30">{STATUS_LABEL[current.status].ko}</Badge>
+              </div>
+            </div>
+          : <div className="text-slate-500 flex items-center gap-2"><div className="w-2 h-2 rounded-full bg-slate-600"></div>고객사 미선택</div>}
+      </div>
+    </aside>
+  );
+};
+
+/* ============================================================
+   상단 헤더
+   ============================================================ */
+const TopBar = () => {
+  const { logout } = useApp();
+  return (
+    <header className="h-16 bg-white/80 backdrop-blur-md border-b border-slate-200/80 flex items-center justify-between px-6 z-10 sticky top-0">
+      <div className="text-sm flex-1 max-w-xl">
+        <div className="relative">
+          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">🔍</span>
+          <input placeholder="고객사 / 사업연도 / 서식 검색" className="w-full bg-slate-100/50 border border-slate-200/80 rounded-full pl-9 pr-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:bg-white transition-all"/>
+        </div>
+      </div>
+      <div className="flex items-center gap-5 text-sm">
+        <div className="flex items-center gap-2 border-r border-slate-200 pr-5">
+          <button className="relative p-2 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-full transition-colors">
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" /></svg>
+            <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-rose-500 rounded-full border-2 border-white"></span>
+          </button>
+          <button className="relative p-2 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-full transition-colors">
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" /></svg>
+            <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-amber-500 rounded-full border-2 border-white"></span>
+          </button>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-indigo-500 to-purple-500 flex items-center justify-center text-white font-semibold text-xs shadow-sm">KS</div>
+          <div className="hidden md:block">
+            <div className="font-medium text-slate-700">{DUMMY_USER.name}님</div>
+            <div className="text-[11px] text-slate-500">{DUMMY_USER.role}</div>
+          </div>
+        </div>
+        <Btn variant="ghost" size="sm" className="ml-2 !px-3 !py-1.5 border border-slate-200" onClick={logout}>로그아웃</Btn>
+      </div>
+    </header>
+  );
+};
+
+/* ============================================================
+   업무 진행 스테퍼 (② 신고 작업)
+   ============================================================ */
+const Stepper = ({ active }) => {
+  const { current, navigate } = useApp();
+  // 단순 진행 임계: progress 기반
+  const reachedIdx = current.status === "FILED" ? 7
+                   : current.status === "APPROVED" ? 5
+                   : current.status === "IN_REVIEW" ? 3
+                   : Math.max(1, Math.floor((current.progress||0)/15));
+  const activeIdx = WORKSPACE_STEPS.findIndex(s=>s.id===active);
+
+  return (
+    <div className="bg-white border-b border-slate-200 px-6 py-3">
+      <ol className="flex items-center gap-1 text-xs">
+        {WORKSPACE_STEPS.map((s, i) => {
+          const done = i < reachedIdx;
+          const cur = i === activeIdx;
+          return (
+            <Fragment key={s.id}>
+              <li>
+                <button
+                  onClick={()=>navigate("ws-"+s.id)}
+                  className={`flex items-center gap-1 px-2 py-1 rounded
+                    ${cur ? "bg-indigo-600 text-white":""}
+                    ${done && !cur ? "text-emerald-700":""}
+                    ${!cur && !done ? "text-slate-500":""}`}>
+                  <span className={`inline-flex items-center justify-center w-5 h-5 rounded-full text-[10px]
+                    ${cur ? "bg-white text-indigo-600":""}
+                    ${done && !cur ? "bg-emerald-200 text-emerald-800":""}
+                    ${!cur && !done ? "bg-slate-200":""}`}>{s.no}</span>
+                  <span className="font-medium">{s.name}</span>
+                  {done && !cur && <span className="text-emerald-600">✓</span>}
+                </button>
+              </li>
+              {i < WORKSPACE_STEPS.length-1 && <li className="flex-1 h-px step-line"></li>}
+            </Fragment>
+          );
+        })}
+      </ol>
+    </div>
+  );
+};
+
+/* ============================================================
+   적용 법령 배너
+   ============================================================ */
+const LawBanner = () => {
+  const { current } = useApp();
+  if (!current.byId) return null;
+  return (
+    <div className="bg-amber-50 border-b border-amber-100 px-6 py-2 text-xs text-amber-900 flex items-center justify-between">
+      <div>
+        ⓘ <b>적용 법령</b>: {current.fy} 사업연도 (법인세법 2024.12.31 개정 반영)
+        &nbsp;▸ 법인세율 {current.snapshot.cit}
+        &nbsp;▸ 접대비한도 {current.snapshot.entLimit}
+        &nbsp;▸ R&D공제 {current.snapshot.rnd}
+        &nbsp;▸ 별지제3호 {current.snapshot.form3}
+      </div>
+      <button className="underline">근거 보기</button>
+    </div>
+  );
+};
+
+/* ============================================================
+   페이지 컴포넌트들
+   ============================================================ */
+
+const Dashboard = () => {
+  const { navigate } = useApp();
+  const Stat = ({label, n, color, bg, icon}) =>
+    <div className="bg-white border border-slate-200/60 rounded-xl p-5 shadow-sm hover:shadow-md hover:-translate-y-1 transition-all duration-300 relative overflow-hidden group">
+      <div className={`absolute -right-4 -top-4 w-20 h-20 rounded-full ${bg} opacity-50 group-hover:scale-150 transition-transform duration-500`}></div>
+      <div className="relative z-10">
+        <div className="flex items-center gap-2 mb-2">
+          <span className="text-lg">{icon}</span>
+          <div className="text-sm font-medium text-slate-500">{label}</div>
+        </div>
+        <div className={`text-3xl font-bold ${color}`}>{n}</div>
+      </div>
+    </div>;
+  return (
+    <div className="p-6 space-y-6 fade-in">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-800 tracking-tight">대시보드</h1>
+          <p className="text-sm text-slate-500 mt-1">2026-05-14 (목요일)</p>
+        </div>
+        <Btn size="sm" onClick={()=>navigate("ws-start")}>신고 작업 시작 🚀</Btn>
+      </div>
+
+      <div className="grid grid-cols-5 gap-4">
+        <Stat label="작성중"     n="12" color="text-amber-600" bg="bg-amber-100" icon="📝"/>
+        <Stat label="검증 대기"  n="4"  color="text-sky-600" bg="bg-sky-100" icon="🔍"/>
+        <Stat label="결재 대기"  n="2"  color="text-violet-600" bg="bg-violet-100" icon="⏳"/>
+        <Stat label="승인 완료"  n="3"  color="text-indigo-600" bg="bg-indigo-100" icon="✅"/>
+        <Stat label="신고 완료"  n="23" color="text-emerald-600" bg="bg-emerald-100" icon="🏆"/>
+      </div>
+
+      <div className="grid grid-cols-3 gap-4">
+        <Card title="신고 마감 임박" className="col-span-1">
+          <ul className="text-sm space-y-2">
+            <li className="flex justify-between"><span>㈜OOO 2025</span><Badge color="bg-rose-100 text-rose-700">D-7</Badge></li>
+            <li className="flex justify-between"><span>△△사 2025</span><Badge color="bg-amber-100 text-amber-700">D-14</Badge></li>
+            <li className="flex justify-between"><span>□□㈜ 2025</span><Badge color="bg-slate-100 text-slate-700">D-30</Badge></li>
+          </ul>
+        </Card>
+        <Card title="내 결재함" className="col-span-1">
+          <ul className="text-sm space-y-2">
+            <li className="flex justify-between"><span>△△사 세무조정 검토</span><Btn size="sm" variant="secondary" onClick={()=>navigate("ws-appr")}>이동</Btn></li>
+            <li className="flex justify-between"><span>□□㈜ 결재 요청</span><Btn size="sm" variant="secondary" onClick={()=>navigate("ws-appr")}>이동</Btn></li>
+          </ul>
+        </Card>
+        <Card title="빠른 시작" className="col-span-1">
+          <p className="text-sm text-slate-600 mb-3">고객사를 선택해 작업을 시작합니다.</p>
+          <Btn className="w-full" onClick={()=>navigate("ws-start")}>신고 작업 시작 ▶</Btn>
+        </Card>
+      </div>
+
+      <Card title="최근 활동">
+        <ul className="text-sm divide-y">
+          <li className="py-2 flex justify-between"><span>강수님이 <b>㈜OOO</b> 세무조정 저장</span><span className="text-xs text-slate-400">방금 전</span></li>
+          <li className="py-2 flex justify-between"><span>박OO님이 <b>△△사</b> 서식 생성</span><span className="text-xs text-slate-400">12분 전</span></li>
+          <li className="py-2 flex justify-between"><span>김OO님이 <b>□□㈜</b> 신고 제출</span><span className="text-xs text-slate-400">1시간 전</span></li>
+          <li className="py-2 flex justify-between"><span>관리자가 <b>R&D 세액공제</b> v2025-02 활성화</span><span className="text-xs text-slate-400">어제</span></li>
+        </ul>
+      </Card>
+    </div>
+  );
+};
+
+/* ---------- 0. 작업 시작 ---------- */
+const WorkStart = () => {
+  const { setCurrent, navigate } = useApp();
+  const [selectedId, setSelectedId] = useState(null);
+
+  const pickBY = (by) => {
+    const cust = DUMMY_CUSTOMERS.find(c => c.id === by.customerId);
+    setCurrent({
+      byId: by.id, fy: by.fy, customerId: cust.id, customerName: cust.name,
+      status: by.status, progress: by.progress, snapshot: by.snapshot,
+    });
+    navigate("ws-info");
+  };
+
+  return (
+    <div className="p-6 space-y-4">
+      <h1 className="text-xl font-bold text-slate-800">신고 작업 시작</h1>
+      <p className="text-sm text-slate-500">작업할 고객사와 사업연도를 선택하세요. 선택 후 좌측 ② 신고 작업 메뉴가 활성화됩니다.</p>
+
+      <Card title="고객사 / 사업연도 선택" action={<Btn variant="secondary" size="sm">+ 신규 사업연도</Btn>}>
+        <table className="w-full text-sm">
+          <thead className="text-xs text-slate-500 border-b">
+            <tr>
+              <th className="text-left py-2 w-8"></th>
+              <th className="text-left">고객사</th>
+              <th className="text-left">사업연도</th>
+              <th className="text-left">상태</th>
+              <th className="text-left">진행률</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {DUMMY_BYS.map(by => {
+              const c = DUMMY_CUSTOMERS.find(x=>x.id===by.customerId);
+              const sel = selectedId === by.id;
+              return (
+                <tr key={by.id} className={`border-b hover:bg-slate-50 cursor-pointer ${sel?"bg-indigo-50":""}`}
+                    onClick={()=>setSelectedId(by.id)}>
+                  <td className="py-2"><input type="radio" checked={sel} readOnly /></td>
+                  <td>
+                    <div className="font-medium">{c.name}</div>
+                    <div className="text-xs text-slate-500">{c.biz} · {c.industry}</div>
+                  </td>
+                  <td>{by.fy}<div className="text-xs text-slate-500">{by.period}</div></td>
+                  <td><Badge color={STATUS_LABEL[by.status].color}>{STATUS_LABEL[by.status].ko}</Badge></td>
+                  <td>
+                    <div className="w-32 h-2 bg-slate-200 rounded">
+                      <div className="h-2 bg-indigo-500 rounded" style={{width:by.progress+"%"}}></div>
+                    </div>
+                    <div className="text-xs text-slate-500 mt-1">{by.progress}%</div>
+                  </td>
+                  <td><Btn size="sm" onClick={()=>pickBY(by)}>계속 ▶</Btn></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </Card>
+
+      {selectedId && (
+        <Card title="선택한 사업연도의 적용 스냅샷">
+          {(() => {
+            const by = DUMMY_BYS.find(x=>x.id===selectedId);
+            return (
+              <div className="grid grid-cols-4 gap-3 text-sm">
+                <div><div className="text-xs text-slate-500">법인세율</div>{by.snapshot.cit}</div>
+                <div><div className="text-xs text-slate-500">접대비 한도</div>{by.snapshot.entLimit}</div>
+                <div><div className="text-xs text-slate-500">R&D 공제</div>{by.snapshot.rnd}</div>
+                <div><div className="text-xs text-slate-500">별지 제3호</div>{by.snapshot.form3}</div>
+              </div>
+            );
+          })()}
+        </Card>
+      )}
+    </div>
+  );
+};
+
+/* ---------- 1. 세무정보 입력 ---------- */
+const WorkInfo = () => {
+  const { navigate } = useApp();
+  const [sub, setSub] = useState("fs");
+  const items = [
+    { id:"fs", n:"1-1", t:"재무제표" },
+    { id:"map",n:"1-2", t:"계정과목 매핑" },
+    { id:"as", n:"1-3", t:"자산 및 감가상각" },
+    { id:"tx", n:"1-4", t:"거래 명세" },
+    { id:"car",n:"1-5", t:"업무용승용차 운행기록" },
+    { id:"chk",n:"1-9", t:"일관성 검증" },
+  ];
+  return (
+    <Fragment>
+      <Stepper active="info" />
+      <LawBanner />
+      <div className="flex flex-1 overflow-hidden">
+        <div className="w-64 bg-white border-r border-slate-200 overflow-y-auto scroll-thin">
+          <div className="px-4 py-3 text-xs font-semibold text-slate-500 border-b">1. 세무정보 입력</div>
+          {items.map(it => (
+            <button key={it.id}
+              onClick={()=>setSub(it.id)}
+              className={`w-full text-left px-4 py-2 text-sm border-b border-slate-100
+                ${sub===it.id ? "bg-indigo-50 text-indigo-700 border-l-4 border-l-indigo-600":"hover:bg-slate-50"}`}>
+              <span className="text-xs text-slate-400 mr-2">{it.n}</span>{it.t}
+            </button>
+          ))}
+        </div>
+        <div className="flex-1 overflow-y-auto scroll-thin p-6 space-y-4">
+          {sub==="fs" && (
+            <Card title="재무제표 입력 / 임포트"
+              action={<><Btn size="sm" variant="secondary">표준 템플릿 ↓</Btn><Btn size="sm" className="ml-2">Excel 업로드</Btn></>}>
+              <div className="grid grid-cols-3 gap-4 text-sm">
+                <div className="border rounded p-4"><div className="text-slate-500 text-xs">자산총계</div><div className="text-2xl font-bold">1,234,567,890</div></div>
+                <div className="border rounded p-4"><div className="text-slate-500 text-xs">부채총계</div><div className="text-2xl font-bold">500,000,000</div></div>
+                <div className="border rounded p-4"><div className="text-slate-500 text-xs">자본총계</div><div className="text-2xl font-bold">734,567,890</div></div>
+              </div>
+              <div className="mt-3 text-xs text-emerald-600">✓ 차변/대변 일치 / ✓ 잔액 검증 통과</div>
+            </Card>
+          )}
+          {sub==="map" && (
+            <Card title="계정과목 매핑">
+              <p className="text-sm text-slate-500 mb-3">고객사 계정과목과 표준 계정과목을 매핑합니다. 1회 매핑 후 자동 학습되어 다음에 재사용됩니다.</p>
+              <table className="w-full text-sm">
+                <thead className="text-xs text-slate-500 border-b"><tr><th className="text-left py-1">고객사 계정</th><th className="text-left">표준 계정</th><th>학습</th></tr></thead>
+                <tbody>
+                  <tr className="border-b"><td>접대비_법인카드</td><td>접대비</td><td>✓</td></tr>
+                  <tr className="border-b"><td>임직원_복리</td><td>복리후생비</td><td>✓</td></tr>
+                  <tr className="border-b"><td>외주_용역</td><td className="text-amber-600">미매핑</td><td>—</td></tr>
+                </tbody>
+              </table>
+            </Card>
+          )}
+          {sub==="as" && (
+            <Card title="자산대장 (감가상각)" action={<Btn size="sm">Excel 가져오기</Btn>}>
+              <table className="w-full text-sm">
+                <thead className="text-xs text-slate-500 border-b">
+                  <tr><th className="text-left py-1">자산명</th><th>분류</th><th>취득일</th><th className="text-right">취득가액</th><th>내용연수</th><th>상각방법</th></tr>
+                </thead>
+                <tbody>
+                  <tr className="border-b"><td>본사 사옥</td><td>건물</td><td>2018-03-01</td><td className="text-right">2,500,000,000</td><td>40년</td><td>정액</td></tr>
+                  <tr className="border-b"><td>CNC 가공기</td><td>기계장치</td><td>2023-06-15</td><td className="text-right">120,000,000</td><td>10년</td><td>정률</td></tr>
+                  <tr className="border-b"><td>업무용차 GV80</td><td>차량운반구</td><td>2024-09-01</td><td className="text-right">90,000,000</td><td>5년</td><td>정액(강제)</td></tr>
+                </tbody>
+              </table>
+            </Card>
+          )}
+          {(sub==="tx"||sub==="car"||sub==="chk") && (
+            <Card title={items.find(i=>i.id===sub).t}>
+              <div className="text-sm text-slate-500">데모 화면 — 실제 입력 그리드는 Phase 7에서 구현됩니다.</div>
+            </Card>
+          )}
+          <div className="flex justify-end gap-2">
+            <Btn variant="secondary" disabled>◀ 이전 단계</Btn>
+            <Btn onClick={()=>navigate("ws-adj")}>다음 단계 (2. 세무조정) ▶</Btn>
+          </div>
+        </div>
+      </div>
+    </Fragment>
+  );
+};
+
+/* ---------- 2. 세무조정 ---------- */
+const WorkAdj = () => {
+  const { navigate } = useApp();
+  const [active, setActive] = useState("B-1");
+  const mod = TAX_MODULES.find(m=>m.code===active);
+
+  return (
+    <Fragment>
+      <Stepper active="adj" />
+      <LawBanner />
+      <div className="flex flex-1 overflow-hidden">
+        <div className="w-72 bg-white border-r border-slate-200 overflow-y-auto scroll-thin">
+          <div className="px-4 py-3 text-xs font-semibold text-slate-500 border-b">2. 세무조정 (17개 모듈)</div>
+          {["통합","자산기반","거래기반","평가","유보","세액","특수"].map(g => (
+            <div key={g}>
+              <div className="px-4 py-1.5 text-xxs text-slate-400 bg-slate-50 uppercase">{g}</div>
+              {TAX_MODULES.filter(m=>m.group===g).map(m=>(
+                <button key={m.code}
+                  onClick={()=>setActive(m.code)}
+                  className={`w-full text-left px-4 py-2 text-sm border-b border-slate-100 flex items-center
+                    ${active===m.code?"bg-indigo-50 text-indigo-700 border-l-4 border-l-indigo-600":"hover:bg-slate-50"}`}>
+                  <span className="text-xs text-slate-400 w-12">{m.no}</span>
+                  <span className="flex-1">{m.name}</span>
+                  <span className="text-xxs text-slate-400">{m.form.replace("별지 ","")}</span>
+                </button>
+              ))}
+            </div>
+          ))}
+        </div>
+
+        <div className="flex-1 overflow-y-auto scroll-thin p-6 space-y-4">
+          <Card title={`${mod.no}. ${mod.name}`} action={<><Badge>{mod.form}</Badge>&nbsp;<Btn size="sm" variant="secondary">법조항</Btn></>}>
+            <div className="grid grid-cols-4 gap-3 mb-4">
+              <div className="border rounded p-3 text-sm"><div className="text-xs text-slate-500">한도 산식</div>(법령 v2025-01 기반 자동)</div>
+              <div className="border rounded p-3 text-sm"><div className="text-xs text-slate-500">전기 이월 유보</div>5,200,000</div>
+              <div className="border rounded p-3 text-sm"><div className="text-xs text-slate-500">당기 발생 유보</div>2,800,000</div>
+              <div className="border rounded p-3 text-sm"><div className="text-xs text-slate-500">기말 유보</div>8,000,000</div>
+            </div>
+            <table className="w-full text-sm">
+              <thead className="text-xs text-slate-500 border-b">
+                <tr><th className="text-left py-1 w-8">No</th><th className="text-left">항목</th><th className="text-right">금액</th><th>처분</th></tr>
+              </thead>
+              <tbody>
+                <tr className="border-b"><td>1</td><td>법인세비용</td><td className="text-right">5,000,000</td><td>기타</td></tr>
+                <tr className="border-b"><td>2</td><td>업무무관경비 (관리용 차량)</td><td className="text-right">2,000,000</td><td>유보</td></tr>
+                <tr className="border-b"><td>3</td><td>접대비 한도초과액 <span className="text-xs text-slate-400">(자동, 2-3에서 연동)</span></td><td className="text-right">3,500,000</td><td>기타사외유출</td></tr>
+              </tbody>
+              <tfoot><tr className="font-semibold"><td colSpan="2" className="py-2">합계</td><td className="text-right">10,500,000</td><td></td></tr></tfoot>
+            </table>
+            <div className="mt-3 flex gap-2">
+              <Btn size="sm">+ 행 추가</Btn>
+              <Btn size="sm" variant="secondary">Excel 가져오기</Btn>
+              <Btn size="sm" variant="ghost">자동 분개</Btn>
+            </div>
+          </Card>
+
+          <div className="flex justify-end gap-2">
+            <Btn variant="secondary" onClick={()=>navigate("ws-info")}>◀ 이전 단계</Btn>
+            <Btn variant="secondary">저장</Btn>
+            <Btn onClick={()=>navigate("ws-form")}>다음 단계 (3. 서식) ▶</Btn>
+          </div>
+        </div>
+      </div>
+    </Fragment>
+  );
+};
+
+/* ---------- 3. 서식 ---------- */
+const WorkForm = () => {
+  const { navigate } = useApp();
+  return (
+    <Fragment>
+      <Stepper active="form" />
+      <LawBanner />
+      <div className="p-6 space-y-4">
+        <Card title="별지 제3호 — 법인세 과세표준 및 세액조정계산서"
+          action={<><Btn size="sm" variant="secondary">목록</Btn><Btn size="sm" className="ml-2">PDF 다운</Btn></>}>
+          <div className="bg-slate-50 border rounded p-6 font-mono text-sm whitespace-pre-line">
+{`I. 각 사업연도 소득 계산
+  ① 결산서상 당기순이익          100,000,000
+  ② 익금산입 및 손금불산입        20,000,000   ← 자동연동 [별지15호]
+  ③ 손금산입 및 익금불산입         5,000,000   ← 자동연동 [별지15호]
+  ④ 차가감 소득금액               115,000,000   ← ①+②-③
+  ⑤ 기부금 한도초과액                      0   ← [별지22호]
+  ⑥ 기부금 한도초과 이월 손금산입         0
+  ⑦ 각 사업연도 소득금액           115,000,000
+
+II. 과세표준 계산
+  ⑧ 이월결손금                    10,000,000   ← [별지8호]
+  ⑨ 비과세 소득                            0
+  ⑩ 소득공제                              0
+  ⑪ 과세표준                     105,000,000
+
+III. 세액 계산
+  ⑫ 산출세액                      18,950,000   ← 세율 v2025-01 기반
+  ⑬ 세액공제·감면 합계             2,000,000   ← [별지8호 부표]
+  ⑭ 결정세액                      16,950,000`}
+          </div>
+          <div className="text-xs text-slate-500 mt-2">자동연동 항목은 [회색 배경] 으로 표시되며 원천 위치로 점프 가능</div>
+        </Card>
+
+        <Card title="부속서식 일람 (100여 종)">
+          <div className="grid grid-cols-4 gap-2 text-sm">
+            {["별지15호","별지20호","별지22호","별지23호","별지29호","별지29호의2","별지32호","별지33호","별지34호","별지40호","별지41호","별지4호","별지5호","별지8호","별지50호 갑","별지50호 을"].map(s=>(
+              <div key={s} className="border rounded px-3 py-2 flex justify-between">
+                <span>{s}</span>
+                <Badge color="bg-emerald-100 text-emerald-700">완료</Badge>
+              </div>
+            ))}
+          </div>
+        </Card>
+
+        <div className="flex justify-end gap-2">
+          <Btn variant="secondary" onClick={()=>navigate("ws-adj")}>◀ 이전</Btn>
+          <Btn onClick={()=>navigate("ws-val")}>다음 (4. 검증) ▶</Btn>
+        </div>
+      </div>
+    </Fragment>
+  );
+};
+
+/* ---------- 4. 검증 ---------- */
+const WorkVal = () => {
+  const { navigate } = useApp();
+  const issues = [
+    { sev:"X", area:"서식",   msg:"별지제3호 ②와 별지15호 합계 불일치 (②=20M / 15호=18M)", loc:"별지제3호" },
+    { sev:"X", area:"유보",   msg:"전기말 유보 잔액과 당기초 불일치",                       loc:"자본금·적립금(을)" },
+    { sev:"!", area:"접대비", msg:"신용카드 미사용분 손금산입 대상 발견 (3건)",              loc:"2-3 접대비" },
+    { sev:"!", area:"법령",   msg:"R&D공제 v2025-02 공고됨 — 재계산 권장",                  loc:"2-12 세액공제" },
+    { sev:"ⓘ", area:"한도",   msg:"기부금 한도 여유 12,000,000원 (추가 공제 가능)",          loc:"2-2 기부금" },
+  ];
+  const sevColor = { X:"bg-rose-100 text-rose-700", "!":"bg-amber-100 text-amber-700", "ⓘ":"bg-sky-100 text-sky-700" };
+  const errCnt = issues.filter(i=>i.sev==="X").length;
+
+  return (
+    <Fragment>
+      <Stepper active="val" />
+      <LawBanner />
+      <div className="p-6 space-y-4">
+        <Card title="검증 결과" action={<Btn size="sm">일괄 검증 다시 실행</Btn>}>
+          <div className="flex gap-4 text-sm mb-3">
+            <div className="bg-rose-50 rounded px-3 py-1.5">오류 <b className="text-rose-700">{errCnt}</b></div>
+            <div className="bg-amber-50 rounded px-3 py-1.5">경고 <b className="text-amber-700">2</b></div>
+            <div className="bg-sky-50 rounded px-3 py-1.5">정보 <b className="text-sky-700">1</b></div>
+            <div className="ml-auto text-xs text-slate-500">총 142건 검증 규칙</div>
+          </div>
+          <table className="w-full text-sm">
+            <thead className="text-xs text-slate-500 border-b"><tr><th className="text-left py-1 w-12">종류</th><th>영역</th><th>메시지</th><th>위치</th><th>조치</th></tr></thead>
+            <tbody>
+              {issues.map((it,i)=>(
+                <tr key={i} className="border-b">
+                  <td><Badge color={sevColor[it.sev]}>{it.sev}</Badge></td>
+                  <td className="text-xs">{it.area}</td>
+                  <td>{it.msg}</td>
+                  <td className="text-xs text-slate-500">{it.loc}</td>
+                  <td><Btn size="sm" variant="secondary">이동</Btn></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+
+        <div className="flex justify-end gap-2 items-center">
+          <span className="text-xs text-slate-500">오류 0건이어야 5. 결재 단계로 진행됩니다.</span>
+          <Btn variant="secondary" onClick={()=>navigate("ws-form")}>◀ 이전</Btn>
+          <Btn onClick={()=>navigate("ws-appr")} disabled={errCnt>0}>다음 (5. 결재) ▶</Btn>
+        </div>
+      </div>
+    </Fragment>
+  );
+};
+
+/* ---------- 5. 결재 ---------- */
+const WorkAppr = () => {
+  const { navigate } = useApp();
+  return (
+    <Fragment>
+      <Stepper active="appr" />
+      <LawBanner />
+      <div className="p-6 space-y-4">
+        <Card title="내 결재 대기함">
+          <table className="w-full text-sm">
+            <thead className="text-xs text-slate-500 border-b"><tr><th className="text-left py-1">No</th><th>고객사</th><th>사업연도</th><th>작성자</th><th>요청일자</th><th>조치</th></tr></thead>
+            <tbody>
+              <tr className="border-b"><td>1</td><td className="font-medium">㈜OOO</td><td>2025</td><td>강수</td><td>2026-03-10</td><td><Btn size="sm">검토 ▶</Btn></td></tr>
+              <tr className="border-b"><td>2</td><td className="font-medium">△△사</td><td>2025</td><td>박OO</td><td>2026-03-11</td><td><Btn size="sm">검토 ▶</Btn></td></tr>
+            </tbody>
+          </table>
+        </Card>
+
+        <Card title="검토 — ㈜OOO 2025">
+          <div className="grid grid-cols-3 gap-3 text-sm mb-3">
+            <div className="border rounded p-3"><div className="text-xs text-slate-500">변경 항목</div>327건</div>
+            <div className="border rounded p-3"><div className="text-xs text-slate-500">첨부</div>5개</div>
+            <div className="border rounded p-3"><div className="text-xs text-slate-500">검증 결과</div>오류 0 / 경고 5</div>
+          </div>
+          <textarea className="w-full border rounded p-2 text-sm" rows="3" placeholder="검토 의견을 입력하세요..."></textarea>
+          <div className="flex gap-2 mt-3">
+            <Btn variant="success" onClick={()=>navigate("ws-print")}>승인</Btn>
+            <Btn variant="danger">반려</Btn>
+            <Btn variant="secondary">세무조정 보기</Btn>
+            <Btn variant="secondary">서식 미리보기</Btn>
+          </div>
+        </Card>
+
+        <div className="flex justify-end gap-2">
+          <Btn variant="secondary" onClick={()=>navigate("ws-val")}>◀ 이전</Btn>
+          <Btn onClick={()=>navigate("ws-print")}>다음 (6. 출력) ▶</Btn>
+        </div>
+      </div>
+    </Fragment>
+  );
+};
+
+/* ---------- 6. 출력 ---------- */
+const WorkPrint = () => {
+  const { navigate } = useApp();
+  return (
+    <Fragment>
+      <Stepper active="print" />
+      <LawBanner />
+      <div className="p-6 space-y-4">
+        <Card title="PDF 출력" action={<><Btn size="sm" variant="secondary">미리보기</Btn><Btn size="sm" className="ml-2">전체 PDF 다운</Btn></>}>
+          <div className="grid grid-cols-3 gap-2 text-sm">
+            {["별지제3호","별지15호","별지20호","별지22호","별지23호","별지29호","별지29호의2","별지32호","별지33호","별지34호","별지40호","별지41호"].map(s=>(
+              <label key={s} className="border rounded px-3 py-2 flex items-center gap-2">
+                <input type="checkbox" defaultChecked/>
+                <span>{s}</span>
+              </label>
+            ))}
+          </div>
+        </Card>
+        <div className="flex justify-end gap-2">
+          <Btn variant="secondary" onClick={()=>navigate("ws-appr")}>◀ 이전</Btn>
+          <Btn onClick={()=>navigate("ws-file")}>다음 (7. 전자신고) ▶</Btn>
+        </div>
+      </div>
+    </Fragment>
+  );
+};
+
+/* ---------- 7. 전자신고 ---------- */
+const WorkFile = () => {
+  const { navigate, setCurrent, current } = useApp();
+  const [step, setStep] = useState(1);
+
+  return (
+    <Fragment>
+      <Stepper active="file" />
+      <LawBanner />
+      <div className="p-6 space-y-4">
+        <Card title="Step 1. 사전 검증 (홈택스 파일설명서 규칙 적용)">
+          <ul className="text-sm space-y-1">
+            <li>✓ 사업자번호 체크섬</li>
+            <li>✓ 일자 일관성</li>
+            <li>✓ 합계 일치</li>
+            <li>✓ 필수 항목</li>
+          </ul>
+          <Btn size="sm" className="mt-2" onClick={()=>setStep(2)} disabled={step>=2}>사전 검증 실행 →</Btn>
+          {step>=2 && <div className="text-emerald-600 text-sm mt-2">통과 (오류 0)</div>}
+        </Card>
+
+        {step>=2 && (
+          <Card title="Step 2. 전자신고 파일 생성">
+            <div className="text-sm space-y-1">
+              <div>포맷: <b>홈택스 법인세 텍스트 파일 (위치기반)</b></div>
+              <div>적용 스키마: v2025.1.0 · 인코딩: EUC-KR</div>
+            </div>
+            <Btn size="sm" className="mt-2" onClick={()=>setStep(3)} disabled={step>=3}>파일 생성 →</Btn>
+            {step>=3 && (
+              <div className="bg-slate-50 border rounded p-3 mt-2 text-xs font-mono">
+                CIT_1234567890_2025_20260315093102.dat (12.3 MB)<br/>
+                SHA-256: 4f3a1c89b4d2e6...<br/>
+                S3: s3://cit-prod/efiling/2026/03/...
+              </div>
+            )}
+          </Card>
+        )}
+
+        {step>=3 && (
+          <Card title="Step 3. 제출">
+            <div className="space-y-2 text-sm">
+              <label className="flex gap-2"><input type="radio" name="m" defaultChecked/>API 직접 제출 (e-Tax 연동)</label>
+              <label className="flex gap-2"><input type="radio" name="m"/>파일 다운로드 후 홈택스 수동 업로드</label>
+            </div>
+            <Btn variant="danger" size="sm" className="mt-2" onClick={()=>setStep(4)} disabled={step>=4}>
+              제출 (2FA 재인증 필요) →
+            </Btn>
+          </Card>
+        )}
+
+        {step>=4 && (
+          <Card title="Step 4. 접수 결과" className="border-emerald-300">
+            <div className="text-sm space-y-1">
+              <div>접수번호: <b>2026-CIT-00012345</b></div>
+              <div>접수일시: 2026-03-15 09:35:21</div>
+              <div>상태: <Badge color="bg-emerald-100 text-emerald-700">ACCEPTED</Badge></div>
+              <div className="text-xs text-emerald-700 mt-2">➜ 사업연도 FILED 처리, 스냅샷 잠금 완료</div>
+            </div>
+            <Btn variant="secondary" size="sm" className="mt-3" onClick={()=>{
+              setCurrent({...current, status:"FILED", progress:100});
+              navigate("post-hist");
+            }}>신고 이력 보기 →</Btn>
+          </Card>
+        )}
+
+        <div className="flex justify-end gap-2">
+          <Btn variant="secondary" onClick={()=>navigate("ws-print")}>◀ 이전</Btn>
+        </div>
+      </div>
+    </Fragment>
+  );
+};
+
+/* ---------- 사후 관리 ---------- */
+const PostHist = () => (
+  <div className="p-6 space-y-4">
+    <h1 className="text-xl font-bold text-slate-800">신고 이력</h1>
+    <Card>
+      <table className="w-full text-sm">
+        <thead className="text-xs text-slate-500 border-b"><tr><th className="text-left py-1">고객사</th><th>사업연도</th><th>접수번호</th><th>제출일시</th><th>상태</th><th>조치</th></tr></thead>
+        <tbody>
+          <tr className="border-b"><td className="font-medium">㈜OOO</td><td>2025</td><td>2026-CIT-00012345</td><td>2026-03-15 09:35</td><td><Badge color={STATUS_LABEL.FILED.color}>{STATUS_LABEL.FILED.ko}</Badge></td><td><Btn size="sm" variant="secondary">상세</Btn></td></tr>
+          <tr className="border-b"><td className="font-medium">㈜OOO</td><td>2024</td><td>2025-CIT-00009876</td><td>2025-03-12 14:20</td><td><Badge color={STATUS_LABEL.FILED.color}>{STATUS_LABEL.FILED.ko}</Badge></td><td><Btn size="sm" variant="secondary">상세</Btn></td></tr>
+          <tr className="border-b"><td className="font-medium">☆☆ 글로벌</td><td>2025</td><td>2026-CIT-00012444</td><td>2026-03-20 11:02</td><td><Badge color={STATUS_LABEL.FILED.color}>{STATUS_LABEL.FILED.ko}</Badge></td><td><Btn size="sm" variant="secondary">상세</Btn></td></tr>
+        </tbody>
+      </table>
+    </Card>
+  </div>
+);
+
+const PostAmend = () => (
+  <div className="p-6 space-y-4">
+    <h1 className="text-xl font-bold text-slate-800">수정신고 / 경정청구</h1>
+    <Card title="잠금 해제 신청">
+      <p className="text-sm text-slate-600 mb-3">신고 완료된 사업연도를 수정하려면 잠금 해제가 필요합니다. 사용 법령·서식 버전은 원 신고시점이 기본값입니다.</p>
+      <div className="grid grid-cols-2 gap-3 text-sm">
+        <label className="border rounded p-3"><input type="radio" name="v" defaultChecked/> ◉ 원 신고시점 버전 사용 (원칙)</label>
+        <label className="border rounded p-3"><input type="radio" name="v"/> ○ 최신 버전 사용 (예외, 명시 동의 필요)</label>
+      </div>
+      <textarea className="w-full border rounded p-2 text-sm mt-3" rows="2" placeholder="잠금 해제 사유..."></textarea>
+      <Btn className="mt-2">잠금 해제 신청</Btn>
+    </Card>
+  </div>
+);
+
+/* ---------- 보고서 ---------- */
+const Reports = ({menuKey}) => (
+  <div className="p-6 space-y-4">
+    <h1 className="text-xl font-bold text-slate-800">
+      {menuKey==="rp-compare"?"사업연도 비교":menuKey==="rp-burden"?"세부담 분석":"유보 잔액 추이"}
+    </h1>
+    <Card>
+      <div className="h-64 bg-slate-50 rounded flex items-center justify-center text-slate-400">차트 영역 (Chart.js)</div>
+    </Card>
+  </div>
+);
+
+/* ---------- 관리(Admin) ---------- */
+const AdminTenant = () => {
+  const TENANT_TYPES = [
+    { code:"ACCOUNTING_FIRM", label:"회계법인" },
+    { code:"TAX_CORP", label:"세무법인" },
+    { code:"TAX_ACCOUNTANT_OFFICE", label:"세무사사무소" },
+  ];
+  const STATUS_COLOR = {
+    ACTIVE: "bg-emerald-100 text-emerald-700",
+    SUSPENDED: "bg-amber-100 text-amber-700",
+    CLOSED: "bg-slate-200 text-slate-600",
+  };
+  const emptyTenant = { id:"", name:"", type:"ACCOUNTING_FIRM", bizNo:"", owner:"", users:1, customers:0, plan:"Starter", status:"ACTIVE", contract:"2026-01-01 ~ 2026-12-31" };
+  const [tenants,setTenants] = useState(DUMMY_TENANTS);
+  const [selectedId,setSelectedId] = useState(DUMMY_TENANTS[0].id);
+  const [query,setQuery] = useState("");
+  const [typeFilter,setTypeFilter] = useState("ALL");
+  const [statusFilter,setStatusFilter] = useState("ALL");
+  const [showNew,setShowNew] = useState(false);
+  const [draft,setDraft] = useState(DUMMY_TENANTS[0]);
+  const [newTenant,setNewTenant] = useState(emptyTenant);
+
+  const selected = tenants.find(t => t.id === selectedId) || tenants[0];
+  const selectedCustomers = DUMMY_CUSTOMERS.filter(customer => customer.tenantId === selected?.id);
+  useEffect(() => {
+    if (selected) setDraft({ ...selected });
+  }, [selectedId, tenants]);
+  const typeLabel = (code) => TENANT_TYPES.find(t => t.code === code)?.label || code;
+  const filtered = tenants.filter(tenant => {
+    const keyword = query.trim().toLowerCase();
+    const matchesKeyword = !keyword ||
+      tenant.id.toLowerCase().includes(keyword) ||
+      tenant.name.toLowerCase().includes(keyword) ||
+      tenant.bizNo.includes(keyword) ||
+      tenant.owner.toLowerCase().includes(keyword);
+    const matchesType = typeFilter === "ALL" || tenant.type === typeFilter;
+    const matchesStatus = statusFilter === "ALL" || tenant.status === statusFilter;
+    return matchesKeyword && matchesType && matchesStatus;
+  });
+  const saveTenant = () => {
+    setTenants(items => items.map(item => item.id === selectedId ? { ...draft } : item));
+  };
+  const updateTenantStatus = (status) => {
+    setTenants(items => items.map(item => item.id === selectedId ? { ...item, status } : item));
+  };
+  const createTenant = () => {
+    const id = newTenant.id.trim();
+    if (!id || !newTenant.name.trim() || tenants.some(item => item.id === id)) return;
+    const created = { ...newTenant, id, name:newTenant.name.trim(), bizNo:newTenant.bizNo.trim(), owner:newTenant.owner.trim() };
+    setTenants(items => [created, ...items]);
+    setSelectedId(created.id);
+    setNewTenant(emptyTenant);
+    setShowNew(false);
+  };
+
+  return (
+    <div className="p-6 space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-bold text-slate-800">5-0 테넌트 관리</h1>
+          <p className="text-sm text-slate-500 mt-1">대상 사용자 조직인 회계법인, 세무법인, 세무사사무소를 Multi-Tenant 단위로 등록하고 관리합니다.</p>
+        </div>
+        <Btn size="sm" onClick={()=>setShowNew(true)}>+ 신규 테넌트</Btn>
+      </div>
+
+      <div className="grid grid-cols-3 gap-3">
+        {TENANT_TYPES.map(type => (
+          <Card key={type.code}>
+            <div className="text-xs text-slate-500">{type.label}</div>
+            <div className="text-2xl font-bold text-slate-800 mt-1">{tenants.filter(t=>t.type===type.code).length}</div>
+            <div className="text-xs text-slate-400 mt-1">활성 {tenants.filter(t=>t.type===type.code && t.status==="ACTIVE").length}개 조직</div>
+          </Card>
+        ))}
+      </div>
+
+      <div className="grid grid-cols-12 gap-4">
+        <Card title="테넌트 목록" className="col-span-8">
+          <div className="grid grid-cols-12 gap-2 mb-3">
+            <input className="col-span-6 border border-slate-300 rounded px-3 py-1.5 text-sm" placeholder="조직명 / 테넌트 ID / 사업자번호 / 대표자 검색" value={query} onChange={e=>setQuery(e.target.value)} />
+            <select className="col-span-3 border rounded px-2 py-1 text-sm" value={typeFilter} onChange={e=>setTypeFilter(e.target.value)}>
+              <option value="ALL">전체 유형</option>
+              {TENANT_TYPES.map(type => <option key={type.code} value={type.code}>{type.label}</option>)}
+            </select>
+            <select className="col-span-3 border rounded px-2 py-1 text-sm" value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}>
+              <option value="ALL">전체 상태</option>
+              <option value="ACTIVE">활성</option>
+              <option value="SUSPENDED">사용중지</option>
+              <option value="CLOSED">해지</option>
+            </select>
+          </div>
+          <table className="w-full text-sm">
+            <thead className="text-xs text-slate-500 border-b">
+              <tr><th className="text-left py-1">조직</th><th>유형</th><th>사용자</th><th>고객사</th><th>요금제</th><th>상태</th></tr>
+            </thead>
+            <tbody>
+              {filtered.map(tenant => (
+                <tr key={tenant.id} className={`border-b cursor-pointer hover:bg-slate-50 ${selectedId===tenant.id?"bg-indigo-50":""}`} onClick={()=>setSelectedId(tenant.id)}>
+                  <td className="py-2">
+                    <div className="font-medium">{tenant.name}</div>
+                    <div className="text-xs text-slate-500 font-mono">{tenant.id} · {tenant.bizNo}</div>
+                  </td>
+                  <td>{typeLabel(tenant.type)}</td>
+                  <td className="text-center">{tenant.users}</td>
+                  <td className="text-center">{tenant.customers}</td>
+                  <td className="text-center">{tenant.plan}</td>
+                  <td className="text-center"><Badge color={STATUS_COLOR[tenant.status]}>{tenant.status}</Badge></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="text-xs text-slate-500 mt-2">표시 {filtered.length}개 / 전체 {tenants.length}개 테넌트</div>
+        </Card>
+
+        <Card title={`테넌트 편집 - ${selected?.name || ""}`} className="col-span-4">
+          {selected && (
+            <div className="space-y-3 text-sm">
+              <div><label className="block text-xs text-slate-500">테넌트 ID</label><input className="w-full border rounded px-2 py-1 bg-slate-50" value={draft.id || ""} readOnly /></div>
+              <div><label className="block text-xs text-slate-500">조직명</label><input className="w-full border rounded px-2 py-1" value={draft.name || ""} onChange={e=>setDraft({...draft, name:e.target.value})} /></div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs text-slate-500">조직 유형</label>
+                  <select className="w-full border rounded px-2 py-1" value={draft.type || "ACCOUNTING_FIRM"} onChange={e=>setDraft({...draft, type:e.target.value})}>
+                    {TENANT_TYPES.map(type => <option key={type.code} value={type.code}>{type.label}</option>)}
+                  </select>
+                </div>
+                <div><label className="block text-xs text-slate-500">요금제</label><select className="w-full border rounded px-2 py-1" value={draft.plan || "Starter"} onChange={e=>setDraft({...draft, plan:e.target.value})}><option>Starter</option><option>Business</option><option>Enterprise</option></select></div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div><label className="block text-xs text-slate-500">사업자번호</label><input className="w-full border rounded px-2 py-1" value={draft.bizNo || ""} onChange={e=>setDraft({...draft, bizNo:e.target.value})} /></div>
+                <div><label className="block text-xs text-slate-500">대표 관리자</label><input className="w-full border rounded px-2 py-1" value={draft.owner || ""} onChange={e=>setDraft({...draft, owner:e.target.value})} /></div>
+              </div>
+              <div><label className="block text-xs text-slate-500">계약 기간</label><input className="w-full border rounded px-2 py-1" value={draft.contract || ""} onChange={e=>setDraft({...draft, contract:e.target.value})} /></div>
+              <div className="grid grid-cols-2 gap-2 text-center">
+                <div className="border rounded p-2"><div className="text-xs text-slate-500">사용자</div><div className="text-lg font-bold">{selected.users}</div></div>
+                <div className="border rounded p-2"><div className="text-xs text-slate-500">고객사</div><div className="text-lg font-bold">{selected.customers}</div></div>
+              </div>
+              <div className="border rounded p-3 bg-slate-50">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-xs font-semibold text-slate-600">소속 고객사 샘플</div>
+                  <span className="text-[11px] text-slate-400">tenantId = {selected.id}</span>
+                </div>
+                <div className="space-y-1">
+                  {selectedCustomers.length
+                    ? selectedCustomers.map(customer => (
+                      <div key={customer.id} className="flex justify-between text-xs">
+                        <span>{customer.name}</span>
+                        <span className="text-slate-400 font-mono">{customer.code}</span>
+                      </div>
+                    ))
+                    : <div className="text-xs text-slate-400">샘플 고객사가 없습니다.</div>}
+                </div>
+              </div>
+              <div className="border-t pt-3 grid grid-cols-2 gap-2">
+                {selected.status === "ACTIVE"
+                  ? <Btn size="sm" variant="secondary" onClick={()=>updateTenantStatus("SUSPENDED")}>사용중지</Btn>
+                  : <Btn size="sm" variant="success" onClick={()=>updateTenantStatus("ACTIVE")}>활성화</Btn>}
+                <Btn size="sm" variant="danger" onClick={()=>updateTenantStatus("CLOSED")}>계약 해지</Btn>
+              </div>
+              <div className="flex justify-end gap-2">
+                <Btn size="sm" variant="secondary" onClick={()=>setDraft({...selected})}>취소</Btn>
+                <Btn size="sm" onClick={saveTenant}>저장</Btn>
+              </div>
+            </div>
+          )}
+        </Card>
+      </div>
+
+      {showNew && (
+        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50" onClick={()=>setShowNew(false)}>
+          <div className="bg-white rounded-lg w-[560px] p-5" onClick={e=>e.stopPropagation()}>
+            <h3 className="font-semibold mb-3">신규 테넌트 등록</h3>
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <div><label className="block text-xs text-slate-500">테넌트 ID</label><input className="w-full border rounded px-2 py-1" value={newTenant.id} onChange={e=>setNewTenant({...newTenant, id:e.target.value})}/></div>
+              <div><label className="block text-xs text-slate-500">조직명</label><input className="w-full border rounded px-2 py-1" value={newTenant.name} onChange={e=>setNewTenant({...newTenant, name:e.target.value})}/></div>
+              <div>
+                <label className="block text-xs text-slate-500">조직 유형</label>
+                <select className="w-full border rounded px-2 py-1" value={newTenant.type} onChange={e=>setNewTenant({...newTenant, type:e.target.value})}>
+                  {TENANT_TYPES.map(type => <option key={type.code} value={type.code}>{type.label}</option>)}
+                </select>
+              </div>
+              <div><label className="block text-xs text-slate-500">사업자번호</label><input className="w-full border rounded px-2 py-1" value={newTenant.bizNo} onChange={e=>setNewTenant({...newTenant, bizNo:e.target.value})}/></div>
+              <div><label className="block text-xs text-slate-500">대표 관리자</label><input className="w-full border rounded px-2 py-1" value={newTenant.owner} onChange={e=>setNewTenant({...newTenant, owner:e.target.value})}/></div>
+              <div><label className="block text-xs text-slate-500">요금제</label><select className="w-full border rounded px-2 py-1" value={newTenant.plan} onChange={e=>setNewTenant({...newTenant, plan:e.target.value})}><option>Starter</option><option>Business</option><option>Enterprise</option></select></div>
+              <div className="col-span-2"><label className="block text-xs text-slate-500">계약 기간</label><input className="w-full border rounded px-2 py-1" value={newTenant.contract} onChange={e=>setNewTenant({...newTenant, contract:e.target.value})}/></div>
+            </div>
+            <div className="flex justify-end gap-2 mt-4">
+              <Btn variant="secondary" size="sm" onClick={()=>setShowNew(false)}>취소</Btn>
+              <Btn size="sm" onClick={createTenant}>등록</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const AdminCust = () => {
+  const tenantName = (tenantId) => DUMMY_TENANTS.find(tenant => tenant.id === tenantId)?.name || tenantId;
+  const emptyCustomer = { tenantId:"ey001", code:"", name:"", biz:"", industry:"", type:"GENERAL" };
+  const [customers,setCustomers] = useState(DUMMY_CUSTOMERS);
+  const [tenantFilter,setTenantFilter] = useState("ALL");
+  const [query,setQuery] = useState("");
+  const [selectedId,setSelectedId] = useState(DUMMY_CUSTOMERS[0].id);
+  const [showNew,setShowNew] = useState(false);
+  const [newCustomer,setNewCustomer] = useState(emptyCustomer);
+  const selected = customers.find(customer => customer.id === selectedId) || customers[0];
+  const [draft,setDraft] = useState(selected);
+  useEffect(() => {
+    if (selected) setDraft({ ...selected });
+  }, [selectedId, customers]);
+  const filtered = customers.filter(customer => {
+    const keyword = query.trim().toLowerCase();
+    const matchesTenant = tenantFilter === "ALL" || customer.tenantId === tenantFilter;
+    const matchesKeyword = !keyword ||
+      customer.code.toLowerCase().includes(keyword) ||
+      customer.name.toLowerCase().includes(keyword) ||
+      customer.biz.includes(keyword) ||
+      customer.industry.toLowerCase().includes(keyword);
+    return matchesTenant && matchesKeyword;
+  });
+  const saveCustomer = () => {
+    setCustomers(items => items.map(customer => customer.id === selectedId ? { ...draft } : customer));
+  };
+  const createCustomer = () => {
+    if (!newCustomer.code.trim() || !newCustomer.name.trim()) return;
+    const created = { ...newCustomer, id: Math.max(...customers.map(customer => customer.id)) + 1 };
+    setCustomers(items => [created, ...items]);
+    setSelectedId(created.id);
+    setShowNew(false);
+    setNewCustomer(emptyCustomer);
+  };
+
+  return (
+    <div className="p-6 space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-bold text-slate-800">5-A 고객사 관리</h1>
+          <p className="text-sm text-slate-500 mt-1">고객사는 반드시 하나의 테넌트(회계법인/세무법인/세무사사무소)에 소속됩니다.</p>
+        </div>
+        <Btn size="sm" onClick={()=>setShowNew(true)}>+ 신규 고객사</Btn>
+      </div>
+
+      <Card>
+        <div className="grid grid-cols-4 gap-3 text-sm">
+          <div className="border rounded p-3 bg-slate-50">
+            <div className="text-xs text-slate-500">관계</div>
+            <div className="font-semibold mt-1">테넌트 1 : N 고객사</div>
+          </div>
+          {DUMMY_TENANTS.slice(0,3).map(tenant => (
+            <div key={tenant.id} className="border rounded p-3">
+              <div className="text-xs text-slate-500">{tenant.name}</div>
+              <div className="text-xl font-bold mt-1">{customers.filter(customer => customer.tenantId === tenant.id).length}</div>
+              <div className="text-xs text-slate-400">샘플 고객사</div>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      <div className="grid grid-cols-12 gap-4">
+        <Card title="고객사 목록" className="col-span-8">
+          <div className="grid grid-cols-12 gap-2 mb-3">
+            <select className="col-span-4 border rounded px-2 py-1 text-sm" value={tenantFilter} onChange={e=>setTenantFilter(e.target.value)}>
+              <option value="ALL">전체 테넌트</option>
+              {DUMMY_TENANTS.map(tenant => <option key={tenant.id} value={tenant.id}>{tenant.name}</option>)}
+            </select>
+            <input className="col-span-8 border border-slate-300 rounded px-3 py-1.5 text-sm" placeholder="고객사명 / 코드 / 사업자번호 / 업종 검색" value={query} onChange={e=>setQuery(e.target.value)} />
+          </div>
+          <table className="w-full text-sm">
+            <thead className="text-xs text-slate-500 border-b">
+              <tr><th className="text-left py-1">코드</th><th className="text-left">고객사</th><th className="text-left">소속 테넌트</th><th>사업자번호</th><th>업종</th><th>유형</th></tr>
+            </thead>
+            <tbody>
+              {filtered.map(customer => (
+                <tr key={customer.id} className={`border-b cursor-pointer hover:bg-slate-50 ${selectedId===customer.id?"bg-indigo-50":""}`} onClick={()=>setSelectedId(customer.id)}>
+                  <td className="py-2 font-mono text-xs">{customer.code}</td>
+                  <td className="font-medium">{customer.name}</td>
+                  <td>{tenantName(customer.tenantId)}</td>
+                  <td className="text-center">{customer.biz}</td>
+                  <td className="text-center">{customer.industry}</td>
+                  <td className="text-center"><Badge>{customer.type}</Badge></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="text-xs text-slate-500 mt-2">표시 {filtered.length}개 / 전체 {customers.length}개 고객사</div>
+        </Card>
+
+        <Card title={`고객사 편집 - ${selected?.name || ""}`} className="col-span-4">
+          {selected && (
+            <div className="space-y-3 text-sm">
+              <div>
+                <label className="block text-xs text-slate-500">소속 테넌트</label>
+                <select className="w-full border rounded px-2 py-1" value={draft.tenantId || "ey001"} onChange={e=>setDraft({...draft, tenantId:e.target.value})}>
+                  {DUMMY_TENANTS.map(tenant => <option key={tenant.id} value={tenant.id}>{tenant.name}</option>)}
+                </select>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div><label className="block text-xs text-slate-500">고객사 코드</label><input className="w-full border rounded px-2 py-1" value={draft.code || ""} onChange={e=>setDraft({...draft, code:e.target.value})} /></div>
+                <div><label className="block text-xs text-slate-500">유형</label><select className="w-full border rounded px-2 py-1" value={draft.type || "GENERAL"} onChange={e=>setDraft({...draft, type:e.target.value})}><option>GENERAL</option><option>FOREIGN</option><option>CONSOLIDATED</option></select></div>
+              </div>
+              <div><label className="block text-xs text-slate-500">법인명</label><input className="w-full border rounded px-2 py-1" value={draft.name || ""} onChange={e=>setDraft({...draft, name:e.target.value})} /></div>
+              <div className="grid grid-cols-2 gap-2">
+                <div><label className="block text-xs text-slate-500">사업자번호</label><input className="w-full border rounded px-2 py-1" value={draft.biz || ""} onChange={e=>setDraft({...draft, biz:e.target.value})} /></div>
+                <div><label className="block text-xs text-slate-500">업종</label><input className="w-full border rounded px-2 py-1" value={draft.industry || ""} onChange={e=>setDraft({...draft, industry:e.target.value})} /></div>
+              </div>
+              <div className="flex justify-end gap-2">
+                <Btn size="sm" variant="secondary" onClick={()=>setDraft({...selected})}>취소</Btn>
+                <Btn size="sm" onClick={saveCustomer}>저장</Btn>
+              </div>
+            </div>
+          )}
+        </Card>
+      </div>
+
+      {showNew && (
+        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50" onClick={()=>setShowNew(false)}>
+          <div className="bg-white rounded-lg w-[520px] p-5" onClick={e=>e.stopPropagation()}>
+            <h3 className="font-semibold mb-3">신규 고객사 등록</h3>
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <div className="col-span-2">
+                <label className="block text-xs text-slate-500">소속 테넌트</label>
+                <select className="w-full border rounded px-2 py-1" value={newCustomer.tenantId} onChange={e=>setNewCustomer({...newCustomer, tenantId:e.target.value})}>
+                  {DUMMY_TENANTS.map(tenant => <option key={tenant.id} value={tenant.id}>{tenant.name}</option>)}
+                </select>
+              </div>
+              <div><label className="block text-xs text-slate-500">코드</label><input className="w-full border rounded px-2 py-1" value={newCustomer.code} onChange={e=>setNewCustomer({...newCustomer, code:e.target.value})}/></div>
+              <div><label className="block text-xs text-slate-500">법인명</label><input className="w-full border rounded px-2 py-1" value={newCustomer.name} onChange={e=>setNewCustomer({...newCustomer, name:e.target.value})}/></div>
+              <div><label className="block text-xs text-slate-500">사업자번호</label><input className="w-full border rounded px-2 py-1" value={newCustomer.biz} onChange={e=>setNewCustomer({...newCustomer, biz:e.target.value})}/></div>
+              <div><label className="block text-xs text-slate-500">업종</label><input className="w-full border rounded px-2 py-1" value={newCustomer.industry} onChange={e=>setNewCustomer({...newCustomer, industry:e.target.value})}/></div>
+              <div className="col-span-2"><label className="block text-xs text-slate-500">유형</label><select className="w-full border rounded px-2 py-1" value={newCustomer.type} onChange={e=>setNewCustomer({...newCustomer, type:e.target.value})}><option>GENERAL</option><option>FOREIGN</option><option>CONSOLIDATED</option></select></div>
+            </div>
+            <div className="flex justify-end gap-2 mt-4">
+              <Btn variant="secondary" size="sm" onClick={()=>setShowNew(false)}>취소</Btn>
+              <Btn size="sm" onClick={createCustomer}>등록</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const AdminRolePerm = () => {
+  const FUNCS = ["READ","CREATE","UPDATE","DELETE","PRINT","EXPORT","IMPORT","APPROVE","SUBMIT","UNLOCK","LOG_VIEW","MASK_OFF"];
+  const MENUS = ["대시보드","고객사","세무정보","세무조정","서식","검증","결재","출력","전자신고","사후관리","사용자","법령버전","서식버전","감사로그"];
+  // 데모용: 행/열 토글 표시
+  const [grid,setGrid] = useState(()=>MENUS.map(()=>FUNCS.map((_,i)=>i<5?"A":i<8?"":"")));
+  const setCell=(r,c,v)=>{const g=grid.map(x=>x.slice());g[r][c]=v;setGrid(g);};
+
+  return (
+    <div className="p-6 space-y-4">
+      <h1 className="text-xl font-bold text-slate-800">5-C 역할 / 권한 매트릭스</h1>
+      <div className="text-sm flex gap-2">
+        <select className="border rounded px-2 py-1 text-sm">
+          <option>TAX_EXPERT</option><option>TENANT_ADMIN</option><option>TAX_REVIEWER</option><option>ASSISTANT</option><option>VIEWER</option>
+        </select>
+        <Btn size="sm">저장</Btn>
+        <Btn size="sm" variant="secondary">복제</Btn>
+      </div>
+      <Card title="권한 매트릭스 (메뉴 × 기능)">
+        <div className="overflow-x-auto scroll-thin">
+          <table className="text-xs">
+            <thead>
+              <tr><th className="text-left p-1 sticky left-0 bg-white">메뉴</th>
+                {FUNCS.map(f=><th key={f} className="p-1 text-center w-16">{f}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {MENUS.map((m,r)=>(
+                <tr key={m} className="border-b">
+                  <td className="p-1 sticky left-0 bg-white">{m}</td>
+                  {FUNCS.map((f,c)=>(
+                    <td key={f} className="p-1 text-center">
+                      <button
+                        onClick={()=>setCell(r,c,grid[r][c]==="A"?"D":grid[r][c]==="D"?"":"A")}
+                        className={`w-7 h-7 rounded text-xs font-bold
+                          ${grid[r][c]==="A"?"bg-emerald-500 text-white":""}
+                          ${grid[r][c]==="D"?"bg-rose-500 text-white":""}
+                          ${grid[r][c]===""?"bg-slate-100 text-slate-300":""}`}
+                          title="클릭으로 ALLOW/DENY/미설정 전환">
+                        {grid[r][c]==="A"?"✓":grid[r][c]==="D"?"✕":"·"}
+                      </button>
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="text-xs text-slate-500 mt-2">✓ ALLOW / ✕ DENY / · 미설정. DENY는 ALLOW보다 우선합니다.</div>
+      </Card>
+    </div>
+  );
+};
+
+const LegacyAdminUserList = () => {
+  const USERS = [
+    { id:"admin", name:"시스템 관리자", email:"admin@ey.com",  role:"SUPER_ADMIN",   status:"ACTIVE", twoFA:true,  lastLogin:"2026-05-14 09:01" },
+    { id:"tadmin",name:"이OO 매니저",   email:"lee@ey.com",    role:"TENANT_ADMIN",  status:"ACTIVE", twoFA:true,  lastLogin:"2026-05-14 08:55" },
+    { id:"ksc",   name:"강수",         email:"ksc@ey.com",    role:"TAX_EXPERT",    status:"ACTIVE", twoFA:true,  lastLogin:"2026-05-14 10:32" },
+    { id:"park",  name:"박OO",         email:"park@ey.com",   role:"TAX_EXPERT",    status:"ACTIVE", twoFA:true,  lastLogin:"2026-05-14 09:14" },
+    { id:"kim",   name:"김OO 검토자",   email:"kim@ey.com",    role:"TAX_REVIEWER",  status:"ACTIVE", twoFA:true,  lastLogin:"2026-05-13 17:42" },
+    { id:"jung",  name:"정OO 보조",     email:"jung@ey.com",   role:"ASSISTANT",     status:"ACTIVE", twoFA:false, lastLogin:"2026-05-13 14:10" },
+    { id:"choi",  name:"최OO",         email:"choi@ey.com",   role:"VIEWER",        status:"LOCKED", twoFA:false, lastLogin:"2026-04-22 11:20" },
+    { id:"han",   name:"한OO",         email:"han@ey.com",    role:"ASSISTANT",     status:"WITHDRAWN", twoFA:false, lastLogin:"2025-12-01 09:00" },
+  ];
+  const ROLES = ["SUPER_ADMIN","TENANT_ADMIN","TAX_EXPERT","TAX_REVIEWER","ASSISTANT","VIEWER"];
+  const STATUS_C = { ACTIVE:"bg-emerald-100 text-emerald-700", LOCKED:"bg-rose-100 text-rose-700", WITHDRAWN:"bg-slate-200 text-slate-600" };
+  const [sel,setSel] = useState(USERS[2]);
+  const [q,setQ]    = useState("");
+  const [st,setSt]  = useState("ALL");
+  const [showNew,setShowNew] = useState(false);
+
+  const list = USERS.filter(u =>
+    (q==="" || u.name.includes(q) || u.id.includes(q) || u.email.includes(q)) &&
+    (st==="ALL" || u.status===st)
+  );
+
+  return (
+    <div className="p-6 space-y-4">
+      <div className="flex items-center justify-between">
+        <h1 className="text-xl font-bold text-slate-800">5-B 사용자 관리</h1>
+        <div className="flex gap-2">
+          <Btn variant="secondary" size="sm">Excel 내보내기</Btn>
+          <Btn size="sm" onClick={()=>setShowNew(true)}>+ 신규 사용자</Btn>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-4">
+        <Card title="사용자 목록" className="col-span-2">
+          <div className="flex gap-2 mb-3">
+            <input
+              className="border border-slate-300 rounded px-3 py-1.5 text-sm flex-1"
+              placeholder="이름 / 아이디 / 이메일 검색"
+              value={q} onChange={e=>setQ(e.target.value)} />
+            <select className="border rounded px-2 py-1 text-sm" value={st} onChange={e=>setSt(e.target.value)}>
+              <option value="ALL">전체</option>
+              <option value="ACTIVE">활성</option>
+              <option value="LOCKED">잠금</option>
+              <option value="WITHDRAWN">탈퇴</option>
+            </select>
+          </div>
+          <table className="w-full text-sm">
+            <thead className="text-xs text-slate-500 border-b">
+              <tr>
+                <th className="text-left py-1">ID</th>
+                <th className="text-left">이름</th>
+                <th className="text-left">역할</th>
+                <th>상태</th>
+                <th>2FA</th>
+                <th>최근 접속</th>
+              </tr>
+            </thead>
+            <tbody>
+              {list.map(u=>(
+                <tr key={u.id}
+                    className={`border-b cursor-pointer hover:bg-slate-50 ${sel.id===u.id?"bg-indigo-50":""}`}
+                    onClick={()=>setSel(u)}>
+                  <td className="py-1.5 font-mono text-xs">{u.id}</td>
+                  <td className="font-medium">{u.name}<div className="text-xs text-slate-500">{u.email}</div></td>
+                  <td><Badge>{u.role}</Badge></td>
+                  <td className="text-center"><Badge color={STATUS_C[u.status]}>{u.status}</Badge></td>
+                  <td className="text-center">{u.twoFA?"✓":"—"}</td>
+                  <td className="text-xs text-slate-500">{u.lastLogin}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="text-xs text-slate-500 mt-2">총 {list.length}명 / 전체 {USERS.length}명</div>
+        </Card>
+
+        <Card title={`사용자 상세 — ${sel.name}`} className="col-span-1">
+          <div className="space-y-3 text-sm">
+            <div>
+              <label className="block text-xs text-slate-500">아이디</label>
+              <input className="w-full border rounded px-2 py-1" value={sel.id} readOnly />
+            </div>
+            <div>
+              <label className="block text-xs text-slate-500">이름</label>
+              <input className="w-full border rounded px-2 py-1" defaultValue={sel.name} />
+            </div>
+            <div>
+              <label className="block text-xs text-slate-500">이메일</label>
+              <input className="w-full border rounded px-2 py-1" defaultValue={sel.email} />
+            </div>
+            <div>
+              <label className="block text-xs text-slate-500">역할 (복수 가능)</label>
+              <div className="flex flex-wrap gap-1 mt-1">
+                {ROLES.map(r=>(
+                  <label key={r} className={`text-xs px-2 py-0.5 rounded border cursor-pointer
+                    ${sel.role===r?"bg-indigo-100 border-indigo-400 text-indigo-700":"border-slate-300 text-slate-600"}`}>
+                    <input type="checkbox" className="mr-1" defaultChecked={sel.role===r}/>{r}
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label className="block text-xs text-slate-500">상태</label>
+              <select className="w-full border rounded px-2 py-1" defaultValue={sel.status}>
+                <option value="ACTIVE">활성</option>
+                <option value="LOCKED">잠금</option>
+                <option value="WITHDRAWN">탈퇴</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs text-slate-500">2FA</label>
+              <label className="flex items-center gap-2"><input type="checkbox" defaultChecked={sel.twoFA}/> 사용</label>
+            </div>
+            <div className="border-t pt-3 space-y-2">
+              <Btn size="sm" variant="secondary" className="w-full">비밀번호 초기화 (임시 PW 발급)</Btn>
+              <Btn size="sm" variant="secondary" className="w-full">2FA 시크릿 재설정</Btn>
+              {sel.status==="LOCKED"
+                ? <Btn size="sm" variant="success" className="w-full">계정 잠금 해제</Btn>
+                : <Btn size="sm" variant="secondary" className="w-full">강제 잠금</Btn>}
+              <Btn size="sm" variant="danger" className="w-full">탈퇴 처리</Btn>
+            </div>
+            <div className="pt-3 flex justify-end gap-2">
+              <Btn size="sm" variant="secondary">취소</Btn>
+              <Btn size="sm">저장</Btn>
+            </div>
+          </div>
+        </Card>
+      </div>
+
+      <Card title="최근 활동 / 로그인 이력">
+        <ul className="text-sm divide-y">
+          <li className="py-2 flex justify-between"><span><b>{sel.id}</b> 로그인 성공</span><span className="text-xs text-slate-400">2026-05-14 10:32  10.0.1.23</span></li>
+          <li className="py-2 flex justify-between"><span><b>{sel.id}</b> 권한 변경 (TAX_EXPERT 부여)</span><span className="text-xs text-slate-400">2026-04-12 14:01  관리자: tadmin</span></li>
+          <li className="py-2 flex justify-between"><span><b>{sel.id}</b> 2FA 등록</span><span className="text-xs text-slate-400">2026-02-01 09:18</span></li>
+        </ul>
+      </Card>
+
+      {showNew && (
+        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50" onClick={()=>setShowNew(false)}>
+          <div className="bg-white rounded-lg w-[480px] p-5" onClick={e=>e.stopPropagation()}>
+            <h3 className="font-semibold mb-3">신규 사용자 등록</h3>
+            <div className="space-y-3 text-sm">
+              <div><label className="block text-xs text-slate-500">아이디</label><input className="w-full border rounded px-2 py-1"/></div>
+              <div><label className="block text-xs text-slate-500">이름</label><input className="w-full border rounded px-2 py-1"/></div>
+              <div><label className="block text-xs text-slate-500">이메일</label><input className="w-full border rounded px-2 py-1"/></div>
+              <div><label className="block text-xs text-slate-500">초기 비밀번호 발급 방식</label>
+                <select className="w-full border rounded px-2 py-1">
+                  <option>임시 비밀번호 자동 생성 → 이메일 발송</option>
+                  <option>관리자가 직접 입력</option>
+                </select>
+              </div>
+              <div><label className="block text-xs text-slate-500">기본 역할</label>
+                <select className="w-full border rounded px-2 py-1">
+                  <option>TAX_EXPERT</option><option>TAX_REVIEWER</option><option>ASSISTANT</option><option>VIEWER</option>
+                </select>
+              </div>
+              <label className="flex items-center gap-2"><input type="checkbox" defaultChecked/> 첫 로그인 시 비밀번호 변경 강제</label>
+              <label className="flex items-center gap-2"><input type="checkbox" defaultChecked/> 2FA 등록 의무</label>
+            </div>
+            <div className="flex justify-end gap-2 mt-4">
+              <Btn variant="secondary" size="sm" onClick={()=>setShowNew(false)}>취소</Btn>
+              <Btn size="sm" onClick={()=>setShowNew(false)}>등록</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const AdminUserList = () => {
+  const ROLE_OPTIONS = ["SUPER_ADMIN", "TENANT_ADMIN", "TAX_EXPERT", "TAX_REVIEWER", "ASSISTANT", "VIEWER"];
+  const STATUS_CLASS = {
+    ACTIVE: "bg-emerald-100 text-emerald-700",
+    LOCKED: "bg-rose-100 text-rose-700",
+    WITHDRAWN: "bg-slate-200 text-slate-600",
+  };
+  const WORK_SCOPE_OPTIONS = [
+    { code:"INFO", label:"기초정보" },
+    { code:"ADJUST", label:"세무조정" },
+    { code:"FORM", label:"서식작성" },
+    { code:"VALIDATE", label:"검증" },
+    { code:"APPROVE", label:"결재/검토" },
+    { code:"PRINT", label:"출력" },
+    { code:"EFILE", label:"전자신고" },
+    { code:"POST", label:"사후관리" },
+  ];
+  const ALL_WORK_SCOPES = WORK_SCOPE_OPTIONS.map(scope => scope.code);
+  const initialUsers = [
+    { id:"admin", name:"시스템 관리자", email:"admin@ey.com", dept:"시스템", tenantId:"ey001", customerIds:[10,11], workScopes:{10:ALL_WORK_SCOPES, 11:ALL_WORK_SCOPES}, roles:["SUPER_ADMIN"], status:"ACTIVE", twoFA:true, lockedAt:"", lastLogin:"2026-05-14 09:01" },
+    { id:"tadmin", name:"이OO 매니저", email:"lee@ey.com", dept:"Tax Admin", tenantId:"ey001", customerIds:[10,11], workScopes:{10:ALL_WORK_SCOPES, 11:["INFO","ADJUST","FORM","VALIDATE","APPROVE","PRINT"]}, roles:["TENANT_ADMIN"], status:"ACTIVE", twoFA:true, lockedAt:"", lastLogin:"2026-05-14 08:55" },
+    { id:"ksc", name:"강수", email:"ksc@ey.com", dept:"세무조정 1팀", tenantId:"ey001", customerIds:[10,11], workScopes:{10:["INFO","ADJUST","FORM","VALIDATE","PRINT"], 11:["INFO","ADJUST","FORM"]}, roles:["TAX_EXPERT"], status:"ACTIVE", twoFA:true, lockedAt:"", lastLogin:"2026-05-14 10:32" },
+    { id:"park", name:"박OO", email:"park@taxon.com", dept:"세무조정 2팀", tenantId:"taxon", customerIds:[12], workScopes:{12:["INFO","ADJUST","FORM","VALIDATE","EFILE"]}, roles:["TAX_EXPERT"], status:"ACTIVE", twoFA:true, lockedAt:"", lastLogin:"2026-05-14 09:14" },
+    { id:"kim", name:"김OO 검토자", email:"kim@ey.com", dept:"검토팀", tenantId:"ey001", customerIds:[10], workScopes:{10:["VALIDATE","APPROVE","PRINT"]}, roles:["TAX_REVIEWER"], status:"ACTIVE", twoFA:true, lockedAt:"", lastLogin:"2026-05-13 17:42" },
+    { id:"jung", name:"정OO 보조", email:"jung@ey.com", dept:"세무조정 1팀", tenantId:"ey001", customerIds:[11], workScopes:{11:["INFO","FORM"]}, roles:["ASSISTANT"], status:"ACTIVE", twoFA:false, lockedAt:"", lastLogin:"2026-05-13 14:10" },
+    { id:"han", name:"한OO 대표", email:"han@hanacct.com", dept:"대표", tenantId:"hanacct", customerIds:[13], workScopes:{13:ALL_WORK_SCOPES}, roles:["TENANT_ADMIN"], status:"ACTIVE", twoFA:true, lockedAt:"", lastLogin:"2026-05-13 10:30" },
+    { id:"choi", name:"최OO", email:"choi@blue-tax.com", dept:"조회 전용", tenantId:"blue-tax", customerIds:[14], workScopes:{14:["INFO","POST"]}, roles:["VIEWER"], status:"LOCKED", twoFA:false, lockedAt:"2026-05-01 15:20", lastLogin:"2026-04-22 11:20" },
+  ];
+
+  const normalizeUserTargetScopes = (user) => ({
+    ...user,
+    workScopes: Object.fromEntries(Object.entries(user.workScopes || {}).map(([customerId, scopes]) => {
+      const allowed = targetWorkScopesForCustomer(customerId);
+      return [customerId, (scopes || []).filter(scope => allowed.includes(scope))];
+    })),
+  });
+
+  const emptyNewUser = {
+    id: "",
+    name: "",
+    email: "",
+    dept: "",
+    tenantId: "ey001",
+    customerIds: [],
+    workScopes: {},
+    roles: ["ASSISTANT"],
+    status: "ACTIVE",
+    twoFA: true,
+    forcePasswordChange: true,
+  };
+  const [users, setUsers] = useState(() => initialUsers.map(normalizeUserTargetScopes));
+  const [selectedId, setSelectedId] = useState(initialUsers[2].id);
+  const [query, setQuery] = useState("");
+  const [tenantFilter, setTenantFilter] = useState("ALL");
+  const [customerFilter, setCustomerFilter] = useState("ALL");
+  const [workScopeFilter, setWorkScopeFilter] = useState("ALL");
+  const [statusFilter, setStatusFilter] = useState("ALL");
+  const [roleFilter, setRoleFilter] = useState("ALL");
+  const [showNew, setShowNew] = useState(false);
+  const [newUser, setNewUser] = useState(emptyNewUser);
+  const [draft, setDraft] = useState(() => normalizeUserTargetScopes(initialUsers[2]));
+  const [audit, setAudit] = useState([
+    { at:"2026-05-14 10:32", actor:"ksc", action:"로그인 성공", target:"10.0.1.23" },
+    { at:"2026-04-12 14:01", actor:"tadmin", action:"ksc 역할 변경", target:"TAX_EXPERT 부여" },
+    { at:"2026-02-01 09:18", actor:"ksc", action:"2FA 등록", target:"TOTP" },
+  ]);
+
+  const selected = users.find(u => u.id === selectedId) || users[0];
+  const cloneWorkScopes = (workScopes = {}) =>
+    Object.fromEntries(Object.entries(workScopes).map(([customerId, scopes]) => [customerId, [...scopes]]));
+  const allWorkScopesByCustomer = (customers) =>
+    Object.fromEntries(customers.map(customer => [customer.id, [...targetWorkScopesForCustomer(customer.id)]]));
+  useEffect(() => {
+    if (selected) {
+      setDraft({ ...selected, roles: [...selected.roles], customerIds: [...(selected.customerIds || [])], workScopes: cloneWorkScopes(selected.workScopes) });
+    }
+  }, [selectedId, users]);
+
+  const tenantName = (tenantId) => DUMMY_TENANTS.find(tenant => tenant.id === tenantId)?.name || tenantId;
+  const tenantCustomers = (tenantId) => DUMMY_CUSTOMERS.filter(customer => customer.tenantId === tenantId);
+  const customerName = (customerId) => DUMMY_CUSTOMERS.find(customer => customer.id === customerId)?.name || customerId;
+  const visibleCustomers = tenantFilter === "ALL" ? DUMMY_CUSTOMERS : tenantCustomers(tenantFilter);
+  const draftCustomers = tenantCustomers(draft.tenantId || "ey001");
+  const newUserCustomers = tenantCustomers(newUser.tenantId);
+  const customerSummary = (user) => {
+    const ids = user.customerIds || [];
+    const total = tenantCustomers(user.tenantId).length;
+    if (!ids.length) return "미지정";
+    if (ids.length === total) return `전체 ${ids.length}개`;
+    return `${ids.length}개`;
+  };
+  const workScopeSummary = (user) => {
+    const workScopes = user.workScopes || {};
+    const count = (user.customerIds || []).reduce((sum, customerId) => sum + ((workScopes[customerId] || []).length), 0);
+    return count ? `${count}개 업무` : "업무 미지정";
+  };
+
+  const addAudit = (action, target = selectedId) => {
+    setAudit(items => [
+      { at:"방금", actor:"tadmin", action, target },
+      ...items.slice(0, 7),
+    ]);
+  };
+  const filtered = users.filter(user => {
+    const keyword = query.trim().toLowerCase();
+    const matchesKeyword = !keyword ||
+      user.id.toLowerCase().includes(keyword) ||
+      user.name.toLowerCase().includes(keyword) ||
+      user.email.toLowerCase().includes(keyword) ||
+      user.dept.toLowerCase().includes(keyword);
+    const matchesStatus = statusFilter === "ALL" || user.status === statusFilter;
+    const matchesRole = roleFilter === "ALL" || user.roles.includes(roleFilter);
+    const matchesTenant = tenantFilter === "ALL" || user.tenantId === tenantFilter;
+    const matchesCustomer = customerFilter === "ALL" || (user.customerIds || []).includes(Number(customerFilter));
+    const scopeCustomerIds = customerFilter === "ALL" ? (user.customerIds || []) : [Number(customerFilter)];
+    const matchesWorkScope = workScopeFilter === "ALL" || scopeCustomerIds.some(customerId => ((user.workScopes || {})[customerId] || []).includes(workScopeFilter));
+    return matchesKeyword && matchesStatus && matchesRole && matchesTenant && matchesCustomer && matchesWorkScope;
+  });
+  const toggleRole = (role) => {
+    setDraft(current => {
+      const hasRole = current.roles.includes(role);
+      const roles = hasRole ? current.roles.filter(item => item !== role) : [...current.roles, role];
+      return { ...current, roles: roles.length ? roles : [role] };
+    });
+  };
+  const toggleNewRole = (role) => {
+    setNewUser(current => {
+      const hasRole = current.roles.includes(role);
+      const roles = hasRole ? current.roles.filter(item => item !== role) : [...current.roles, role];
+      return { ...current, roles: roles.length ? roles : [role] };
+    });
+  };
+  const toggleDraftCustomer = (customerId) => {
+    setDraft(current => {
+      const ids = current.customerIds || [];
+      const selected = ids.includes(customerId);
+      const customerIds = selected ? ids.filter(id => id !== customerId) : [...ids, customerId];
+      const workScopes = { ...(current.workScopes || {}) };
+      if (selected) delete workScopes[customerId];
+      else workScopes[customerId] = [...targetWorkScopesForCustomer(customerId)];
+      return { ...current, customerIds, workScopes };
+    });
+  };
+  const toggleNewCustomer = (customerId) => {
+    setNewUser(current => {
+      const ids = current.customerIds || [];
+      const selected = ids.includes(customerId);
+      const customerIds = selected ? ids.filter(id => id !== customerId) : [...ids, customerId];
+      const workScopes = { ...(current.workScopes || {}) };
+      if (selected) delete workScopes[customerId];
+      else workScopes[customerId] = [...targetWorkScopesForCustomer(customerId)];
+      return { ...current, customerIds, workScopes };
+    });
+  };
+  const toggleDraftWorkScope = (customerId, scopeCode) => {
+    if (!targetWorkScopesForCustomer(customerId).includes(scopeCode)) return;
+    setDraft(current => {
+      const workScopes = { ...(current.workScopes || {}) };
+      const scopes = workScopes[customerId] || [];
+      workScopes[customerId] = scopes.includes(scopeCode) ? scopes.filter(code => code !== scopeCode) : [...scopes, scopeCode];
+      return { ...current, workScopes };
+    });
+  };
+  const toggleNewWorkScope = (customerId, scopeCode) => {
+    if (!targetWorkScopesForCustomer(customerId).includes(scopeCode)) return;
+    setNewUser(current => {
+      const workScopes = { ...(current.workScopes || {}) };
+      const scopes = workScopes[customerId] || [];
+      workScopes[customerId] = scopes.includes(scopeCode) ? scopes.filter(code => code !== scopeCode) : [...scopes, scopeCode];
+      return { ...current, workScopes };
+    });
+  };
+  const saveDraft = () => {
+    setUsers(items => items.map(user => user.id === selectedId ? { ...user, ...draft, roles: [...draft.roles], customerIds: [...(draft.customerIds || [])], workScopes: cloneWorkScopes(draft.workScopes) } : user));
+    addAudit("사용자 정보 저장", selectedId);
+  };
+  const updateStatus = (status) => {
+    const lockedAt = status === "LOCKED" ? "방금" : "";
+    setUsers(items => items.map(user => user.id === selectedId ? { ...user, status, lockedAt } : user));
+    addAudit(status === "LOCKED" ? "계정 강제 잠금" : "계정 잠금 해제", selectedId);
+  };
+  const resetTwoFA = () => {
+    setUsers(items => items.map(user => user.id === selectedId ? { ...user, twoFA:false, twoFAResetAt:"방금" } : user));
+    addAudit("2FA 시크릿 리셋", selectedId);
+  };
+  const resetPassword = () => addAudit("임시 비밀번호 발급", selectedId);
+  const withdrawUser = () => {
+    setUsers(items => items.map(user => user.id === selectedId ? { ...user, status:"WITHDRAWN" } : user));
+    addAudit("사용자 퇴사 처리", selectedId);
+  };
+  const createUser = () => {
+    const id = newUser.id.trim();
+    if (!id || !newUser.name.trim() || users.some(user => user.id === id)) {
+      return;
+    }
+    const created = {
+      id,
+      name: newUser.name.trim(),
+      email: newUser.email.trim(),
+      dept: newUser.dept.trim() || "미지정",
+      tenantId: newUser.tenantId,
+      customerIds: [...newUser.customerIds],
+      workScopes: cloneWorkScopes(newUser.workScopes),
+      roles: [...newUser.roles],
+      status: newUser.status,
+      twoFA: newUser.twoFA,
+      lockedAt: "",
+      lastLogin: "-",
+    };
+    setUsers(items => [created, ...items]);
+    setSelectedId(created.id);
+    setNewUser({ ...emptyNewUser, roles:[...emptyNewUser.roles], customerIds:[], workScopes:{} });
+    setShowNew(false);
+    addAudit("신규 사용자 등록", created.id);
+  };
+
+  return (
+    <div className="p-6 space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-bold text-slate-800">5-B 사용자 관리</h1>
+          <p className="text-sm text-slate-500 mt-1">사용자를 테넌트에 소속시키고, 고객사별 대상 업무 범위까지 사용자별로 지정합니다. 역할별 기능 권한은 5-C, 담당 고객사 예외 권한은 5-E에서 별도로 관리합니다.</p>
+        </div>
+        <div className="flex gap-2">
+          <Btn variant="secondary" size="sm">Excel 내보내기</Btn>
+          <Btn size="sm" onClick={()=>setShowNew(true)}>+ 신규 사용자</Btn>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-4 gap-3">
+        {DUMMY_TENANTS.map(tenant => {
+          const tenantUsers = users.filter(user => user.tenantId === tenant.id);
+          const tenantAssignedCustomers = new Set(tenantUsers.flatMap(user => user.customerIds || []));
+          const tenantWorkScopeCount = tenantUsers.reduce((sum, user) => sum + (user.customerIds || []).reduce((inner, customerId) => inner + (((user.workScopes || {})[customerId] || []).length), 0), 0);
+          return (
+            <Card key={tenant.id}>
+              <div className="text-xs text-slate-500">{tenant.name}</div>
+              <div className="flex items-end justify-between mt-1">
+                <div className="text-2xl font-bold text-slate-800">{tenantUsers.length}</div>
+                <Badge color={tenant.status === "ACTIVE" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}>{tenant.status}</Badge>
+              </div>
+              <div className="text-xs text-slate-400 mt-1">사용자 {tenantUsers.length}명 · 고객사 {tenantAssignedCustomers.size}개 · 업무 {tenantWorkScopeCount}개</div>
+            </Card>
+          );
+        })}
+      </div>
+
+      <div className="grid grid-cols-12 gap-4">
+        <Card title="사용자 목록" className="col-span-8">
+          <div className="grid grid-cols-12 gap-2 mb-3">
+            <input
+              className="col-span-3 border border-slate-300 rounded px-3 py-1.5 text-sm"
+              placeholder="이름 / ID / 이메일 / 부서 검색"
+              value={query}
+              onChange={event => setQuery(event.target.value)}
+            />
+            <select className="col-span-3 border rounded px-2 py-1 text-sm" value={tenantFilter} onChange={event => { setTenantFilter(event.target.value); setCustomerFilter("ALL"); }}>
+              <option value="ALL">전체 테넌트</option>
+              {DUMMY_TENANTS.map(tenant => <option key={tenant.id} value={tenant.id}>{tenant.name}</option>)}
+            </select>
+            <select className="col-span-3 border rounded px-2 py-1 text-sm" value={customerFilter} onChange={event => setCustomerFilter(event.target.value)}>
+              <option value="ALL">전체 고객사</option>
+              {visibleCustomers.map(customer => <option key={customer.id} value={customer.id}>{customer.name}</option>)}
+            </select>
+            <select className="col-span-3 border rounded px-2 py-1 text-sm" value={workScopeFilter} onChange={event => setWorkScopeFilter(event.target.value)}>
+              <option value="ALL">전체 대상 업무</option>
+              {WORK_SCOPE_OPTIONS.map(scope => <option key={scope.code} value={scope.code}>{scope.label}</option>)}
+            </select>
+            <select className="col-span-2 border rounded px-2 py-1 text-sm" value={statusFilter} onChange={event => setStatusFilter(event.target.value)}>
+              <option value="ALL">전체 상태</option>
+              <option value="ACTIVE">활성</option>
+              <option value="LOCKED">잠금</option>
+              <option value="WITHDRAWN">퇴사</option>
+            </select>
+            <select className="col-span-3 border rounded px-2 py-1 text-sm" value={roleFilter} onChange={event => setRoleFilter(event.target.value)}>
+              <option value="ALL">전체 역할</option>
+              {ROLE_OPTIONS.map(role => <option key={role} value={role}>{role}</option>)}
+            </select>
+            <div className="col-span-7 text-xs text-slate-500 flex items-center">테넌트, 고객사, 대상 업무 범위를 조합해 사용자를 필터링합니다.</div>
+          </div>
+          <table className="w-full text-sm">
+            <thead className="text-xs text-slate-500 border-b">
+              <tr>
+                <th className="text-left py-1">사용자</th>
+                <th className="text-left">테넌트</th>
+                <th className="text-left">고객사 권한</th>
+                <th className="text-left">업무 범위</th>
+                <th className="text-left">역할</th>
+                <th>상태</th>
+                <th>2FA</th>
+                <th>최근 접속</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map(user => (
+                <tr key={user.id}
+                    className={`border-b cursor-pointer hover:bg-slate-50 ${selectedId===user.id?"bg-indigo-50":""}`}
+                    onClick={()=>setSelectedId(user.id)}>
+                  <td className="py-2">
+                    <div className="font-medium">{user.name}</div>
+                    <div className="text-xs text-slate-500 font-mono">{user.id} · {user.email}</div>
+                    <div className="text-xs text-slate-400">{user.dept}</div>
+                  </td>
+                  <td>
+                    <div className="font-medium text-xs">{tenantName(user.tenantId)}</div>
+                    <div className="text-[11px] text-slate-400 font-mono">{user.tenantId}</div>
+                  </td>
+                  <td>
+                    <Badge color={(user.customerIds || []).length ? "bg-sky-100 text-sky-700" : "bg-rose-100 text-rose-700"}>{customerSummary(user)}</Badge>
+                  </td>
+                  <td>
+                    <Badge color="bg-indigo-100 text-indigo-700">{workScopeSummary(user)}</Badge>
+                  </td>
+                  <td>
+                    <div className="flex flex-wrap gap-1">
+                      {user.roles.map(role => <Badge key={role}>{role}</Badge>)}
+                    </div>
+                  </td>
+                  <td className="text-center"><Badge color={STATUS_CLASS[user.status]}>{user.status}</Badge></td>
+                  <td className="text-center">{user.twoFA ? "사용" : "미등록"}</td>
+                  <td className="text-xs text-slate-500">{user.lastLogin}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="text-xs text-slate-500 mt-2">표시 {filtered.length}명 / 전체 {users.length}명</div>
+        </Card>
+
+        <Card title={`사용자 편집 - ${selected?.name || ""}`} className="col-span-4">
+          {selected && (
+            <div className="space-y-3 text-sm">
+              <div>
+                <label className="block text-xs text-slate-500">사용자 ID</label>
+                <input className="w-full border rounded px-2 py-1 bg-slate-50" value={draft.id || ""} readOnly />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs text-slate-500">이름</label>
+                  <input className="w-full border rounded px-2 py-1" value={draft.name || ""} onChange={event=>setDraft({...draft, name:event.target.value})} />
+                </div>
+                <div>
+                  <label className="block text-xs text-slate-500">부서</label>
+                  <input className="w-full border rounded px-2 py-1" value={draft.dept || ""} onChange={event=>setDraft({...draft, dept:event.target.value})} />
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs text-slate-500">이메일</label>
+                <input className="w-full border rounded px-2 py-1" value={draft.email || ""} onChange={event=>setDraft({...draft, email:event.target.value})} />
+              </div>
+              <div>
+                <label className="block text-xs text-slate-500">소속 테넌트</label>
+                <select className="w-full border rounded px-2 py-1" value={draft.tenantId || "ey001"} onChange={event=>setDraft({...draft, tenantId:event.target.value, customerIds:[], workScopes:{}})}>
+                  {DUMMY_TENANTS.map(tenant => <option key={tenant.id} value={tenant.id}>{tenant.name}</option>)}
+                </select>
+              </div>
+              <div className="border rounded p-3 bg-slate-50">
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-xs font-semibold text-slate-600">고객사 접근 범위</label>
+                  <div className="flex gap-1">
+                    <button type="button" className="text-[11px] text-indigo-600" onClick={()=>setDraft({...draft, customerIds:draftCustomers.map(customer => customer.id), workScopes:allWorkScopesByCustomer(draftCustomers)})}>전체 선택</button>
+                    <button type="button" className="text-[11px] text-slate-500" onClick={()=>setDraft({...draft, customerIds:[], workScopes:{}})}>해제</button>
+                  </div>
+                </div>
+                <div className="max-h-28 overflow-y-auto scroll-thin space-y-1">
+                  {draftCustomers.map(customer => (
+                    <label key={customer.id} className="flex items-center justify-between gap-2 text-xs">
+                      <span><input type="checkbox" className="mr-1" checked={(draft.customerIds || []).includes(customer.id)} onChange={()=>toggleDraftCustomer(customer.id)} />{customer.name}</span>
+                      <span className="text-slate-400 font-mono">{customer.code}</span>
+                    </label>
+                  ))}
+                  {!draftCustomers.length && <div className="text-xs text-slate-400">선택한 테넌트의 고객사가 없습니다.</div>}
+                </div>
+                <div className="text-[11px] text-slate-500 mt-2">선택된 고객사 {(draft.customerIds || []).length}개 · 고객사 권한은 소속 테넌트 안에서만 적용됩니다.</div>
+                {(draft.customerIds || []).length > 0 && (
+                  <div className="border-t mt-3 pt-3 space-y-2">
+                    <div className="text-xs font-semibold text-slate-600">고객사별 대상 업무</div>
+                    {(draft.customerIds || []).map(customerId => {
+                      const customer = draftCustomers.find(item => item.id === customerId);
+                      if (!customer) return null;
+                      return (
+                        <div key={customerId} className="bg-white border rounded p-2">
+                          <div className="flex justify-between text-xs mb-1">
+                            <span className="font-medium">{customer.name}</span>
+                            <span className="text-slate-400 font-mono">{customer.code}</span>
+                          </div>
+                          <div className="text-[11px] text-slate-500 mb-1">고객사 대상 업무: {targetWorkScopesForCustomer(customerId).map(workScopeLabel).join(", ")}</div>
+                          <div className="grid grid-cols-2 gap-1">
+                            {WORK_SCOPE_OPTIONS.filter(scope => targetWorkScopesForCustomer(customerId).includes(scope.code)).map(scope => (
+                              <label key={scope.code} className="text-[11px]">
+                                <input type="checkbox" className="mr-1" checked={((draft.workScopes || {})[customerId] || []).includes(scope.code)} onChange={()=>toggleDraftWorkScope(customerId, scope.code)} />{scope.label}
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+              <div>
+                <label className="block text-xs text-slate-500 mb-1">역할</label>
+                <div className="flex flex-wrap gap-1">
+                  {ROLE_OPTIONS.map(role => (
+                    <label key={role} className={`text-xs px-2 py-1 rounded border cursor-pointer ${draft.roles?.includes(role) ? "bg-indigo-100 border-indigo-400 text-indigo-700" : "border-slate-300 text-slate-600"}`}>
+                      <input type="checkbox" className="mr-1" checked={draft.roles?.includes(role)} onChange={()=>toggleRole(role)} />{role}
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs text-slate-500">상태</label>
+                  <select className="w-full border rounded px-2 py-1" value={draft.status || "ACTIVE"} onChange={event=>setDraft({...draft, status:event.target.value})}>
+                    <option value="ACTIVE">활성</option>
+                    <option value="LOCKED">잠금</option>
+                    <option value="WITHDRAWN">퇴사</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs text-slate-500">2FA</label>
+                  <label className="flex items-center gap-2 h-8"><input type="checkbox" checked={!!draft.twoFA} onChange={event=>setDraft({...draft, twoFA:event.target.checked})}/> 사용</label>
+                </div>
+              </div>
+              <div className="border-t pt-3 grid grid-cols-2 gap-2">
+                <Btn size="sm" variant="secondary" onClick={resetPassword}>비밀번호 초기화</Btn>
+                <Btn size="sm" variant="secondary" onClick={resetTwoFA}>2FA 리셋</Btn>
+                {selected.status === "LOCKED"
+                  ? <Btn size="sm" variant="success" onClick={()=>updateStatus("ACTIVE")}>잠금 해제</Btn>
+                  : <Btn size="sm" variant="secondary" onClick={()=>updateStatus("LOCKED")}>강제 잠금</Btn>}
+                <Btn size="sm" variant="danger" onClick={withdrawUser}>퇴사 처리</Btn>
+              </div>
+              <div className="pt-2 flex justify-end gap-2">
+                <Btn size="sm" variant="secondary" onClick={()=>setDraft({...selected, roles:[...selected.roles], customerIds:[...(selected.customerIds || [])], workScopes:cloneWorkScopes(selected.workScopes)})}>취소</Btn>
+                <Btn size="sm" onClick={saveDraft}>저장</Btn>
+              </div>
+              <div className="text-xs text-slate-500">
+                {selected.lockedAt ? `잠금 시각: ${selected.lockedAt}` : "잠금 이력 없음"}
+                {selected.twoFAResetAt ? ` · 2FA 리셋: ${selected.twoFAResetAt}` : ""}
+              </div>
+            </div>
+          )}
+        </Card>
+      </div>
+
+      <Card title="사용자 관리 감사 이력">
+        <table className="w-full text-sm">
+          <thead className="text-xs text-slate-500 border-b"><tr><th className="text-left py-1">시각</th><th>관리자</th><th>행위</th><th>대상</th></tr></thead>
+          <tbody>
+            {audit.map((item, index) => (
+              <tr key={`${item.at}-${index}`} className="border-b">
+                <td className="py-1.5 text-xs text-slate-500">{item.at}</td>
+                <td>{item.actor}</td>
+                <td>{item.action}</td>
+                <td className="font-mono text-xs">{item.target}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Card>
+
+      {showNew && (
+        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center z-50" onClick={()=>setShowNew(false)}>
+          <div className="bg-white rounded-lg w-[720px] p-5" onClick={event=>event.stopPropagation()}>
+            <h3 className="font-semibold mb-3">신규 사용자 등록</h3>
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <div><label className="block text-xs text-slate-500">사용자 ID</label><input className="w-full border rounded px-2 py-1" value={newUser.id} onChange={event=>setNewUser({...newUser, id:event.target.value})}/></div>
+              <div><label className="block text-xs text-slate-500">이름</label><input className="w-full border rounded px-2 py-1" value={newUser.name} onChange={event=>setNewUser({...newUser, name:event.target.value})}/></div>
+              <div><label className="block text-xs text-slate-500">이메일</label><input className="w-full border rounded px-2 py-1" value={newUser.email} onChange={event=>setNewUser({...newUser, email:event.target.value})}/></div>
+              <div><label className="block text-xs text-slate-500">부서</label><input className="w-full border rounded px-2 py-1" value={newUser.dept} onChange={event=>setNewUser({...newUser, dept:event.target.value})}/></div>
+              <div className="col-span-2">
+                <label className="block text-xs text-slate-500">소속 테넌트</label>
+                <select className="w-full border rounded px-2 py-1" value={newUser.tenantId} onChange={event=>setNewUser({...newUser, tenantId:event.target.value, customerIds:[], workScopes:{}})}>
+                  {DUMMY_TENANTS.map(tenant => <option key={tenant.id} value={tenant.id}>{tenant.name}</option>)}
+                </select>
+              </div>
+              <div className="col-span-2 border rounded p-3 bg-slate-50">
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-xs font-semibold text-slate-600">고객사 접근 범위</label>
+                  <div className="flex gap-1">
+                    <button type="button" className="text-[11px] text-indigo-600" onClick={()=>setNewUser({...newUser, customerIds:newUserCustomers.map(customer => customer.id), workScopes:allWorkScopesByCustomer(newUserCustomers)})}>전체 선택</button>
+                    <button type="button" className="text-[11px] text-slate-500" onClick={()=>setNewUser({...newUser, customerIds:[], workScopes:{}})}>해제</button>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-1 max-h-24 overflow-y-auto scroll-thin">
+                  {newUserCustomers.map(customer => (
+                    <label key={customer.id} className="text-xs">
+                      <input type="checkbox" className="mr-1" checked={newUser.customerIds.includes(customer.id)} onChange={()=>toggleNewCustomer(customer.id)} />{customer.name}
+                    </label>
+                  ))}
+                </div>
+                <div className="text-[11px] text-slate-500 mt-2">신규 사용자는 소속 테넌트의 고객사만 선택할 수 있습니다.</div>
+                {newUser.customerIds.length > 0 && (
+                  <div className="border-t mt-3 pt-3 space-y-2">
+                    <div className="text-xs font-semibold text-slate-600">고객사별 대상 업무</div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {newUser.customerIds.map(customerId => {
+                        const customer = newUserCustomers.find(item => item.id === customerId);
+                        if (!customer) return null;
+                        return (
+                          <div key={customerId} className="bg-white border rounded p-2">
+                            <div className="flex justify-between text-xs mb-1">
+                              <span className="font-medium">{customer.name}</span>
+                              <span className="text-slate-400 font-mono">{customer.code}</span>
+                            </div>
+                            <div className="text-[11px] text-slate-500 mb-1">고객사 대상 업무: {targetWorkScopesForCustomer(customerId).map(workScopeLabel).join(", ")}</div>
+                            <div className="grid grid-cols-2 gap-1">
+                              {WORK_SCOPE_OPTIONS.filter(scope => targetWorkScopesForCustomer(customerId).includes(scope.code)).map(scope => (
+                                <label key={scope.code} className="text-[11px]">
+                                  <input type="checkbox" className="mr-1" checked={((newUser.workScopes || {})[customerId] || []).includes(scope.code)} onChange={()=>toggleNewWorkScope(customerId, scope.code)} />{scope.label}
+                                </label>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div>
+                <label className="block text-xs text-slate-500">상태</label>
+                <select className="w-full border rounded px-2 py-1" value={newUser.status} onChange={event=>setNewUser({...newUser, status:event.target.value})}>
+                  <option value="ACTIVE">활성</option>
+                  <option value="LOCKED">잠금</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs text-slate-500">보안</label>
+                <label className="flex items-center gap-2 h-8"><input type="checkbox" checked={newUser.twoFA} onChange={event=>setNewUser({...newUser, twoFA:event.target.checked})}/> 2FA 등록 의무</label>
+              </div>
+              <div className="col-span-2">
+                <label className="block text-xs text-slate-500 mb-1">역할</label>
+                <div className="flex flex-wrap gap-1">
+                  {ROLE_OPTIONS.map(role => (
+                    <label key={role} className={`text-xs px-2 py-1 rounded border cursor-pointer ${newUser.roles.includes(role) ? "bg-indigo-100 border-indigo-400 text-indigo-700" : "border-slate-300 text-slate-600"}`}>
+                      <input type="checkbox" className="mr-1" checked={newUser.roles.includes(role)} onChange={()=>toggleNewRole(role)} />{role}
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <label className="col-span-2 flex items-center gap-2"><input type="checkbox" checked={newUser.forcePasswordChange} onChange={event=>setNewUser({...newUser, forcePasswordChange:event.target.checked})}/> 첫 로그인 시 비밀번호 변경 강제</label>
+            </div>
+            <div className="flex justify-end gap-2 mt-4">
+              <Btn variant="secondary" size="sm" onClick={()=>setShowNew(false)}>취소</Btn>
+              <Btn size="sm" onClick={createUser}>등록</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const AdminMenuFunc = () => {
+  const FUNCS = [
+    { code:"READ",     name:"조회",          desc:"화면 진입 및 데이터 조회" },
+    { code:"CREATE",   name:"등록",          desc:"신규 데이터 입력/저장" },
+    { code:"UPDATE",   name:"수정",          desc:"기존 데이터 변경" },
+    { code:"DELETE",   name:"삭제",          desc:"데이터 삭제 (논리삭제 포함)" },
+    { code:"PRINT",    name:"출력",          desc:"화면 인쇄 / PDF 출력" },
+    { code:"EXPORT",   name:"내보내기",      desc:"Excel/CSV 다운로드" },
+    { code:"IMPORT",   name:"가져오기",      desc:"Excel/파일 업로드" },
+    { code:"APPROVE",  name:"승인/결재",     desc:"검토·승인 행위" },
+    { code:"SUBMIT",   name:"제출/신고",     desc:"전자신고 등 외부 제출" },
+    { code:"UNLOCK",   name:"잠금해제",       desc:"마감된 데이터 재오픈" },
+    { code:"LOG_VIEW", name:"로그조회",       desc:"감사로그 등 민감 로그 조회" },
+    { code:"MASK_OFF", name:"마스킹해제",     desc:"민감정보 원본 보기" },
+  ];
+  const MENUS = ["대시보드","고객사","사업연도","세무정보","세무조정","서식","검증","결재","출력","전자신고","사후관리","사용자","역할/권한","담당법인권한","법령버전","서식버전","감사로그"];
+  const [tab,setTab] = useState("menus");
+  const [selMenu,setSelMenu] = useState(MENUS[4]);
+
+  // 메뉴별 활성 기능 데모 (체크박스)
+  const defaultEnabled = {
+    "대시보드":["READ"],
+    "고객사":["READ","CREATE","UPDATE","DELETE","EXPORT"],
+    "사업연도":["READ","CREATE","UPDATE","EXPORT"],
+    "세무정보":["READ","CREATE","UPDATE","DELETE","EXPORT","IMPORT"],
+    "세무조정":["READ","CREATE","UPDATE","DELETE","EXPORT","IMPORT","APPROVE","UNLOCK"],
+    "서식":["READ","CREATE","UPDATE","DELETE","PRINT","EXPORT"],
+    "검증":["READ","EXPORT"],
+    "결재":["READ","APPROVE"],
+    "출력":["READ","PRINT"],
+    "전자신고":["READ","SUBMIT","UNLOCK"],
+    "사후관리":["READ","UPDATE","UNLOCK"],
+    "사용자":["READ","CREATE","UPDATE","DELETE","EXPORT"],
+    "역할/권한":["READ","CREATE","UPDATE","DELETE"],
+    "담당법인권한":["READ","CREATE","UPDATE","DELETE"],
+    "법령버전":["READ","CREATE","UPDATE","APPROVE","EXPORT"],
+    "서식버전":["READ","CREATE","UPDATE","APPROVE","IMPORT","EXPORT"],
+    "감사로그":["READ","LOG_VIEW","MASK_OFF","EXPORT"],
+  };
+  const enabledNow = defaultEnabled[selMenu] || [];
+
+  return (
+    <div className="p-6 space-y-4">
+      <h1 className="text-xl font-bold text-slate-800">5-D 메뉴 / 기능 관리</h1>
+      <p className="text-sm text-slate-500">시스템 전역의 메뉴 마스터와 메뉴별 활성 기능(READ/CREATE/UPDATE/DELETE 등)을 정의합니다. 여기서 활성화된 기능만 5-C 권한 매트릭스에서 부여 가능합니다.</p>
+
+      <div className="flex gap-2 border-b text-sm">
+        <button onClick={()=>setTab("menus")} className={`px-3 py-2 ${tab==="menus"?"border-b-2 border-indigo-600 text-indigo-600 font-semibold":""}`}>메뉴 트리 + 활성 기능</button>
+        <button onClick={()=>setTab("funcs")} className={`px-3 py-2 ${tab==="funcs"?"border-b-2 border-indigo-600 text-indigo-600 font-semibold":""}`}>공통 기능 코드</button>
+      </div>
+
+      {tab==="menus" && (
+        <div className="grid grid-cols-3 gap-4">
+          <Card title="메뉴 트리" className="col-span-1">
+            {MENUS.map(m=>(
+              <button key={m}
+                onClick={()=>setSelMenu(m)}
+                className={`w-full text-left px-3 py-1.5 text-sm rounded
+                  ${selMenu===m?"bg-indigo-50 text-indigo-700":"hover:bg-slate-50"}`}>
+                {m}
+              </button>
+            ))}
+          </Card>
+
+          <Card title={`"${selMenu}" 에서 사용 가능한 기능`} className="col-span-2"
+            action={<Btn size="sm">저장</Btn>}>
+            <div className="grid grid-cols-3 gap-2">
+              {FUNCS.map(f=>(
+                <label key={f.code} className="flex items-start gap-2 border rounded px-3 py-2 text-sm">
+                  <input type="checkbox" defaultChecked={enabledNow.includes(f.code)} className="mt-1"/>
+                  <div>
+                    <div className="font-mono text-xs">{f.code}</div>
+                    <div className="text-xs text-slate-500">{f.name} — {f.desc}</div>
+                  </div>
+                </label>
+              ))}
+            </div>
+            <div className="text-xs text-slate-500 mt-3">
+              ⓘ 여기서 체크된 기능만 역할/사용자에게 부여 가능. 비활성 기능은 5-C 권한 매트릭스에서 회색으로 표시됩니다.
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {tab==="funcs" && (
+        <Card title="공통 기능(Function) 코드 마스터" action={<Btn size="sm">+ 신규 기능 추가</Btn>}>
+          <table className="w-full text-sm">
+            <thead className="text-xs text-slate-500 border-b">
+              <tr><th className="text-left py-1">코드</th><th>이름</th><th>설명</th><th>시스템</th></tr>
+            </thead>
+            <tbody>
+              {FUNCS.map(f=>(
+                <tr key={f.code} className="border-b">
+                  <td className="font-mono py-1.5">{f.code}</td>
+                  <td>{f.name}</td>
+                  <td className="text-slate-600">{f.desc}</td>
+                  <td className="text-center"><Badge color="bg-slate-100 text-slate-600">시스템</Badge></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="text-xs text-slate-500 mt-3">시스템 기본 12개 외에 테넌트별로 사용자 정의 기능을 추가할 수 있습니다(예: BULK_CLOSE, OVERRIDE_LIMIT).</div>
+        </Card>
+      )}
+    </div>
+  );
+};
+
+const AdminCAcc = () => {
+  const WORK_SCOPES = ["기초정보","세무조정","서식작성","검증","결재/검토","출력","전자신고","사후관리"];
+  const scopeBadges = (items) => (
+    <div className="flex flex-wrap gap-1">
+      {items.map(item => <Badge key={item} color="bg-indigo-100 text-indigo-700">{item}</Badge>)}
+    </div>
+  );
+
+  return (
+    <div className="p-6 space-y-4">
+      <h1 className="text-xl font-bold text-slate-800">5-E 사용자별 담당 고객사 / 업무 권한</h1>
+      <div className="flex gap-2 text-sm">
+        사용자:
+        <select className="border rounded px-2 py-0.5"><option>강수(ksc)</option><option>박OO(park)</option><option>김OO(kim)</option></select>
+        테넌트:
+        <select className="border rounded px-2 py-0.5"><option>EY 회계법인</option><option>택스온 세무법인</option><option>한빛 세무사사무소</option></select>
+      </div>
+      <Card title="고객사별 담당 등급 및 대상 업무" action={<Btn size="sm">+ 고객사/업무 추가</Btn>}>
+        <table className="w-full text-sm">
+          <thead className="text-xs text-slate-500 border-b"><tr><th className="text-left py-1">고객사</th><th>등급</th><th className="text-left">대상 업무</th><th>주담당</th><th>사업연도</th><th>만료</th></tr></thead>
+          <tbody>
+            <tr className="border-b"><td>㈜OOO 제조</td><td><select className="border rounded px-1 py-0.5 text-xs"><option>OWNER</option><option>CO_WORKER</option><option>REVIEWER</option><option>ASSISTANT</option><option>VIEWER</option><option>BLOCKED</option></select></td><td>{scopeBadges(["기초정보","세무조정","서식작성","검증","출력"])}</td><td>✓</td><td>전체</td><td>무기한</td></tr>
+            <tr className="border-b"><td>△△사 유통</td><td><select className="border rounded px-1 py-0.5 text-xs" defaultValue="CO_WORKER"><option>OWNER</option><option>CO_WORKER</option><option>REVIEWER</option></select></td><td>{scopeBadges(["기초정보","세무조정","서식작성"])}</td><td>—</td><td>2024-2025</td><td>무기한</td></tr>
+            <tr className="border-b"><td>□□㈜ SW</td><td><select className="border rounded px-1 py-0.5 text-xs" defaultValue="REVIEWER"><option>OWNER</option><option>REVIEWER</option></select></td><td>{scopeBadges(["검증","결재/검토","출력"])}</td><td>—</td><td>2025만</td><td>2026-12</td></tr>
+            <tr className="border-b text-rose-600"><td>☆☆ 글로벌</td><td><select className="border rounded px-1 py-0.5 text-xs" defaultValue="BLOCKED"><option>BLOCKED</option></select></td><td>{scopeBadges(["전체 차단"])}</td><td>—</td><td>—</td><td>무기한</td></tr>
+          </tbody>
+        </table>
+        <div className="text-xs text-slate-500 mt-3">5-B의 기본 고객사/업무 범위 위에, 담당 등급과 차단 같은 고객사별 예외를 적용합니다.</div>
+      </Card>
+      <Card title="최종 적용 결과 미리보기">
+        <div className="grid grid-cols-6 gap-3 text-sm">
+          <div className="border rounded p-2 text-center"><div className="text-xs text-slate-500">OWNER</div><div className="text-xl font-bold">2</div></div>
+          <div className="border rounded p-2 text-center"><div className="text-xs text-slate-500">CO_WORKER</div><div className="text-xl font-bold">1</div></div>
+          <div className="border rounded p-2 text-center"><div className="text-xs text-slate-500">REVIEWER</div><div className="text-xl font-bold">1</div></div>
+          <div className="border rounded p-2 text-center"><div className="text-xs text-slate-500">업무 코드</div><div className="text-xl font-bold">{WORK_SCOPES.length}</div></div>
+          <div className="border rounded p-2 text-center"><div className="text-xs text-slate-500">VIEWER</div><div className="text-xl font-bold">0</div></div>
+          <div className="border rounded p-2 text-center bg-rose-50"><div className="text-xs text-rose-500">BLOCKED</div><div className="text-xl font-bold text-rose-700">1</div></div>
+        </div>
+      </Card>
+    </div>
+  );
+};
+
+const AdminLaw = () => (
+  <div className="p-6 space-y-4">
+    <h1 className="text-xl font-bold text-slate-800">5-D 법령·세율 버전 관리</h1>
+    <Card action={<Btn size="sm">+ 신규 개정 등록</Btn>}>
+      <table className="w-full text-sm">
+        <thead className="text-xs text-slate-500 border-b"><tr><th className="text-left py-1">법령 코드</th><th>시행일</th><th>종료일</th><th>상태</th><th>비고</th></tr></thead>
+        <tbody>
+          <tr className="border-b"><td className="font-mono">CIT_RATE</td><td>2024-01-01</td><td>무기한</td><td><Badge color="bg-emerald-100 text-emerald-700">ACTIVE</Badge></td><td>4구간 (9/19/21/24%)</td></tr>
+          <tr className="border-b"><td className="font-mono">CIT_RATE</td><td>2023-01-01</td><td>2023-12-31</td><td><Badge color="bg-slate-100 text-slate-600">RETIRED</Badge></td><td>—</td></tr>
+          <tr className="border-b"><td className="font-mono">ENT_LIMIT</td><td>2025-01-01</td><td>무기한</td><td><Badge color="bg-emerald-100 text-emerald-700">ACTIVE</Badge></td><td>중소 3,600만</td></tr>
+          <tr className="border-b"><td className="font-mono">RND_CREDIT</td><td>2025-01-01</td><td>무기한</td><td><Badge color="bg-emerald-100 text-emerald-700">ACTIVE</Badge></td><td>—</td></tr>
+          <tr className="border-b"><td className="font-mono">RND_CREDIT</td><td>2026-01-01</td><td>무기한</td><td><Badge color="bg-amber-100 text-amber-700">DRAFT</Badge></td><td>신성장기술 가산공제 확대</td></tr>
+        </tbody>
+      </table>
+    </Card>
+    <Card title="영향 시뮬레이션 (RND_CREDIT 2026-01)">
+      <table className="w-full text-sm">
+        <thead className="text-xs text-slate-500 border-b"><tr><th className="text-left py-1">고객사</th><th className="text-right">종전 산출</th><th className="text-right">변경 산출</th><th className="text-right">차이</th></tr></thead>
+        <tbody>
+          <tr className="border-b"><td>㈜OOO</td><td className="text-right">1,250,000</td><td className="text-right">1,180,000</td><td className="text-right text-rose-600">-70,000</td></tr>
+          <tr className="border-b"><td>△△사</td><td className="text-right">850,000</td><td className="text-right">850,000</td><td className="text-right">0</td></tr>
+          <tr className="border-b"><td>□□㈜</td><td className="text-right">3,200,000</td><td className="text-right">3,050,000</td><td className="text-right text-rose-600">-150,000</td></tr>
+        </tbody>
+        <tfoot><tr className="font-semibold"><td className="py-2">합계 (영향 12법인)</td><td></td><td></td><td className="text-right text-rose-600">-1,840,000</td></tr></tfoot>
+      </table>
+      <div className="flex gap-2 mt-3"><Btn size="sm">활성화 신청</Btn><Btn size="sm" variant="secondary">공지 초안</Btn></div>
+    </Card>
+  </div>
+);
+
+const AdminFormVer = () => (
+  <div className="p-6 space-y-4">
+    <h1 className="text-xl font-bold text-slate-800">5-E 서식 버전 관리</h1>
+    <Card>
+      <table className="w-full text-sm">
+        <thead className="text-xs text-slate-500 border-b"><tr><th className="text-left py-1">서식코드</th><th>서식명</th><th>버전</th><th>시행일</th><th>상태</th></tr></thead>
+        <tbody>
+          <tr className="border-b"><td className="font-mono">BJ_03</td><td>과세표준 및 세액조정계산서</td><td>2025-01</td><td>2025-01-01</td><td><Badge color="bg-emerald-100 text-emerald-700">ACTIVE</Badge></td></tr>
+          <tr className="border-b"><td className="font-mono">BJ_15</td><td>소득금액조정명세서</td><td>2025-02</td><td>2025-07-01</td><td><Badge color="bg-emerald-100 text-emerald-700">ACTIVE</Badge></td></tr>
+          <tr className="border-b"><td className="font-mono">BJ_15</td><td>소득금액조정명세서</td><td>2025-01</td><td>2025-01-01</td><td><Badge color="bg-slate-100 text-slate-600">RETIRED</Badge></td></tr>
+          <tr className="border-b"><td className="font-mono">BJ_29-2</td><td>업무용승용차</td><td>2026-01</td><td>2026-01-01</td><td><Badge color="bg-amber-100 text-amber-700">DRAFT</Badge></td></tr>
+        </tbody>
+      </table>
+    </Card>
+  </div>
+);
+
+const AdminAudit = () => (
+  <div className="p-6 space-y-4">
+    <h1 className="text-xl font-bold text-slate-800">5-G 감사 로그</h1>
+    <Card>
+      <table className="w-full text-sm">
+        <thead className="text-xs text-slate-500 border-b"><tr><th className="text-left py-1">시각</th><th>사용자</th><th>행위</th><th>대상</th><th>IP</th></tr></thead>
+        <tbody>
+          <tr className="border-b"><td className="text-xs">10:32:01</td><td>ksc</td><td>UPDATE</td><td>tax_adjustments #1042</td><td>10.0.1.23</td></tr>
+          <tr className="border-b"><td className="text-xs">10:30:18</td><td>ksc</td><td>LOGIN</td><td>—</td><td>10.0.1.23</td></tr>
+          <tr className="border-b"><td className="text-xs">09:55:09</td><td>park</td><td>SUBMIT</td><td>efiling_history #99</td><td>10.0.2.55</td></tr>
+        </tbody>
+      </table>
+    </Card>
+  </div>
+);
+
+/* ============================================================
+   App Shell
+   ============================================================ */
+const Shell = () => {
+  const { menuKey } = useApp();
+  const wsFull = menuKey.startsWith("ws-");
+  const route = {
+    "dashboard": <Dashboard/>,
+    "ws-start": <WorkStart/>,
+    "ws-info":  <WorkInfo/>,
+    "ws-adj":   <WorkAdj/>,
+    "ws-form":  <WorkForm/>,
+    "ws-val":   <WorkVal/>,
+    "ws-appr":  <WorkAppr/>,
+    "ws-print": <WorkPrint/>,
+    "ws-file":  <WorkFile/>,
+    "post-hist":<PostHist/>,
+    "post-amend":<PostAmend/>,
+    "rp-compare":<Reports menuKey={menuKey}/>,
+    "rp-burden":<Reports menuKey={menuKey}/>,
+    "rp-reserve":<Reports menuKey={menuKey}/>,
+    "ad-tenant":   <AdminTenant/>,
+    "ad-cust":      <AdminCust/>,
+    "ad-user-list": <AdminUserList/>,
+    "ad-role":      <AdminRolePerm/>,
+    "ad-menu-fn":   <AdminMenuFunc/>,
+    "ad-cacc":      <AdminCAcc/>,
+    "ad-law":       <AdminLaw/>,
+    "ad-form":      <AdminFormVer/>,
+    "ad-audit":     <AdminAudit/>,
+  }[menuKey] || <Dashboard/>;
+
+  return (
+    <div className="min-h-screen flex">
+      <Sidebar/>
+      <div className="flex-1 flex flex-col">
+        <TopBar/>
+        {wsFull
+          ? <div className="flex-1 flex flex-col overflow-hidden">{route}</div>
+          : <main className="flex-1 overflow-y-auto scroll-thin">{route}</main>}
+      </div>
+    </div>
+  );
+};
+
+/* ============================================================
+   루트
+   ============================================================ */
+const App = () => {
+  const [authed, setAuthed] = useState(false);
+  const [menuKey, setMenuKey] = useState("dashboard");
+  const [current, setCurrent] = useState({});
+
+  const navigate = (k) => setMenuKey(k);
+
+  return (
+    <AppCtx.Provider value={{ menuKey, navigate, current, setCurrent, logout:()=>{setAuthed(false); setCurrent({});} }}>
+      {authed ? <Shell/> : <Login onLogin={()=>setAuthed(true)} />}
+    </AppCtx.Provider>
+  );
+};
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>

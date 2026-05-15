@@ -76,7 +76,7 @@ pub fn module_tree() -> Value {
                 vec![
                     submodule("tax-data.financial-statements", "4.1", "재무제표 입력/임포트", "/modules/tax-data/financial-statements"),
                     submodule("tax-data.account-mapping", "4.2", "계정과목 매핑", "/modules/tax-data/account-mapping"),
-                    submodule("tax-data.partners", "4.3", "거래처 정보", "/modules/tax-data/partners"),
+                    submodule("tax-data.partners", "4.3", "거래 명세", "/modules/tax-data/partners"),
                     submodule("tax-data.assets", "4.4", "자산/감가상각 정보", "/modules/tax-data/assets"),
                 ],
             ),
@@ -106,6 +106,10 @@ pub fn module_tree() -> Value {
                 None,
                 "/modules/forms",
                 vec![
+                    submodule("forms.versions", "6.0", "서식 버전 관리", "/modules/forms/versions"),
+                    submodule("forms.relationships", "6.0.1", "서식 항목 매핑", "/modules/forms/relationships"),
+                    submodule("forms.migrations", "6.0.2", "서식 데이터 마이그레이션", "/modules/forms/migrations"),
+                    submodule("forms.resolver", "6.0.3", "사업연도 적용 서식", "/modules/forms/resolver"),
                     submodule("forms.form3", "6.1", "과세표준 및 세액조정계산서 (별지 제3호)", "/modules/forms/form3"),
                     submodule("forms.attachments", "6.2", "100여 종 부속서식", "/modules/forms/attachments"),
                     submodule("forms.linkage", "6.3", "서식 간 데이터 연동", "/modules/forms/linkage"),

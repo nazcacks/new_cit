@@ -5,9 +5,14 @@ use crate::{
     db::{execute_batch, quote_ident},
     domain::{
         BusinessYear, CreateBusinessYearRequest, CreateCustomerRequest, CreateTenantRequest,
-        Customer, Tenant, TenantRef,
+        Customer, Tenant, TenantRef, UpdateBusinessYearStatusRequest,
     },
 };
+
+const DEFAULT_CUSTOMER_WORK_SCOPES: &[&str] = &["INFO", "ADJUST", "FORM", "VALIDATE", "PRINT"];
+const ALLOWED_CUSTOMER_WORK_SCOPES: &[&str] = &[
+    "INFO", "ADJUST", "FORM", "VALIDATE", "APPROVE", "PRINT", "EFILE", "POST",
+];
 
 pub fn normalize_tenant_code(code: &str) -> Result<String> {
     let normalized = code.trim().to_ascii_lowercase();
@@ -110,11 +115,14 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
             corp_reg_no     VARCHAR(20),
             industry_code   VARCHAR(20),
             is_sme          BOOLEAN NOT NULL DEFAULT FALSE,
+            work_scopes     TEXT[] NOT NULL DEFAULT ARRAY['INFO','ADJUST','FORM','VALIDATE','PRINT']::TEXT[],
             status          VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             UNIQUE(tenant_id, customer_code)
         );
+        ALTER TABLE {schema}.customers
+            ADD COLUMN IF NOT EXISTS work_scopes TEXT[] NOT NULL DEFAULT ARRAY['INFO','ADJUST','FORM','VALIDATE','PRINT']::TEXT[];
 
         CREATE TABLE IF NOT EXISTS {schema}.business_years (
             by_id           BIGSERIAL PRIMARY KEY,
@@ -122,41 +130,129 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
             year_label      INT NOT NULL,
             start_date      DATE NOT NULL,
             end_date        DATE NOT NULL,
-            status          VARCHAR(20) NOT NULL DEFAULT 'OPEN',
+            status          VARCHAR(20) NOT NULL DEFAULT 'DRAFT',
             locked_at       TIMESTAMPTZ,
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             CHECK (start_date <= end_date),
             UNIQUE(customer_id, year_label)
         );
+        ALTER TABLE {schema}.business_years
+            ALTER COLUMN status SET DEFAULT 'DRAFT';
+        UPDATE {schema}.business_years
+            SET status = 'DRAFT'
+            WHERE status = 'OPEN';
+
+        CREATE TABLE IF NOT EXISTS {schema}.import_batches (
+            batch_id        BIGSERIAL PRIMARY KEY,
+            by_id           BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
+            customer_id     BIGINT REFERENCES {schema}.customers(customer_id),
+            data_type       VARCHAR(40) NOT NULL,
+            source_file_name VARCHAR(255),
+            row_count       INT NOT NULL DEFAULT 0,
+            valid_count     INT NOT NULL DEFAULT 0,
+            error_count     INT NOT NULL DEFAULT 0,
+            auto_mapped_count INT NOT NULL DEFAULT 0,
+            status          VARCHAR(30) NOT NULL DEFAULT 'IMPORTED',
+            metadata        JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_import_batches_by
+            ON {schema}.import_batches(by_id, data_type, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS {schema}.import_errors (
+            error_id        BIGSERIAL PRIMARY KEY,
+            batch_id        BIGINT NOT NULL REFERENCES {schema}.import_batches(batch_id) ON DELETE CASCADE,
+            row_no          INT NOT NULL,
+            field_name      VARCHAR(80),
+            severity        VARCHAR(20) NOT NULL DEFAULT 'ERROR',
+            message         TEXT NOT NULL,
+            raw_row         JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS {schema}.account_mappings (
+            mapping_id      BIGSERIAL PRIMARY KEY,
+            customer_id     BIGINT NOT NULL REFERENCES {schema}.customers(customer_id),
+            statement_type  VARCHAR(30) NOT NULL DEFAULT 'BS',
+            source_account_code VARCHAR(50) NOT NULL,
+            source_account_name VARCHAR(200) NOT NULL,
+            standard_account_code VARCHAR(50) NOT NULL,
+            standard_account_name VARCHAR(200) NOT NULL,
+            use_count       INT NOT NULL DEFAULT 1,
+            last_used_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(customer_id, statement_type, source_account_code)
+        );
 
         CREATE TABLE IF NOT EXISTS {schema}.financial_statements (
             fs_id           BIGSERIAL PRIMARY KEY,
             by_id           BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
+            batch_id        BIGINT REFERENCES {schema}.import_batches(batch_id),
             statement_type  VARCHAR(30) NOT NULL,
             currency        VARCHAR(3) NOT NULL DEFAULT 'KRW',
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+        ALTER TABLE {schema}.financial_statements
+            ADD COLUMN IF NOT EXISTS batch_id BIGINT REFERENCES {schema}.import_batches(batch_id);
 
         CREATE TABLE IF NOT EXISTS {schema}.fs_lines (
             line_id         BIGSERIAL PRIMARY KEY,
             fs_id           BIGINT NOT NULL REFERENCES {schema}.financial_statements(fs_id),
+            batch_id        BIGINT REFERENCES {schema}.import_batches(batch_id),
+            row_no          INT,
             account_code    VARCHAR(50) NOT NULL,
             account_name    VARCHAR(200) NOT NULL,
+            standard_account_code VARCHAR(50),
+            standard_account_name VARCHAR(200),
             amount          BIGINT NOT NULL,
             debit_credit    VARCHAR(10) NOT NULL
         );
+        ALTER TABLE {schema}.fs_lines
+            ADD COLUMN IF NOT EXISTS batch_id BIGINT REFERENCES {schema}.import_batches(batch_id);
+        ALTER TABLE {schema}.fs_lines
+            ADD COLUMN IF NOT EXISTS row_no INT;
+        ALTER TABLE {schema}.fs_lines
+            ADD COLUMN IF NOT EXISTS standard_account_code VARCHAR(50);
+        ALTER TABLE {schema}.fs_lines
+            ADD COLUMN IF NOT EXISTS standard_account_name VARCHAR(200);
 
         CREATE TABLE IF NOT EXISTS {schema}.assets (
             asset_id        BIGSERIAL PRIMARY KEY,
             by_id           BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
+            batch_id        BIGINT REFERENCES {schema}.import_batches(batch_id),
             asset_code      VARCHAR(50) NOT NULL,
             asset_name      VARCHAR(200) NOT NULL,
+            asset_category  VARCHAR(50) NOT NULL DEFAULT 'GENERAL',
+            is_business_vehicle BOOLEAN NOT NULL DEFAULT FALSE,
             acquisition_date DATE NOT NULL,
             acquisition_cost BIGINT NOT NULL,
             useful_life_years INT NOT NULL,
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+        ALTER TABLE {schema}.assets
+            ADD COLUMN IF NOT EXISTS batch_id BIGINT REFERENCES {schema}.import_batches(batch_id);
+        ALTER TABLE {schema}.assets
+            ADD COLUMN IF NOT EXISTS asset_category VARCHAR(50) NOT NULL DEFAULT 'GENERAL';
+        ALTER TABLE {schema}.assets
+            ADD COLUMN IF NOT EXISTS is_business_vehicle BOOLEAN NOT NULL DEFAULT FALSE;
+        CREATE INDEX IF NOT EXISTS idx_assets_by
+            ON {schema}.assets(by_id, asset_category, asset_code);
+
+        CREATE TABLE IF NOT EXISTS {schema}.vehicle_usage_logs (
+            usage_log_id   BIGSERIAL PRIMARY KEY,
+            by_id          BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
+            asset_id       BIGINT NOT NULL REFERENCES {schema}.assets(asset_id),
+            usage_month    DATE NOT NULL,
+            total_distance_km DOUBLE PRECISION NOT NULL DEFAULT 0,
+            business_distance_km DOUBLE PRECISION NOT NULL DEFAULT 0,
+            business_use_bps INT NOT NULL DEFAULT 10000,
+            created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(by_id, asset_id, usage_month)
+        );
+        CREATE INDEX IF NOT EXISTS idx_vehicle_usage_logs_by
+            ON {schema}.vehicle_usage_logs(by_id, asset_id, usage_month);
 
         CREATE TABLE IF NOT EXISTS {schema}.depreciation (
             depreciation_id BIGSERIAL PRIMARY KEY,
@@ -167,6 +263,22 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
             adjustment_amount BIGINT NOT NULL,
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+
+        CREATE TABLE IF NOT EXISTS {schema}.transactions (
+            transaction_id  BIGSERIAL PRIMARY KEY,
+            by_id           BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
+            batch_id        BIGINT REFERENCES {schema}.import_batches(batch_id),
+            tx_date         DATE NOT NULL,
+            partner_name    VARCHAR(200) NOT NULL,
+            category        VARCHAR(40) NOT NULL,
+            account_code    VARCHAR(50),
+            description     TEXT,
+            amount          BIGINT NOT NULL,
+            evidence_type   VARCHAR(40),
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_transactions_by
+            ON {schema}.transactions(by_id, category, tx_date);
 
         CREATE TABLE IF NOT EXISTS {schema}.by_law_snapshot (
             snapshot_id      BIGSERIAL PRIMARY KEY,
@@ -195,6 +307,24 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
         );
         CREATE INDEX IF NOT EXISTS idx_tax_adjustments_by ON {schema}.tax_adjustments(by_id, adj_category, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS {schema}.adjustment_items (
+            adjustment_item_id BIGSERIAL PRIMARY KEY,
+            by_id          BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
+            adjustment_id  BIGINT REFERENCES {schema}.tax_adjustments(adjustment_id) ON DELETE SET NULL,
+            section        VARCHAR(50) NOT NULL,
+            item_code      VARCHAR(80) NOT NULL,
+            item_name      VARCHAR(200) NOT NULL,
+            amount         BIGINT NOT NULL,
+            direction      VARCHAR(20) NOT NULL CHECK (direction IN ('ADD', 'DEDUCT', 'INFO')),
+            disposition    VARCHAR(40) NOT NULL DEFAULT 'OTHER',
+            source_module  VARCHAR(50) NOT NULL DEFAULT 'B1',
+            law_ref        VARCHAR(100),
+            metadata       JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+            created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_adjustment_items_by
+            ON {schema}.adjustment_items(by_id, source_module, section, item_code);
+
         CREATE TABLE IF NOT EXISTS {schema}.reserves (
             reserve_id     BIGSERIAL PRIMARY KEY,
             by_id          BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
@@ -203,8 +333,13 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
             amount         BIGINT NOT NULL,
             direction      VARCHAR(20) NOT NULL,
             carryforward_to INT,
+            source_module  VARCHAR(50) NOT NULL DEFAULT 'MANUAL',
             created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+        ALTER TABLE {schema}.reserves
+            ADD COLUMN IF NOT EXISTS source_module VARCHAR(50) NOT NULL DEFAULT 'MANUAL';
+        CREATE INDEX IF NOT EXISTS idx_reserves_by
+            ON {schema}.reserves(by_id, source_module, reserve_code);
 
         CREATE TABLE IF NOT EXISTS {schema}.carryforward_loss (
             loss_id        BIGSERIAL PRIMARY KEY,
@@ -214,6 +349,27 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
             remaining_amount BIGINT NOT NULL,
             expires_year   INT NOT NULL,
             created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS {schema}.tax_agents (
+            tax_agent_id BIGSERIAL PRIMARY KEY,
+            customer_id  BIGINT NOT NULL REFERENCES {schema}.customers(customer_id),
+            agent_name   VARCHAR(100) NOT NULL,
+            agent_type   VARCHAR(30) NOT NULL DEFAULT 'TAX_ACCOUNTANT',
+            email        VARCHAR(200),
+            phone        VARCHAR(30),
+            active       BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS {schema}.customer_users (
+            customer_user_id BIGSERIAL PRIMARY KEY,
+            customer_id      BIGINT NOT NULL REFERENCES {schema}.customers(customer_id),
+            user_id          BIGINT NOT NULL REFERENCES public.users(user_id),
+            relationship_type VARCHAR(30) NOT NULL DEFAULT 'STAFF',
+            active           BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(customer_id, user_id)
         );
 
         CREATE TABLE IF NOT EXISTS {schema}.form_data (
@@ -291,14 +447,15 @@ pub async fn create_customer(
     request: CreateCustomerRequest,
 ) -> Result<Customer> {
     let schema = quote_ident(&tenant.schema_name)?;
+    let work_scopes = normalize_customer_work_scopes(request.work_scopes.as_deref())?;
     let sql = format!(
         r#"
         INSERT INTO {schema}.customers (
-            tenant_id, customer_code, customer_name, biz_reg_no, corp_reg_no, industry_code, is_sme
+            tenant_id, customer_code, customer_name, biz_reg_no, corp_reg_no, industry_code, is_sme, work_scopes
         )
-        VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, FALSE))
+        VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, FALSE), $8)
         RETURNING customer_id, tenant_id, customer_code, customer_name, biz_reg_no, corp_reg_no,
-                  industry_code, is_sme, status, created_at, updated_at
+                  industry_code, is_sme, work_scopes, status, created_at, updated_at
         "#
     );
 
@@ -310,6 +467,7 @@ pub async fn create_customer(
         .bind(request.corp_reg_no)
         .bind(request.industry_code)
         .bind(request.is_sme)
+        .bind(work_scopes)
         .fetch_one(pool)
         .await
         .context("failed to create customer")
@@ -320,7 +478,7 @@ pub async fn list_customers(pool: &PgPool, tenant: &TenantRef) -> Result<Vec<Cus
     let sql = format!(
         r#"
         SELECT customer_id, tenant_id, customer_code, customer_name, biz_reg_no, corp_reg_no,
-               industry_code, is_sme, status, created_at, updated_at
+               industry_code, is_sme, work_scopes, status, created_at, updated_at
         FROM {schema}.customers
         WHERE tenant_id = $1
         ORDER BY customer_code
@@ -332,6 +490,33 @@ pub async fn list_customers(pool: &PgPool, tenant: &TenantRef) -> Result<Vec<Cus
         .fetch_all(pool)
         .await
         .context("failed to list customers")
+}
+
+fn normalize_customer_work_scopes(scopes: Option<&[String]>) -> Result<Vec<String>> {
+    let mut normalized = scopes
+        .filter(|items| !items.is_empty())
+        .map(|items| {
+            items
+                .iter()
+                .map(|scope| {
+                    let normalized = scope.trim().to_ascii_uppercase();
+                    if !ALLOWED_CUSTOMER_WORK_SCOPES.contains(&normalized.as_str()) {
+                        anyhow::bail!("invalid customer work_scope");
+                    }
+                    Ok(normalized)
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .transpose()?
+        .unwrap_or_else(|| {
+            DEFAULT_CUSTOMER_WORK_SCOPES
+                .iter()
+                .map(|scope| (*scope).to_string())
+                .collect()
+        });
+    normalized.sort();
+    normalized.dedup();
+    Ok(normalized)
 }
 
 pub async fn create_business_year(
@@ -359,6 +544,55 @@ pub async fn create_business_year(
         .context("failed to create business year")
 }
 
+pub async fn list_business_years(pool: &PgPool, tenant: &TenantRef) -> Result<Vec<BusinessYear>> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        SELECT by_id, customer_id, year_label, start_date, end_date, status,
+               locked_at, created_at, updated_at
+        FROM {schema}.business_years
+        ORDER BY year_label DESC, by_id DESC
+        "#
+    );
+
+    sqlx::query_as::<_, BusinessYear>(&sql)
+        .fetch_all(pool)
+        .await
+        .context("failed to list business years")
+}
+
+pub async fn update_business_year_status(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    request: UpdateBusinessYearStatusRequest,
+) -> Result<BusinessYear> {
+    let current = get_business_year(pool, tenant, by_id).await?;
+    let next = normalize_business_year_status(&request.status)?;
+    validate_business_year_status_transition(&current.status, &next)?;
+    let locked = next == "FILED";
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        UPDATE {schema}.business_years
+        SET status = $2,
+            locked_at = CASE WHEN $3 THEN COALESCE(locked_at, NOW()) ELSE locked_at END,
+            updated_at = NOW()
+        WHERE by_id = $1
+        RETURNING by_id, customer_id, year_label, start_date, end_date, status,
+                  locked_at, created_at, updated_at
+        "#
+    );
+
+    sqlx::query_as::<_, BusinessYear>(&sql)
+        .bind(by_id)
+        .bind(next)
+        .bind(locked)
+        .fetch_one(pool)
+        .await
+        .context("failed to update business year status")
+}
+
 pub async fn get_business_year(
     pool: &PgPool,
     tenant: &TenantRef,
@@ -379,4 +613,32 @@ pub async fn get_business_year(
         .fetch_one(pool)
         .await
         .context("business year not found")
+}
+
+fn normalize_business_year_status(status: &str) -> Result<String> {
+    let status = status.trim().to_ascii_uppercase();
+    let allowed = ["DRAFT", "IN_REVIEW", "APPROVED", "FILED", "AMENDED"];
+    if !allowed.contains(&status.as_str()) {
+        anyhow::bail!("invalid business year status");
+    }
+    Ok(status)
+}
+
+fn validate_business_year_status_transition(current: &str, next: &str) -> Result<()> {
+    if current == next {
+        return Ok(());
+    }
+    let allowed = match current {
+        "DRAFT" => matches!(next, "IN_REVIEW"),
+        "IN_REVIEW" => matches!(next, "APPROVED" | "DRAFT"),
+        "APPROVED" => matches!(next, "FILED" | "IN_REVIEW"),
+        "FILED" => matches!(next, "AMENDED"),
+        "AMENDED" => matches!(next, "IN_REVIEW"),
+        _ => false,
+    };
+    if allowed {
+        Ok(())
+    } else {
+        anyhow::bail!("invalid business year status transition: {current} -> {next}");
+    }
 }

@@ -815,3 +815,171 @@
 - `법인세_세무조정계산서_시스템_설계서.md` (메인 설계서)
 - `DB설계.md` (DB 상세)
 - `업무흐름.md` (업무 흐름 + 화면 매핑)
+
+## Multi-Tenant 테넌트-고객사 관계 보완 (2026-05-15)
+
+- 대상 사용자 조직은 `회계법인`, `세무법인`, `세무사사무소`이며, 시스템에서는 각각 독립 테넌트로 관리한다.
+- 관계 모델은 `테넌트 1 : N 고객사`이다. 하나의 테넌트는 여러 고객사를 관리하고, 각 고객사는 반드시 하나의 테넌트에만 소속된다.
+- UI 기준으로 `prototype/index.html`의 `5-0 테넌트 관리` 화면에서 테넌트 유형, 계약, 상태, 사용자 수, 고객사 수, 소속 고객사 샘플을 확인한다.
+- `5-A 고객사 관리` 화면은 고객사 목록에 소속 테넌트 컬럼과 테넌트 필터를 제공하고, 신규 등록/편집 시 소속 테넌트를 선택한다.
+- 사용자 권한은 테넌트 범위 안에서 적용되며, 특정 고객사 접근은 `5-E 담당 법인 권한`에서 사용자-고객사 단위로 추가 제한한다.
+- DB/도메인 설계 시 고객사 테이블은 `tenant_id` 또는 `tenant_code` 외래키를 가져야 하며, 고객사 코드는 `tenant_id + customer_code` 범위에서 유일해야 한다.
+## 사용자-테넌트-고객사 관리 보완 (2026-05-15)
+
+- 사용자는 반드시 하나의 소속 테넌트(`tenant_id`)를 가진다. 테넌트는 회계법인, 세무법인, 세무사사무소 단위 조직이다.
+- 사용자의 고객사 접근 범위는 `user_customer_access` 또는 동등한 매핑으로 관리하며, 한 사용자는 소속 테넌트 안의 여러 고객사에 접근할 수 있다.
+- `prototype/index.html`의 `5-B 사용자 관리` 화면은 테넌트 필터, 고객사 필터, 소속 테넌트 컬럼, 고객사 권한 요약을 제공한다.
+- 사용자 등록/편집 시 소속 테넌트를 먼저 선택하고, 선택한 테넌트에 속한 고객사만 접근 범위로 선택할 수 있다.
+- 역할별 기능 권한은 `5-C 역할 / 권한 매트릭스`에서 관리하고, 특정 고객사 담당 등급 또는 차단 같은 예외는 `5-E 담당 법인 권한`에서 관리한다.
+- 권한 판정 순서는 `테넌트 소속 확인 -> 고객사 접근 범위 확인 -> 역할/기능 권한 확인 -> 고객사별 예외 권한 확인`을 기본 원칙으로 한다.
+## 고객사별 대상 업무 범위 보완 (2026-05-15)
+
+- 사용자 권한은 `tenant_id + customer_id + work_scope` 조합으로 판정한다. 같은 테넌트와 고객사라도 사용자마다 허용 업무가 다를 수 있다.
+- 대상 업무 코드는 `INFO`, `ADJUST`, `FORM`, `VALIDATE`, `APPROVE`, `PRINT`, `EFILE`, `POST`를 기본값으로 사용한다.
+- 권한 저장은 `user_customer_work_scope` 테이블을 별도로 두거나, `user_customer_access`에 `work_scopes` JSON/배열 컬럼을 추가하는 방식으로 구현한다.
+- `prototype/index.html`의 `5-B 사용자 관리` 화면은 대상 업무 필터와 고객사별 대상 업무 체크리스트를 제공한다.
+- 사용자 등록/편집 시 소속 테넌트를 선택한 뒤, 해당 테넌트의 고객사를 선택하고, 선택된 고객사마다 허용 업무 범위를 별도로 지정한다.
+- 업무 실행 전 권한 판정 순서는 `테넌트 소속 확인 -> 고객사 접근 확인 -> 고객사별 대상 업무 확인 -> 역할/기능 권한 확인 -> 예외 권한 확인`을 따른다.
+- 예: 같은 `EY 회계법인 / ㈜OOO 제조` 고객사라도 A 사용자는 `ADJUST`, `FORM`, `VALIDATE`만 가능하고, B 사용자는 `APPROVE`, `PRINT`만 가능하게 분리할 수 있다.
+
+### Phase 2 산출물 (2026-05-15 구현)
+
+- DB: `roles`, `user_roles`, `role_permissions`, `admin_audit_events` 테이블 추가.
+- API: `GET /api/admin/roles`, `GET /api/admin/role-permissions`, `PUT /api/admin/roles/{role_code}/permissions` 구현.
+- API: `GET/POST /api/admin/tenants/{tenant_code}/users`, `PUT /api/admin/tenants/{tenant_code}/users/{login_id}`, 사용자 잠금/2FA 리셋 구현.
+- 인증: 로그인/세션 조회 응답의 역할 목록을 `user_roles` 기반으로 조회하도록 변경.
+- 화면: `frontend/index.html`에 `adminWorkspace` 추가, `frontend/app.js`에서 Admin 메뉴 클릭 시 실제 사용자/역할 화면으로 라우팅.
+- 테스트: `tests/integration_flow.rs`에서 사용자 등록, 역할 변경, 잠금, 2FA 리셋, 권한 매트릭스 저장 검증.
+
+### Phase 2 완료 기준 확인
+
+- 관리자 API에서 사용자 생성/편집/잠금/2FA 리셋이 실제 DB에 반영된다.
+- 역할별 기능 권한을 DB에 저장하고 다시 조회할 수 있다.
+- 실제 실행 화면에서 Admin 메뉴가 사용자 관리/역할 권한 화면으로 연결된다.
+- 검증 명령: `cargo test --all --all-targets`, `cargo clippy --all-targets --all-features -- -D warnings`.
+
+### Phase 3 산출물 (2026-05-15 구현)
+
+- DB: `user_customer_access`, `user_customer_work_scope` 테이블 추가.
+- API: 사용자별 고객사 접근 등급(`OWNER`, `CO_WORKER`, `REVIEWER`, `ASSISTANT`, `VIEWER`, `BLOCKED`) 저장/조회 구현.
+- API: 고객사별 대상 업무 범위(`INFO`, `ADJUST`, `FORM`, `VALIDATE`, `APPROVE`, `PRINT`, `EFILE`, `POST`) 저장/조회 구현.
+- 화면: `prototype/index.html`의 `5-B 사용자 관리`와 `5-E 담당 고객사 / 업무 권한`에 고객사별 업무 범위 UI 추가.
+- 화면: `frontend/app.js`의 실제 Admin 사용자 화면에서 고객사별 대상 업무 체크리스트를 API와 연동.
+- 테스트: 통합 테스트에서 사용자-고객사-업무범위 생성 및 변경 결과를 검증.
+
+### Phase 3 완료 기준 확인
+
+- 한 사용자가 같은 테넌트 내 여러 고객사를 가질 수 있고, 고객사마다 서로 다른 업무 범위를 가진다.
+- 고객사 접근 등급과 업무 범위가 사용자 조회 API에 함께 반환된다.
+- 역할/기능 권한과 고객사/업무 접근 범위가 분리되어 저장된다.
+- 검증 명령: `cargo test --all --all-targets`, `cargo clippy --all-targets --all-features -- -D warnings`.
+## 테넌트별 고객사 대상 업무 구분 보완 (2026-05-15)
+
+- 고객사별 대상 업무 범위는 테넌트 고객사 마스터의 `work_scopes`로 관리한다.
+- 사용자별 고객사 업무 권한(`user_customer_work_scope`)은 고객사 `work_scopes`의 부분집합으로만 저장된다.
+- API는 사용자 등록/수정 시 고객사가 대상 업무로 갖지 않는 `work_scope`를 거부한다.
+- 화면은 `5-A 고객사 관리`에서 고객사 대상 업무를 보여주고, `5-B 사용자 관리`에서 사용자 부여 업무와 고객사 대상 업무를 함께 표시한다.
+- 완료 기준: 한 테넌트 내 고객사별 대상 업무가 서로 달라도 사용자는 각 고객사의 대상 업무 안에서만 권한을 받을 수 있어야 한다.
+
+### Phase 4 산출물 (2026-05-15 구현)
+
+- DB: `tax_law_versions`, `tax_rates`, `tax_limits`, `law_amendment_history` 기반 법령/세율 버전 관리 구현.
+- DB: 2021~2026 법령 버전과 법인세율표, 한도, 세액공제, 기준내용연수, 중소기업 판정기준, 결손금 규정 초기 데이터 적재.
+- API: 법령 버전 생성/조회, 상태 전환, 세율표/한도표 생성/조회, 개정 이력 조회/등록, 영향 시뮬레이션 구현.
+- API: 신규 법령 버전은 `DRAFT`로 생성되고 `DRAFT -> REVIEWED -> ACTIVE -> RETIRED` 흐름으로 전환되며 상태 변경 이력은 `law_amendment_history`에 남긴다.
+- 화면: `frontend/app.js`의 법령 버전 관리 워크스페이스를 F-1~F-4 및 세부 정책 메뉴로 분리하고 실제 API와 연동.
+- 테스트: 통합 테스트에서 2021~2026 시드 데이터, 상태 전환, 영향 시뮬레이션, 개정 이력, 세율/한도 API를 검증.
+
+### Phase 4 완료 기준 확인
+
+- 사업연도 종료일 기준 적용 법령 버전을 `ensure_law_snapshot`에서 결정하고 스냅샷에 법령/세율/한도/서식 버전 ID를 저장한다.
+- 2021~2026 세율·한도·공제·감가상각 내용연수·중소기업 기준·결손금 규정 데이터가 API 조회 대상에 포함된다.
+- 영향 시뮬레이션은 선택한 법령 버전의 세율/한도 행 수와 테넌트별 사업연도 영향을 반환한다.
+- `DRAFT -> REVIEWED -> ACTIVE` 상태 전환과 개정 이력 생성이 통합 테스트로 검증된다.
+
+### Phase 5 산출물 (2026-05-15 구현)
+
+- DB: `tax_forms`, `form_templates`, `form_validations`, `form_field_migration` 테이블을 추가하고 기존 `form_versions`, `form_relationships`, `form_data_migration_history`와 연결.
+- API: `GET/POST /api/form-versioning/forms`, `GET/POST /api/form-versioning/versions`, 서식 버전 상태 변경, 항목 매핑 등록/조회 구현.
+- API: `GET /api/form-versioning/resolve`로 테넌트 사업연도별 적용 서식 버전을 결정.
+- API: `POST /api/form-versioning/migrations/dry-run|execute|rollback`으로 서식 데이터 마이그레이션 검토, 실행, 롤백 구현.
+- 화면: `frontend/index.html`에 `formVersioningWorkspace`를 추가하고 `frontend/app.js`에서 서식 버전, 항목 매핑, 마이그레이션, 적용 서식 조회 화면을 분리 구현.
+- 테스트: 통합 테스트에서 서식 버전 생성/승인, 사업연도 적용 버전 결정, 항목 매핑, Dry-run/Execute/Rollback을 검증.
+
+### Phase 5 완료 기준 확인
+
+- 동일 사업연도/동일 서식 코드는 `resolve_form_version`에서 정확히 하나의 활성 또는 승인 버전을 선택한다.
+- 서식 버전 변경 전 `dry-run`이 추가/삭제/공통 필드를 반환하고, `execute`가 `form_data`와 `form_data_migration_history`에 반영된다.
+- `rollback`은 최신 마이그레이션 이력을 기준으로 이전 서식 버전으로 되돌리거나 신규 생성 데이터를 제거한다.
+- 서식 메타·버전·매핑 화면은 실제 API와 연결되어 있으며 통합 테스트와 클리피 검증을 통과한다.
+
+### Phase 6 산출물 (2026-05-15 구현)
+
+- DB: 사업연도 기본 상태를 `DRAFT`로 전환하고 테넌트 스키마에 `tax_agents`, `customer_users` 테이블을 추가.
+- API: `GET/POST /api/tenants/{tenant_code}/business-years`로 사업연도 생성/목록 조회 구현.
+- API: 사업연도 생성 시 `ensure_law_snapshot`을 즉시 호출해 법령/세율/서식/전자신고 버전 스냅샷을 자동 생성.
+- API: `POST /api/tenants/{tenant_code}/business-years/{by_id}/status`로 `DRAFT -> IN_REVIEW -> APPROVED -> FILED -> AMENDED` 상태 전환 구현.
+- API: `FILED` 전환 시 `by_law_snapshot.locked = true`로 적용 스냅샷 잠금 처리.
+- 화면: `frontend/index.html`에 `customerWorkspace`를 추가하고 고객사 등록/목록, 사업연도 생성/상태 변경/스냅샷 조회 화면을 실제 API와 연결.
+- 테스트: 통합 테스트에서 사업연도 생성 후 자동 스냅샷 조회, 목록 조회, 상태 전환, FILED 스냅샷 잠금을 검증.
+
+### Phase 6 완료 기준 확인
+
+- 고객사와 사업연도를 생성하면 별도 수동 호출 없이 적용 법령/서식 스냅샷이 생성된다.
+- FILED 상태 전환 시 사업연도 `locked_at`과 스냅샷 `locked`가 설정되어 이후 적용 기준을 고정한다.
+- 고객사/사업연도 화면은 메뉴 클릭 시 독립 화면으로 열리고, 등록/상태 전환/스냅샷 조회가 실제 API로 동작한다.
+- 사업연도 기간은 `start_date <= end_date` 제약을 유지하며 12월 결산과 비12월 결산을 동일한 스냅샷 결정 로직으로 처리한다.
+
+### Phase 7 산출물 (2026-05-15 구현)
+
+- DB: 테넌트 스키마에 `import_batches`, `import_errors`, `account_mappings`, `transactions`를 추가하고 `financial_statements`, `fs_lines`, `assets`에 임포트 배치/표준계정/자산분류 컬럼을 보강.
+- API: `GET /api/tenants/{tenant_code}/tax-data/templates/{data_type}`로 재무제표·자산대장·거래 명세 표준 CSV 템플릿 다운로드 구현.
+- API: `POST /api/tenants/{tenant_code}/business-years/{by_id}/tax-data/{data_type}/import`로 CSV/XLSX multipart 업로드, 행 검증, 배치 저장, 오류 저장, DB 적재 구현.
+- API: 재무제표 라인, 자산대장, 거래 명세, 임포트 배치/오류, 고객사별 계정 매핑 조회/등록, 사업연도별 검증 요약 조회 구현.
+- 로직: 재무제표 임포트 시 차변/대변 합계 검증, 표준계정 매핑 학습, 동일 고객사 재임포트 자동 매핑, 자산명/분류 기반 업무용차 자동 판정 구현.
+- 화면: `frontend/index.html`에 `taxDataWorkspace`를 추가하고 재무제표 입력/임포트, 계정과목 매핑, 거래 명세, 자산/감가상각 화면을 메뉴별 독립 화면으로 구현.
+- 테스트: 통합 테스트에서 템플릿 다운로드, 재무제표 임포트, 매핑 학습/재사용 95% 이상, 차변/대변 불일치 오류, 자산 업무용차 판정, 거래 명세 적재, 검증 요약을 검증.
+
+### Phase 7 완료 기준 확인
+
+- CSV/XLSX 업로드 API가 실제 multipart 파일을 받아 검증 통과 데이터만 테넌트 DB에 적재한다.
+- 차변/대변 합계가 맞지 않으면 `VALIDATION_FAILED` 배치와 `import_errors` 행으로 오류가 표시된다.
+- 고객사별 계정 매핑은 최초 표준계정 포함 업로드 시 학습되고, 동일 고객사 재임포트 시 자동 매핑률이 95% 이상으로 산출된다.
+- 자산대장은 대량 삽입을 위해 bulk insert로 저장하며 업무용차 여부를 자동 판정한다.
+- 세무정보 입력 화면은 `tax-data` 하위 메뉴별로 분리되어 실제 API와 연결되고 통합 테스트 및 JS 문법 검증을 통과한다.
+
+### Phase 8 산출물 (2026-05-15 구현)
+
+- DB: 테넌트 스키마에 `adjustment_items`를 추가하고 `reserves`에 `source_module`을 보강해 세무조정 항목과 유보를 모듈별로 추적.
+- API: `POST /api/tenants/{tenant_code}/business-years/{by_id}/adjustments/income`로 B-1 소득금액조정 계산/저장 구현.
+- API: `GET /api/tenants/{tenant_code}/business-years/{by_id}/adjustments/income`으로 B-1 조정 항목 조회, `GET /reserves`로 유보 조회 구현.
+- 로직: 재무제표 `NET_INCOME` 라인을 자동으로 결산서상 당기순이익으로 읽고, 익금산입/익금불산입/손금산입/손금불산입 4개 섹션을 차가감 소득금액으로 계산.
+- 로직: 처분이 `RESERVE`이거나 일시차이 항목이면 `reserves`를 자동 생성하고 다음 사업연도 이월연도를 설정.
+- 화면: `frontend/index.html`에 `adjustmentWorkspace`를 추가하고 `adjustment` 하위 메뉴별 독립 화면과 B-1 그리드, 적용 법령 배너, 유보 결과를 실제 API와 연결.
+- 테스트: 통합 테스트에서 재무제표 당기순이익 자동 인식, B-1 계산, 조정 항목 저장, 유보 자동 생성, 적용 법령 배너 반환을 검증.
+
+### Phase 8 완료 기준 확인
+
+- 결산서상 당기순이익은 재무제표 업로드 데이터의 `NET_INCOME` 표준계정에서 자동 산출된다.
+- B-1 4개 섹션 합계로 `당기순이익 + 익금산입/손금불산입 - 익금불산입/손금산입 = 차가감 소득금액`을 계산한다.
+- 처분이 유보인 조정 항목은 `reserves`에 자동 생성되며 조회 API와 화면에 표시된다.
+- 계산 결과와 모든 조정 항목은 사업연도 스냅샷 ID와 연결되어 적용 법령 배너를 표시한다.
+- 세무조정 화면은 `adjustment` 하위 메뉴별로 분리되어 B-1 화면이 실제 API와 연결되고 통합 테스트, JS 문법 검증, clippy를 통과한다.
+
+### Phase 9 산출물 (2026-05-15 구현)
+
+- DB: 테넌트 스키마에 `vehicle_usage_logs`를 추가해 차량별 월별 총 주행거리, 업무사용거리, 업무사용비율을 저장.
+- API: `POST/GET /api/tenants/{tenant_code}/business-years/{by_id}/vehicle-usage-logs`로 업무용승용차 운행기록 등록/조회 구현.
+- API: `POST/GET /api/tenants/{tenant_code}/business-years/{by_id}/adjustments/assets/{module_code}`로 B-4 감가상각, B-5 퇴직급여충당금, B-6 대손충당금, B-10 업무용승용차 계산/조회 구현.
+- 로직: B-4는 자산대장과 Phase 4 `DEPRECIATION_LIFE` 한도 데이터를 사용해 회사상각비와 세법상각한도를 비교하고 `depreciation` 및 조정 항목을 저장.
+- 로직: B-5는 추계액/사외적립금 기준, B-6은 1% 또는 실적대손 기준, B-10은 운행기록 업무사용비율과 1,500만/8,000만/5년 정액 한도를 적용.
+- 화면: `adjustment` 하위 메뉴의 감가상각, 퇴직급여충당금, 대손충당금, 업무용승용차 화면을 실제 API 계산 화면으로 연결.
+- 테스트: 통합 테스트에서 자산대장 연동, Phase 4 기준내용연수 사용, 퇴직/대손 한도 계산, 차량 운행기록 업무사용비율, B-10 한도 초과 조정을 검증.
+
+### Phase 9 완료 기준 확인
+
+- B-4 감가상각은 자산별 회사 내용연수와 Phase 4 기준내용연수 데이터를 비교해 한도초과액을 자동 계산한다.
+- B-5/B-6은 입력값 기반 한도 산식으로 손금불산입 조정 항목과 유보를 생성한다.
+- B-10은 차량별 운행기록의 업무사용비율을 우선 적용하고, 기록이 없으면 요청 업무사용비율을 사용한다.
+- 모든 자산 기반 조정 결과는 `adjustment_items`, `tax_adjustments`, `reserves`, `depreciation`에 실제 저장되며 스냅샷 ID와 연결된다.
+- 자산 기반 세무조정 화면은 메뉴별 독립 화면으로 열리고 통합 테스트, JS 문법 검증, clippy를 통과한다.

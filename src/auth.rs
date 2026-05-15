@@ -22,15 +22,21 @@ pub async fn login(pool: &PgPool, request: LoginRequest) -> Result<LoginResponse
             u.email,
             u.status,
             u.use_2fa,
-            ARRAY['SYSTEM_ADMIN', 'TAX_MANAGER']::TEXT[] AS roles
+            COALESCE(
+                ARRAY_AGG(ur.role_code ORDER BY ur.role_code)
+                    FILTER (WHERE ur.role_code IS NOT NULL),
+                ARRAY[]::TEXT[]
+            ) AS roles
         FROM users u
         JOIN tenants t ON t.tenant_id = u.tenant_id
+        LEFT JOIN user_roles ur ON ur.user_id = u.user_id
         WHERE t.tenant_code = $1
           AND u.login_id = $2
           AND u.password_hash = crypt($3, u.password_hash)
           AND u.status = 'ACTIVE'
           AND t.status = 'ACTIVE'
           AND u.locked = FALSE
+        GROUP BY u.user_id, t.tenant_id
         "#,
     )
     .bind(request.tenant_code.trim().to_ascii_lowercase())
@@ -115,15 +121,21 @@ pub async fn me(pool: &PgPool, token: Uuid) -> Result<LoginResponse> {
             u.email,
             u.status,
             u.use_2fa,
-            ARRAY['SYSTEM_ADMIN', 'TAX_MANAGER']::TEXT[] AS roles
+            COALESCE(
+                ARRAY_AGG(ur.role_code ORDER BY ur.role_code)
+                    FILTER (WHERE ur.role_code IS NOT NULL),
+                ARRAY[]::TEXT[]
+            ) AS roles
         FROM auth_sessions s
         JOIN users u ON u.user_id = s.user_id
         JOIN tenants t ON t.tenant_id = s.tenant_id
+        LEFT JOIN user_roles ur ON ur.user_id = u.user_id
         WHERE s.session_token = $1
           AND s.revoked_at IS NULL
           AND s.expires_at > NOW()
           AND u.status = 'ACTIVE'
           AND t.status = 'ACTIVE'
+        GROUP BY u.user_id, t.tenant_id, s.session_token
         "#,
     )
     .bind(token)

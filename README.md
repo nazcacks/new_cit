@@ -7,6 +7,7 @@ Rust implementation of the 법인세 세무조정계산서 system described in `
 ## What Is Implemented
 
 - PostgreSQL-backed multi-tenant API with one schema per tenant.
+- DB-backed user, role, permission, customer-access, and customer-work-scope administration.
 - Tax-law/version snapshots for each business year.
 - Corporate income tax adjustment calculation with persisted adjustment rows.
 - Form generation for core forms (`FORM3`, `FORM15`, `FORM22`) using versioned form metadata.
@@ -62,6 +63,24 @@ cargo clippy --all-targets --all-features -- -D warnings
 ```
 
 ## Core API Flow
+
+## Admin User / Access API
+
+Create a tenant-scoped user with customer and work-scope access:
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8080/api/admin/tenants/demo/users `
+  -ContentType "application/json" `
+  -Body '{"login_id":"tax01","password":"ChangeMe123!","user_name":"Tax User","roles":["TAX_EXPERT"],"customer_access":[{"customer_id":1,"access_level":"OWNER","work_scopes":["INFO","ADJUST","FORM"]}]}'
+```
+
+Update role permissions:
+
+```powershell
+Invoke-RestMethod -Method Put http://localhost:8080/api/admin/roles/TAX_EXPERT/permissions `
+  -ContentType "application/json" `
+  -Body '{"permissions":[{"module_code":"adjustment","function_code":"READ","effect":"ALLOW"},{"module_code":"efiling","function_code":"EFILE","effect":"ALLOW"}]}'
+```
 
 Create a tenant:
 
@@ -131,9 +150,114 @@ The integration test also enqueues an unsupported job type to verify dead-letter
 - `src/api.rs`: Axum routes and HTTP handlers.
 - `src/web.rs` and `frontend/`: built-in web UI served by the API process.
 - `src/tenant.rs`: tenant provisioning and tenant-scoped persistence.
+- `src/tax_data.rs`: financial statement, account mapping, asset, and transaction import.
 - `src/tax.rs`: law snapshots, tax calculation, adjustment persistence, form generation.
 - `src/efiling.rs`: fixed-width Windows-949 e-filing generation.
 - `src/queue.rs`: durable retry/DLQ worker.
 - `migrations/`: PostgreSQL schema and seed tax/form/e-file metadata.
 - `tests/integration_flow.rs`: full PostgreSQL integration test.
 - `examples/`: sample API payloads and PowerShell flow.
+
+## Multi-Tenant 테넌트-고객사 관계 보완 (2026-05-15)
+
+- 대상 사용자 조직은 `회계법인`, `세무법인`, `세무사사무소`이며, 시스템에서는 각각 독립 테넌트로 관리한다.
+- 관계 모델은 `테넌트 1 : N 고객사`이다. 하나의 테넌트는 여러 고객사를 관리하고, 각 고객사는 반드시 하나의 테넌트에만 소속된다.
+- UI 기준으로 `prototype/index.html`의 `5-0 테넌트 관리` 화면에서 테넌트 유형, 계약, 상태, 사용자 수, 고객사 수, 소속 고객사 샘플을 확인한다.
+- `5-A 고객사 관리` 화면은 고객사 목록에 소속 테넌트 컬럼과 테넌트 필터를 제공하고, 신규 등록/편집 시 소속 테넌트를 선택한다.
+- 사용자 권한은 테넌트 범위 안에서 적용되며, 특정 고객사 접근은 `5-E 담당 법인 권한`에서 사용자-고객사 단위로 추가 제한한다.
+- DB/도메인 설계 시 고객사 테이블은 `tenant_id` 또는 `tenant_code` 외래키를 가져야 하며, 고객사 코드는 `tenant_id + customer_code` 범위에서 유일해야 한다.
+## 사용자-테넌트-고객사 관리 보완 (2026-05-15)
+
+- 사용자는 반드시 하나의 소속 테넌트(`tenant_id`)를 가진다. 테넌트는 회계법인, 세무법인, 세무사사무소 단위 조직이다.
+- 사용자의 고객사 접근 범위는 `user_customer_access` 또는 동등한 매핑으로 관리하며, 한 사용자는 소속 테넌트 안의 여러 고객사에 접근할 수 있다.
+- `prototype/index.html`의 `5-B 사용자 관리` 화면은 테넌트 필터, 고객사 필터, 소속 테넌트 컬럼, 고객사 권한 요약을 제공한다.
+- 사용자 등록/편집 시 소속 테넌트를 먼저 선택하고, 선택한 테넌트에 속한 고객사만 접근 범위로 선택할 수 있다.
+- 역할별 기능 권한은 `5-C 역할 / 권한 매트릭스`에서 관리하고, 특정 고객사 담당 등급 또는 차단 같은 예외는 `5-E 담당 법인 권한`에서 관리한다.
+- 권한 판정 순서는 `테넌트 소속 확인 -> 고객사 접근 범위 확인 -> 역할/기능 권한 확인 -> 고객사별 예외 권한 확인`을 기본 원칙으로 한다.
+## 고객사별 대상 업무 범위 보완 (2026-05-15)
+
+- 사용자 권한은 `tenant_id + customer_id + work_scope` 조합으로 판정한다. 같은 테넌트와 고객사라도 사용자마다 허용 업무가 다를 수 있다.
+- 대상 업무 코드는 `INFO`, `ADJUST`, `FORM`, `VALIDATE`, `APPROVE`, `PRINT`, `EFILE`, `POST`를 기본값으로 사용한다.
+- 권한 저장은 `user_customer_work_scope` 테이블을 별도로 두거나, `user_customer_access`에 `work_scopes` JSON/배열 컬럼을 추가하는 방식으로 구현한다.
+- `prototype/index.html`의 `5-B 사용자 관리` 화면은 대상 업무 필터와 고객사별 대상 업무 체크리스트를 제공한다.
+- 사용자 등록/편집 시 소속 테넌트를 선택한 뒤, 해당 테넌트의 고객사를 선택하고, 선택된 고객사마다 허용 업무 범위를 별도로 지정한다.
+- 업무 실행 전 권한 판정 순서는 `테넌트 소속 확인 -> 고객사 접근 확인 -> 고객사별 대상 업무 확인 -> 역할/기능 권한 확인 -> 예외 권한 확인`을 따른다.
+- 예: 같은 `EY 회계법인 / ㈜OOO 제조` 고객사라도 A 사용자는 `ADJUST`, `FORM`, `VALIDATE`만 가능하고, B 사용자는 `APPROVE`, `PRINT`만 가능하게 분리할 수 있다.
+## Tenant Customer Work Scope Boundary (2026-05-15)
+
+- Each customer now has its own target work scope list (`work_scopes`) inside its tenant.
+- User-level `user_customer_work_scope` grants are validated as a subset of the selected customer's target work scopes.
+- Effective access is evaluated as tenant membership, customer access, customer target work scope, user customer work scope, role/function permission, then exception permission.
+- The prototype and embedded admin UI distinguish customer target work scopes from user-granted work scopes.
+
+## Form Versioning API (2026-05-15)
+
+- Added DB-backed form metadata, form version, template, validation, relationship, and field-migration management.
+- Added `/api/form-versioning/resolve` for business-year form version selection.
+- Added dry-run, execute, and rollback endpoints for form data migrations.
+- Added embedded UI screens for form versions, relationships, migrations, and resolver checks.
+
+## Customer / Business Year Workflow (2026-05-15)
+
+- Business year creation now automatically creates the applicable law, rate, form, and e-filing snapshot.
+- Business years follow `DRAFT -> IN_REVIEW -> APPROVED -> FILED -> AMENDED`.
+- Moving a business year to `FILED` locks the law snapshot.
+- Added embedded UI screens for customer registration, business year creation, status changes, and snapshot inspection.
+
+## Tax Data Input API (2026-05-15)
+
+- Added tenant-scoped import batches, import errors, account mappings, asset ledger, and transaction detail storage.
+- Added CSV/XLSX multipart import endpoints for financial statements, assets, and transactions.
+- Financial statement imports validate debit/credit totals and store row-level errors when unbalanced.
+- Account mappings are learned per customer and reused on later imports to calculate an automatic mapping rate.
+- The embedded UI now has separated `tax-data` screens for financial statements, account mappings, transaction details, and assets.
+
+Download a template:
+
+```powershell
+Invoke-WebRequest http://localhost:8080/api/tenants/demo/tax-data/templates/financial-statements -OutFile fs-template.csv
+```
+
+Upload a CSV file:
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/tax-data/financial-statements/import `
+  -Form @{ file = Get-Item .\fs-template.csv }
+```
+
+Check validation:
+
+```powershell
+Invoke-RestMethod http://localhost:8080/api/tenants/demo/business-years/1/tax-data/validation
+```
+
+## B-1 Income Adjustment API (2026-05-15)
+
+- Added a DB-backed B-1 income adjustment engine.
+- The engine can read `NET_INCOME` from imported financial statement lines when `accounting_income` is omitted.
+- B-1 sections cover gross income inclusion, gross income exclusion, deductible inclusion, and loss disallowance.
+- Reserve dispositions automatically create `reserves` rows tied to the business year and snapshot.
+- The embedded UI now has a separated `adjustment` workspace with an income adjustment grid and applicable-law banner.
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/adjustments/income `
+  -ContentType "application/json" `
+  -Body '{"items":[{"section":"GROSS_INCLUSION","item_code":"B1_TEMP_ADD","item_name":"Temporary addback","amount":10000000,"temporary":true},{"section":"GROSS_EXCLUSION","item_code":"B1_PERM_DEDUCT","item_name":"Permanent exclusion","amount":2000000,"disposition":"OTHER"}]}'
+
+Invoke-RestMethod http://localhost:8080/api/tenants/demo/business-years/1/adjustments/income
+Invoke-RestMethod http://localhost:8080/api/tenants/demo/business-years/1/reserves
+```
+
+## Asset-Based Adjustment API (2026-05-15)
+
+- Added B-4 depreciation, B-5 retirement reserve, B-6 bad debt reserve, and B-10 business vehicle adjustment endpoints.
+- B-4 reads the tenant asset ledger and Phase 4 depreciation-life limits.
+- B-10 supports monthly vehicle usage logs and applies business-use ratio plus annual vehicle limits.
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/adjustments/assets/B4 -Body '{}' -ContentType "application/json"
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/vehicle-usage-logs `
+  -ContentType "application/json" `
+  -Body '{"asset_id":1,"usage_month":"2026-01-01","total_distance_km":1000,"business_distance_km":700}'
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/adjustments/assets/B10 -Body '{}' -ContentType "application/json"
+```

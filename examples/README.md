@@ -9,3 +9,53 @@ docker compose up --build -d postgres api
 - `flow.ps1`: end-to-end API flow.
 - `adjustment_request.json`: sample tax adjustment request body.
 - `dead_letter_job.json`: payload that intentionally moves to the DLQ.
+
+## Multi-Tenant 테넌트-고객사 관계 보완 (2026-05-15)
+
+- 대상 사용자 조직은 `회계법인`, `세무법인`, `세무사사무소`이며, 시스템에서는 각각 독립 테넌트로 관리한다.
+- 관계 모델은 `테넌트 1 : N 고객사`이다. 하나의 테넌트는 여러 고객사를 관리하고, 각 고객사는 반드시 하나의 테넌트에만 소속된다.
+- UI 기준으로 `prototype/index.html`의 `5-0 테넌트 관리` 화면에서 테넌트 유형, 계약, 상태, 사용자 수, 고객사 수, 소속 고객사 샘플을 확인한다.
+- `5-A 고객사 관리` 화면은 고객사 목록에 소속 테넌트 컬럼과 테넌트 필터를 제공하고, 신규 등록/편집 시 소속 테넌트를 선택한다.
+- 사용자 권한은 테넌트 범위 안에서 적용되며, 특정 고객사 접근은 `5-E 담당 법인 권한`에서 사용자-고객사 단위로 추가 제한한다.
+- DB/도메인 설계 시 고객사 테이블은 `tenant_id` 또는 `tenant_code` 외래키를 가져야 하며, 고객사 코드는 `tenant_id + customer_code` 범위에서 유일해야 한다.
+## 사용자-테넌트-고객사 관리 보완 (2026-05-15)
+
+- 사용자는 반드시 하나의 소속 테넌트(`tenant_id`)를 가진다. 테넌트는 회계법인, 세무법인, 세무사사무소 단위 조직이다.
+- 사용자의 고객사 접근 범위는 `user_customer_access` 또는 동등한 매핑으로 관리하며, 한 사용자는 소속 테넌트 안의 여러 고객사에 접근할 수 있다.
+- `prototype/index.html`의 `5-B 사용자 관리` 화면은 테넌트 필터, 고객사 필터, 소속 테넌트 컬럼, 고객사 권한 요약을 제공한다.
+- 사용자 등록/편집 시 소속 테넌트를 먼저 선택하고, 선택한 테넌트에 속한 고객사만 접근 범위로 선택할 수 있다.
+- 역할별 기능 권한은 `5-C 역할 / 권한 매트릭스`에서 관리하고, 특정 고객사 담당 등급 또는 차단 같은 예외는 `5-E 담당 법인 권한`에서 관리한다.
+- 권한 판정 순서는 `테넌트 소속 확인 -> 고객사 접근 범위 확인 -> 역할/기능 권한 확인 -> 고객사별 예외 권한 확인`을 기본 원칙으로 한다.
+## 고객사별 대상 업무 범위 보완 (2026-05-15)
+
+- 사용자 권한은 `tenant_id + customer_id + work_scope` 조합으로 판정한다. 같은 테넌트와 고객사라도 사용자마다 허용 업무가 다를 수 있다.
+- 대상 업무 코드는 `INFO`, `ADJUST`, `FORM`, `VALIDATE`, `APPROVE`, `PRINT`, `EFILE`, `POST`를 기본값으로 사용한다.
+- 권한 저장은 `user_customer_work_scope` 테이블을 별도로 두거나, `user_customer_access`에 `work_scopes` JSON/배열 컬럼을 추가하는 방식으로 구현한다.
+- `prototype/index.html`의 `5-B 사용자 관리` 화면은 대상 업무 필터와 고객사별 대상 업무 체크리스트를 제공한다.
+- 사용자 등록/편집 시 소속 테넌트를 선택한 뒤, 해당 테넌트의 고객사를 선택하고, 선택된 고객사마다 허용 업무 범위를 별도로 지정한다.
+- 업무 실행 전 권한 판정 순서는 `테넌트 소속 확인 -> 고객사 접근 확인 -> 고객사별 대상 업무 확인 -> 역할/기능 권한 확인 -> 예외 권한 확인`을 따른다.
+- 예: 같은 `EY 회계법인 / ㈜OOO 제조` 고객사라도 A 사용자는 `ADJUST`, `FORM`, `VALIDATE`만 가능하고, B 사용자는 `APPROVE`, `PRINT`만 가능하게 분리할 수 있다.
+## 테넌트별 고객사 대상 업무 구분 보완 (2026-05-15)
+
+- 고객사마다 수행 가능한 대상 업무 범위를 별도로 둔다.
+- 사용자에게 부여하는 고객사별 업무 권한은 해당 고객사의 대상 업무 범위 안에서만 선택한다.
+- 권한 검증은 `테넌트 -> 고객사 -> 고객사 대상 업무 -> 사용자 업무 권한 -> 역할 권한` 순서로 적용한다.
+
+## Phase 7 세무정보 입력 예시 (2026-05-15)
+
+- `GET /api/tenants/{tenant_code}/tax-data/templates/financial-statements`로 표준 템플릿을 내려받는다.
+- `POST /api/tenants/{tenant_code}/business-years/{by_id}/tax-data/financial-statements/import`에 multipart `file` 필드로 CSV/XLSX를 업로드한다.
+- 자산대장은 `/tax-data/assets/import`, 거래 명세는 `/tax-data/transactions/import`를 사용한다.
+- `/tax-data/validation`으로 차변/대변 일치, 미매핑, 자산/거래 건수, 임포트 오류 수를 확인한다.
+
+## Phase 8 B-1 소득금액조정 예시 (2026-05-15)
+
+- `POST /api/tenants/{tenant_code}/business-years/{by_id}/adjustments/income`에 B-1 조정 항목을 전달한다.
+- `accounting_income`을 생략하면 재무제표의 `NET_INCOME` 표준계정에서 자동 산출한다.
+- `temporary=true` 또는 `disposition=RESERVE`인 항목은 `/reserves` 조회 결과에 자동 유보로 나타난다.
+
+## Phase 9 자산 기반 세무조정 예시 (2026-05-15)
+
+- `POST /adjustments/assets/B4`로 자산대장 기반 감가상각 조정을 계산한다.
+- `POST /vehicle-usage-logs`로 업무용승용차 월별 운행기록을 등록한다.
+- `POST /adjustments/assets/B5`, `B6`, `B10`으로 퇴직급여충당금, 대손충당금, 업무용승용차 조정을 계산한다.
