@@ -818,6 +818,53 @@ pub struct FormData {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateFormDataRequest {
+    pub fields: Value,
+    pub reason: Option<String>,
+    pub changed_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FormValidationIssue {
+    pub field_path: String,
+    pub rule_code: String,
+    pub severity: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FormPreviewField {
+    pub field_path: String,
+    pub label: String,
+    pub value: Value,
+    pub source: String,
+    pub source_ref: Option<String>,
+    pub editable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct FormDataHistory {
+    pub history_id: i64,
+    pub form_data_id: i64,
+    pub by_id: i64,
+    pub form_code: String,
+    pub change_type: String,
+    pub changed_by: String,
+    pub reason: Option<String>,
+    pub old_data: Option<Value>,
+    pub new_data: Value,
+    pub changed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FormPreviewResult {
+    pub form: FormData,
+    pub fields: Vec<FormPreviewField>,
+    pub validations: Vec<FormValidationIssue>,
+    pub history: Vec<FormDataHistory>,
+}
+
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct TaxForm {
     pub form_id: i64,

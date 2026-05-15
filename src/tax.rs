@@ -11,12 +11,13 @@ use crate::{
         CreateLawAmendmentRequest, CreateTaxLawRequest, CreateTaxLimitRequest,
         CreateTaxRateRequest, CreateVehicleUsageLogRequest, DonationCarryforward,
         EvaluationAdjustmentRequest, EvaluationAdjustmentResult, ForeignIncomeInput, FormData,
+        FormDataHistory, FormPreviewField, FormPreviewResult, FormValidationIssue,
         IncomeAdjustmentItemInput, IncomeAdjustmentResult, LawAmendmentHistory, LawSnapshot,
         LawVersioningImpactRequest, LossCarryforwardInput, LossCarryforwardRecord, PenaltyTaxInput,
         ReserveRecord, RevenueBreakdownInput, SpecialTaxAdjustmentRequest,
         SpecialTaxAdjustmentResult, TaxAdjustment, TaxAmountAdjustmentRequest,
         TaxAmountAdjustmentResult, TaxCreditInput, TaxLawVersion, TaxLimit, TaxRate, TenantRef,
-        TransactionBasedAdjustmentRequest, TransactionBasedAdjustmentResult,
+        TransactionBasedAdjustmentRequest, TransactionBasedAdjustmentResult, UpdateFormDataRequest,
         UpdateTaxLawStatusRequest, ValuationPositionInput, VehicleUsageLog,
     },
     tenant,
@@ -4277,9 +4278,22 @@ pub async fn generate_form(
 
     let adjustments = list_adjustments(pool, tenant, by_id).await?;
     let summary = summarize_adjustments(&adjustments);
-    let data_json = build_form_payload(form_code, &summary, snapshot.snapshot_id)?;
+    let mut data_json = build_form_payload(form_code, &summary, snapshot.snapshot_id)?;
+    apply_form_relationships(
+        pool,
+        tenant,
+        by_id,
+        by.start_date,
+        by.end_date,
+        form_code,
+        &mut data_json,
+    )
+    .await?;
 
     let schema = quote_ident(&tenant.schema_name)?;
+    let old_data = load_form_optional(pool, tenant, by_id, form_code)
+        .await?
+        .map(|form| form.data_json);
     let sql = format!(
         r#"
         INSERT INTO {schema}.form_data (by_id, form_code, form_version_id, data_json, snapshot_id)
@@ -4296,7 +4310,7 @@ pub async fn generate_form(
         "#
     );
 
-    sqlx::query_as::<_, FormData>(&sql)
+    let form = sqlx::query_as::<_, FormData>(&sql)
         .bind(by_id)
         .bind(form_code)
         .bind(form_version_id)
@@ -4304,7 +4318,21 @@ pub async fn generate_form(
         .bind(snapshot.snapshot_id)
         .fetch_one(pool)
         .await
-        .context("failed to upsert form data")
+        .context("failed to upsert form data")?;
+    insert_form_data_history(
+        pool,
+        tenant,
+        FormDataHistoryInsert {
+            form: &form,
+            change_type: "GENERATE",
+            old_data,
+            new_data: form.data_json.clone(),
+            changed_by: "system",
+            reason: Some("form engine generation"),
+        },
+    )
+    .await?;
+    Ok(form)
 }
 
 pub async fn get_form(
@@ -4331,6 +4359,135 @@ pub async fn get_form(
         .context("form data not found")
 }
 
+pub async fn update_form_data(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    form_code: &str,
+    request: UpdateFormDataRequest,
+) -> Result<FormData> {
+    let current = match load_form_optional(pool, tenant, by_id, form_code).await? {
+        Some(form) => form,
+        None => generate_form(pool, tenant, by_id, form_code).await?,
+    };
+    let mut data_json = current.data_json.clone();
+    let old_data = data_json.clone();
+    let fields = request
+        .fields
+        .as_object()
+        .ok_or_else(|| anyhow!("fields must be a JSON object"))?;
+    for (field, value) in fields {
+        if field == "_meta" {
+            continue;
+        }
+        set_form_field(&mut data_json, field, value.clone())?;
+        set_form_field_meta(
+            &mut data_json,
+            field,
+            "manual",
+            Some("user override".to_string()),
+            true,
+        )?;
+    }
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        UPDATE {schema}.form_data
+        SET data_json = $3, status = 'MANUAL', updated_at = NOW()
+        WHERE by_id = $1 AND form_code = $2
+        RETURNING form_data_id, by_id, form_code, form_version_id, data_json,
+                  snapshot_id, status, created_at, updated_at
+        "#
+    );
+    let form = sqlx::query_as::<_, FormData>(&sql)
+        .bind(by_id)
+        .bind(form_code)
+        .bind(data_json)
+        .fetch_one(pool)
+        .await
+        .context("failed to update form data")?;
+    insert_form_data_history(
+        pool,
+        tenant,
+        FormDataHistoryInsert {
+            form: &form,
+            change_type: "MANUAL_UPDATE",
+            old_data: Some(old_data),
+            new_data: form.data_json.clone(),
+            changed_by: request.changed_by.as_deref().unwrap_or("system"),
+            reason: request.reason.as_deref(),
+        },
+    )
+    .await?;
+    Ok(form)
+}
+
+pub async fn preview_form(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    form_code: &str,
+) -> Result<FormPreviewResult> {
+    let form = match load_form_optional(pool, tenant, by_id, form_code).await? {
+        Some(form) => form,
+        None => generate_form(pool, tenant, by_id, form_code).await?,
+    };
+    let version = load_form_version(pool, form.form_version_id).await?;
+    let validations = validate_form_data(pool, form.form_version_id, &form.data_json).await?;
+    let history = list_form_data_history(pool, tenant, by_id, form_code).await?;
+    let mut fields = template_fields(&version.template_json);
+    if fields.is_empty() {
+        fields = form
+            .data_json
+            .as_object()
+            .map(|object| {
+                object
+                    .keys()
+                    .filter(|key| *key != "_meta")
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+    let fields = fields
+        .into_iter()
+        .map(|field| {
+            let value = form.data_json.get(&field).cloned().unwrap_or(Value::Null);
+            let meta = form
+                .data_json
+                .get("_meta")
+                .and_then(|value| value.get(&field));
+            let source = meta
+                .and_then(|value| value.get("source"))
+                .and_then(Value::as_str)
+                .unwrap_or("manual")
+                .to_string();
+            let source_ref = meta
+                .and_then(|value| value.get("source_ref"))
+                .and_then(Value::as_str)
+                .map(ToString::to_string);
+            let editable = meta
+                .and_then(|value| value.get("editable"))
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            FormPreviewField {
+                label: form_field_label(&field),
+                field_path: field,
+                value,
+                source,
+                source_ref,
+                editable,
+            }
+        })
+        .collect();
+    Ok(FormPreviewResult {
+        form,
+        fields,
+        validations,
+        history,
+    })
+}
+
 fn summarize_adjustments(adjustments: &[TaxAdjustment]) -> Value {
     let mut latest = serde_json::Map::new();
     if let Some(adjustment) = adjustments.first() {
@@ -4344,7 +4501,7 @@ fn summarize_adjustments(adjustments: &[TaxAdjustment]) -> Value {
 
 fn build_form_payload(form_code: &str, summary: &Value, snapshot_id: i64) -> Result<Value> {
     let get = |key: &str| summary.get(key).and_then(Value::as_i64).unwrap_or(0);
-    let payload = match form_code {
+    let mut payload = match form_code {
         "FORM3" => json!({
             "snapshot_id": snapshot_id,
             "taxable_income": get("TAXABLE_INCOME"),
@@ -4370,7 +4527,308 @@ fn build_form_payload(form_code: &str, summary: &Value, snapshot_id: i64) -> Res
         }),
         _ => return Err(anyhow!("unsupported form code {form_code}")),
     };
+    if let Some(object) = payload.as_object().cloned() {
+        for field in object.keys().filter(|field| *field != "snapshot_id") {
+            set_form_field_meta(
+                &mut payload,
+                field,
+                "auto",
+                Some("tax adjustment summary".to_string()),
+                true,
+            )?;
+        }
+    }
     Ok(payload)
+}
+
+async fn load_form_optional(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    form_code: &str,
+) -> Result<Option<FormData>> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        SELECT form_data_id, by_id, form_code, form_version_id, data_json,
+               snapshot_id, status, created_at, updated_at
+        FROM {schema}.form_data
+        WHERE by_id = $1 AND form_code = $2
+        "#
+    );
+    sqlx::query_as::<_, FormData>(&sql)
+        .bind(by_id)
+        .bind(form_code)
+        .fetch_optional(pool)
+        .await
+        .context("failed to load optional form data")
+}
+
+async fn load_form_version(pool: &PgPool, form_version_id: i64) -> Result<FormVersionLite> {
+    sqlx::query_as::<_, FormVersionLite>(
+        r#"
+        SELECT form_version_id, template_json
+        FROM form_versions
+        WHERE form_version_id = $1
+        "#,
+    )
+    .bind(form_version_id)
+    .fetch_one(pool)
+    .await
+    .context("failed to load form version")
+}
+
+#[derive(sqlx::FromRow)]
+struct FormVersionLite {
+    #[allow(dead_code)]
+    form_version_id: i64,
+    template_json: Value,
+}
+
+async fn apply_form_relationships(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    start_date: chrono::NaiveDate,
+    end_date: chrono::NaiveDate,
+    target_form: &str,
+    data_json: &mut Value,
+) -> Result<()> {
+    let relationships = sqlx::query(
+        r#"
+        SELECT source_form, source_field, target_field, rule_json
+        FROM form_relationships
+        WHERE target_form = $1
+          AND effective_from <= $2
+          AND (effective_to IS NULL OR effective_to >= $3)
+        ORDER BY relationship_id
+        "#,
+    )
+    .bind(target_form)
+    .bind(end_date)
+    .bind(start_date)
+    .fetch_all(pool)
+    .await
+    .context("failed to load form relationships")?;
+
+    for relationship in relationships {
+        let source_form = relationship.get::<String, _>("source_form");
+        let source_field = relationship.get::<String, _>("source_field");
+        let target_field = relationship.get::<String, _>("target_field");
+        let rule_json = relationship.get::<Value, _>("rule_json");
+        let Some(source) = load_form_optional(pool, tenant, by_id, &source_form).await? else {
+            continue;
+        };
+        let source_value = source
+            .data_json
+            .get(&source_field)
+            .cloned()
+            .unwrap_or(Value::Null);
+        let operation = rule_json
+            .get("operation")
+            .and_then(Value::as_str)
+            .unwrap_or("copy_latest")
+            .to_ascii_uppercase();
+        match operation.as_str() {
+            "ADD" => {
+                let current = data_json
+                    .get(&target_field)
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+                let addition = source_value.as_i64().unwrap_or(0);
+                set_form_field(data_json, &target_field, json!(current + addition))?;
+            }
+            "COPY" | "COPY_LATEST" => {
+                set_form_field(data_json, &target_field, source_value)?;
+            }
+            _ => continue,
+        }
+        set_form_field_meta(
+            data_json,
+            &target_field,
+            "auto_relationship",
+            Some(format!("{source_form}.{source_field}")),
+            false,
+        )?;
+    }
+    Ok(())
+}
+
+async fn validate_form_data(
+    pool: &PgPool,
+    form_version_id: i64,
+    data_json: &Value,
+) -> Result<Vec<FormValidationIssue>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT field_path, rule_code, severity, message, rule_json
+        FROM form_validations
+        WHERE form_version_id = $1 AND active = TRUE
+        ORDER BY validation_id
+        "#,
+    )
+    .bind(form_version_id)
+    .fetch_all(pool)
+    .await
+    .context("failed to load form validations")?;
+
+    let mut issues = Vec::new();
+    for row in rows {
+        let field_path = row.get::<String, _>("field_path");
+        let rule_code = row.get::<String, _>("rule_code");
+        let severity = row.get::<String, _>("severity");
+        let message = row.get::<String, _>("message");
+        let rule_json = row.get::<Value, _>("rule_json");
+        let value = data_json.get(&field_path);
+        let failed = match rule_code.as_str() {
+            "REQUIRED" => value
+                .map(|value| value.is_null() || value.as_str().is_some_and(str::is_empty))
+                .unwrap_or(true),
+            "MIN" => {
+                let minimum = rule_json.get("min").and_then(Value::as_i64).unwrap_or(0);
+                value.and_then(Value::as_i64).unwrap_or(0) < minimum
+            }
+            "EQUALS_FIELD" => {
+                let other = rule_json.get("field").and_then(Value::as_str).unwrap_or("");
+                value != data_json.get(other)
+            }
+            _ => false,
+        };
+        if failed {
+            issues.push(FormValidationIssue {
+                field_path,
+                rule_code,
+                severity,
+                message,
+            });
+        }
+    }
+    Ok(issues)
+}
+
+async fn list_form_data_history(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    form_code: &str,
+) -> Result<Vec<FormDataHistory>> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        SELECT history_id, form_data_id, by_id, form_code, change_type, changed_by,
+               reason, old_data, new_data, changed_at
+        FROM {schema}.form_data_history
+        WHERE by_id = $1 AND form_code = $2
+        ORDER BY changed_at DESC, history_id DESC
+        LIMIT 20
+        "#
+    );
+    sqlx::query_as::<_, FormDataHistory>(&sql)
+        .bind(by_id)
+        .bind(form_code)
+        .fetch_all(pool)
+        .await
+        .context("failed to list form data history")
+}
+
+struct FormDataHistoryInsert<'a> {
+    form: &'a FormData,
+    change_type: &'a str,
+    old_data: Option<Value>,
+    new_data: Value,
+    changed_by: &'a str,
+    reason: Option<&'a str>,
+}
+
+async fn insert_form_data_history(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    item: FormDataHistoryInsert<'_>,
+) -> Result<()> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        INSERT INTO {schema}.form_data_history (
+            form_data_id, by_id, form_code, change_type, changed_by, reason, old_data, new_data
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        "#
+    );
+    sqlx::query(&sql)
+        .bind(item.form.form_data_id)
+        .bind(item.form.by_id)
+        .bind(&item.form.form_code)
+        .bind(item.change_type)
+        .bind(item.changed_by)
+        .bind(item.reason)
+        .bind(item.old_data)
+        .bind(item.new_data)
+        .execute(pool)
+        .await
+        .context("failed to insert form data history")?;
+    Ok(())
+}
+
+fn set_form_field(data_json: &mut Value, field: &str, value: Value) -> Result<()> {
+    let object = data_json
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("form data must be a JSON object"))?;
+    object.insert(field.to_string(), value);
+    Ok(())
+}
+
+fn set_form_field_meta(
+    data_json: &mut Value,
+    field: &str,
+    source: &str,
+    source_ref: Option<String>,
+    editable: bool,
+) -> Result<()> {
+    let object = data_json
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("form data must be a JSON object"))?;
+    let meta = object.entry("_meta").or_insert_with(|| json!({}));
+    let meta_object = meta
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("form metadata must be a JSON object"))?;
+    meta_object.insert(
+        field.to_string(),
+        json!({
+            "source": source,
+            "source_ref": source_ref,
+            "editable": editable
+        }),
+    );
+    Ok(())
+}
+
+fn template_fields(template_json: &Value) -> Vec<String> {
+    template_json
+        .get("fields")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn form_field_label(field: &str) -> String {
+    match field {
+        "taxable_income" => "과세표준",
+        "corporate_tax" => "산출세액",
+        "local_income_tax" => "지방소득세",
+        "tax_credits" => "세액공제",
+        "total_tax_due" => "총 납부세액",
+        "accounting_income" => "결산서상 당기순이익",
+        "addbacks" => "익금산입/손금불산입",
+        "deductions" => "손금산입/익금불산입",
+        _ => field,
+    }
+    .to_string()
 }
 
 #[cfg(test)]

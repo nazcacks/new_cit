@@ -524,6 +524,56 @@ h2 {
   justify-content: flex-end;
 }
 
+.form-preview-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(360px, 0.9fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.form-preview-page,
+.form-side-panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 14px;
+}
+
+.form-paper-head {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.form-field-table input {
+  width: 100%;
+  min-width: 160px;
+}
+
+.form-field-table input.auto-field {
+  background: #f1f5f9;
+  color: #334155;
+}
+
+.form-field-table input.manual-field {
+  background: #ffffff;
+  color: var(--text);
+}
+
+.form-side-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.form-side-panel h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
 .count-pill {
   display: inline-flex;
   min-height: 34px;
@@ -952,6 +1002,7 @@ pre {
   .admin-toolbar,
   .access-card-controls,
   .form-grid.two-col,
+  .form-preview-layout,
   .module-grid {
     grid-template-columns: 1fr;
   }

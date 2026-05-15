@@ -553,6 +553,21 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
             result_json     JSONB NOT NULL DEFAULT '{{}}'::jsonb
         );
 
+        CREATE TABLE IF NOT EXISTS {schema}.form_data_history (
+            history_id      BIGSERIAL PRIMARY KEY,
+            form_data_id    BIGINT NOT NULL REFERENCES {schema}.form_data(form_data_id) ON DELETE CASCADE,
+            by_id           BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
+            form_code       VARCHAR(50) NOT NULL,
+            change_type     VARCHAR(30) NOT NULL,
+            changed_by      VARCHAR(100) NOT NULL DEFAULT 'system',
+            reason          TEXT,
+            old_data        JSONB,
+            new_data        JSONB NOT NULL,
+            changed_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_form_data_history_by
+            ON {schema}.form_data_history(by_id, form_code, changed_at DESC);
+
         CREATE TABLE IF NOT EXISTS {schema}.efiling_history (
             efiling_id      BIGSERIAL PRIMARY KEY,
             by_id           BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),

@@ -331,3 +331,19 @@ Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-y
   -ContentType "application/json" `
   -Body '{"consolidated_entities":[{"entity_code":"PARENT","entity_name":"Parent Co","ownership_bps":10000,"taxable_income":100000000},{"entity_code":"SUBA","entity_name":"Sub A","ownership_bps":10000,"taxable_income":200000000}],"eliminations":[{"elimination_type":"INTERCOMPANY_PROFIT","amount":50000000,"direction":"DEDUCT"}]}'
 ```
+
+## Form Engine / FORM3 Preview API (2026-05-15)
+
+- Added FORM3 preview data with field sources, validation issues, and change history.
+- `POST /forms/FORM3` regenerates the form from tax adjustment data and applies active form relationships when source form data exists.
+- `PUT /forms/FORM3` saves manual field overrides and records `form_data_history`.
+- The embedded UI now opens `/modules/forms/form3` as a dedicated preview/edit screen with auto-linked fields visually separated from manual fields.
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/forms/FORM15
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/forms/FORM3
+Invoke-RestMethod http://localhost:8080/api/tenants/demo/business-years/1/forms/FORM3/preview
+Invoke-RestMethod -Method Put http://localhost:8080/api/tenants/demo/business-years/1/forms/FORM3 `
+  -ContentType "application/json" `
+  -Body '{"fields":{"tax_credits":3000001},"reason":"manual review adjustment","changed_by":"reviewer"}'
+```

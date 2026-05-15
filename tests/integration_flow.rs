@@ -135,6 +135,60 @@ async fn api_flow_persists_to_postgres_generates_efiling_and_handles_dlq() {
         form["data_json"]["total_tax_due"],
         calculation["total_tax_due"]
     );
+    let _form15 = post_json(
+        &client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/forms/FORM15"),
+        json!({}),
+        StatusCode::OK,
+    )
+    .await;
+    let linked_form3 = post_json(
+        &client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/forms/FORM3"),
+        json!({}),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(
+        linked_form3["data_json"]["_meta"]["taxable_income"]["source"],
+        "auto_relationship"
+    );
+    let preview = get_json(
+        &client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/forms/FORM3/preview"),
+    )
+    .await;
+    assert!(preview["fields"]
+        .as_array()
+        .expect("preview fields")
+        .iter()
+        .any(|field| field["field_path"] == "total_tax_due"));
+    assert!(preview["validations"]
+        .as_array()
+        .expect("preview validations")
+        .is_empty());
+    let updated_form = put_json(
+        &client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/forms/FORM3"),
+        json!({
+            "fields": {"tax_credits": 3000001_i64},
+            "reason": "integration manual edit",
+            "changed_by": "integration"
+        }),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(updated_form["data_json"]["tax_credits"], 3_000_001_i64);
+    let edited_preview = get_json(
+        &client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/forms/FORM3/preview"),
+    )
+    .await;
+    assert!(edited_preview["history"]
+        .as_array()
+        .expect("form history")
+        .iter()
+        .any(|row| row["change_type"] == "MANUAL_UPDATE"));
     assert_tax_data_input_module_works(&client, &base_url, &tenant_code, customer_id, by_id).await;
     assert_income_adjustment_engine_works(&client, &base_url, &tenant_code, by_id).await;
     assert_asset_based_adjustment_modules_work(&client, &base_url, &tenant_code, by_id).await;

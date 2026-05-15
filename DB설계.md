@@ -1523,3 +1523,11 @@ FOR EACH ROW EXECUTE FUNCTION fn_audit_trigger();
 - `consolidated_entities`는 B-17 연결납세 대상 법인의 법인코드, 법인명, 지분율, 과세소득을 저장한다.
 - `consolidation_eliminations`는 내부거래 이익 제거 등 연결 조정 제거 항목의 금액, 방향, 설명을 저장한다.
 - B-16/B-17 계산 결과는 공통 `adjustment_items`, `tax_adjustments`에 `source_module` 기준으로 저장되어 서식 생성과 감사 추적에서 같은 방식으로 조회된다.
+
+## Phase 14 서식 엔진 DB 보완 (2026-05-15)
+
+- `{tenant_schema}.form_data`는 사업연도별 서식 생성 결과와 적용 서식 버전, 스냅샷 ID를 저장한다.
+- `{tenant_schema}.form_data_history`는 자동 생성, 수동 수정 등 서식 데이터 변경 이력을 old/new JSON과 함께 저장한다.
+- `form_relationships`는 서식 간 자동연동 규칙을 관리하며, FORM3 생성 시 기존 원천 서식 데이터가 있으면 대상 필드에 반영한다.
+- `form_validations`는 필수값, 최소값, 필드 일치 같은 서식 검증 규칙을 저장하고 미리보기 API에서 평가한다.
+- FORM3 데이터 JSON은 필드 값과 `_meta` 출처 정보를 함께 보관해 자동연동 필드와 수동입력 필드를 구분한다.

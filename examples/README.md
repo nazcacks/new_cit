@@ -125,3 +125,20 @@ Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-y
   -ContentType "application/json" `
   -Body '{"consolidated_entities":[{"entity_code":"PARENT","entity_name":"Parent Co","ownership_bps":10000,"taxable_income":100000000},{"entity_code":"SUBA","entity_name":"Sub A","ownership_bps":10000,"taxable_income":200000000},{"entity_code":"SUBB","entity_name":"Sub B","ownership_bps":10000,"taxable_income":300000000}],"eliminations":[{"elimination_type":"INTERCOMPANY_PROFIT","amount":50000000,"direction":"DEDUCT","description":"내부거래 이익 제거"}]}'
 ```
+
+## Phase 14 서식 엔진 예시 (2026-05-15)
+
+- FORM15를 먼저 생성한 뒤 FORM3를 다시 생성하면 `form_relationships`에 따라 FORM3 과세표준 필드가 원천 서식에서 자동연동된다.
+- FORM3 미리보기는 필드 출처, 검증 결과, 변경 이력을 함께 반환한다.
+- 수동 수정은 `PUT /forms/FORM3`로 저장하고 변경 이력을 남긴다.
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/forms/FORM15
+Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-years/1/forms/FORM3
+
+Invoke-RestMethod http://localhost:8080/api/tenants/demo/business-years/1/forms/FORM3/preview
+
+Invoke-RestMethod -Method Put http://localhost:8080/api/tenants/demo/business-years/1/forms/FORM3 `
+  -ContentType "application/json" `
+  -Body '{"fields":{"tax_credits":3000001},"reason":"검토자 수동 조정","changed_by":"review01"}'
+```

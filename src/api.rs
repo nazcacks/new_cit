@@ -26,7 +26,8 @@ use crate::{
         LawVersioningImpactRequest, LoginRequest, ResolveFormVersionQuery,
         SpecialTaxAdjustmentRequest, TaxAmountAdjustmentRequest, TransactionBasedAdjustmentRequest,
         UpdateAdminUserRequest, UpdateAdminUserStatusRequest, UpdateBusinessYearStatusRequest,
-        UpdateFormVersionStatusRequest, UpdateRolePermissionsRequest, UpdateTaxLawStatusRequest,
+        UpdateFormDataRequest, UpdateFormVersionStatusRequest, UpdateRolePermissionsRequest,
+        UpdateTaxLawStatusRequest,
     },
     efiling,
     error::{AppError, AppResult},
@@ -206,7 +207,11 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/forms/:form_code",
-            get(get_form).post(generate_form),
+            get(get_form).post(generate_form).put(update_form_data),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/forms/:form_code/preview",
+            get(preview_form),
         )
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/efilings",
@@ -1166,6 +1171,33 @@ async fn get_form(
         .await
         .map_err(map_anyhow)?;
     let form = tax::get_form(&state.pool, &tenant_ref, by_id, &form_code)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(form))
+}
+
+async fn update_form_data(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id, form_code)): Path<(String, i64, String)>,
+    Json(request): Json<UpdateFormDataRequest>,
+) -> AppResult<Json<crate::domain::FormData>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let form = tax::update_form_data(&state.pool, &tenant_ref, by_id, &form_code, request)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(form))
+}
+
+async fn preview_form(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id, form_code)): Path<(String, i64, String)>,
+) -> AppResult<Json<crate::domain::FormPreviewResult>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let form = tax::preview_form(&state.pool, &tenant_ref, by_id, &form_code)
         .await
         .map_err(map_anyhow)?;
     Ok(Json(form))

@@ -2365,6 +2365,11 @@ async function renderFormScreen() {
     await renderFormMigrationScreen();
   } else if (state.activeFormPath === "/modules/forms/resolver") {
     await renderFormResolverScreen();
+  } else if (
+    state.activeFormPath === "/modules/forms/form3" ||
+    state.activeFormPath === "/modules/forms/preview"
+  ) {
+    await renderFormPreviewScreen("FORM3");
   } else {
     await renderFormVersionsScreen();
   }
@@ -2560,6 +2565,149 @@ async function renderFormResolverScreen() {
     el("formResolverOutput").textContent = JSON.stringify(result, null, 2);
     log("적용 서식 버전 조회", result);
   });
+}
+
+async function renderFormPreviewScreen(formCode) {
+  const context = await loadTaxDataContext();
+  el("formScreenTitle").textContent = `${formCode} 서식 미리보기`;
+  if (!context.byId) {
+    el("formScreenBody").innerHTML = taxDataYearSelector(context);
+    attachTaxDataYearSelector();
+    return;
+  }
+  const root = `/api/tenants/${context.tenantCode}/business-years/${context.byId}/forms/${formCode}`;
+  const preview = await request(`${root}/preview`);
+  const validationRows = preview.validations.length
+    ? preview.validations
+        .map(
+          (issue) => `
+            <tr>
+              <td>${escapeHtml(issue.field_path)}</td>
+              <td><span class="status-pill error">${escapeHtml(issue.severity)}</span></td>
+              <td>${escapeHtml(issue.rule_code)}</td>
+              <td>${escapeHtml(issue.message)}</td>
+            </tr>
+          `,
+        )
+        .join("")
+    : `<tr><td colspan="4">검증 오류가 없습니다.</td></tr>`;
+  const historyRows = preview.history.length
+    ? preview.history
+        .map(
+          (history) => `
+            <tr>
+              <td>${formatDateTime(history.changed_at)}</td>
+              <td>${escapeHtml(history.change_type)}</td>
+              <td>${escapeHtml(history.changed_by)}</td>
+              <td>${escapeHtml(history.reason || "-")}</td>
+            </tr>
+          `,
+        )
+        .join("")
+    : `<tr><td colspan="4">변경 이력이 없습니다.</td></tr>`;
+
+  el("formScreenBody").innerHTML = `
+    ${taxDataYearSelector(context)}
+    <div class="form-preview-layout">
+      <section class="form-preview-page">
+        <div class="form-paper-head">
+          <div>
+            <p class="eyebrow">별지 제3호</p>
+            <h3>법인세 과세표준 및 세액조정계산서</h3>
+          </div>
+          <span class="status-pill ${preview.form.status.toLowerCase()}">${escapeHtml(preview.form.status)}</span>
+        </div>
+        <form id="formDataEditForm">
+          <table class="form-field-table">
+            <thead><tr><th>항목</th><th>값</th><th>출처</th></tr></thead>
+            <tbody>
+              ${preview.fields
+                .map((field) => {
+                  const value = formFieldInputValue(field.value);
+                  const sourceClass = field.source === "manual" ? "manual-field" : "auto-field";
+                  return `
+                    <tr>
+                      <td>
+                        <strong>${escapeHtml(field.label)}</strong><br>
+                        <span class="muted">${escapeHtml(field.field_path)}</span>
+                      </td>
+                      <td>
+                        <input class="${sourceClass}" name="formField" data-form-field="${escapeHtml(field.field_path)}" data-original="${escapeHtml(value)}" value="${escapeHtml(value)}" />
+                      </td>
+                      <td>
+                        <span class="badge ${field.source === "manual" ? "warn" : ""}">${escapeHtml(field.source)}</span>
+                        <span class="muted">${escapeHtml(field.source_ref || "")}</span>
+                      </td>
+                    </tr>
+                  `;
+                })
+                .join("")}
+            </tbody>
+          </table>
+          <div class="table-actions edit-actions">
+            <button id="formGenerateBtn" class="secondary-btn" type="button">자동 생성</button>
+            <button class="primary-btn" type="submit">수동 수정 저장</button>
+          </div>
+        </form>
+      </section>
+      <section class="form-side-panel">
+        <h3>검증 결과</h3>
+        <div class="table-wrap">
+          <table><thead><tr><th>필드</th><th>심각도</th><th>규칙</th><th>메시지</th></tr></thead><tbody>${validationRows}</tbody></table>
+        </div>
+        <h3>변경 이력</h3>
+        <div class="table-wrap">
+          <table><thead><tr><th>시각</th><th>유형</th><th>사용자</th><th>사유</th></tr></thead><tbody>${historyRows}</tbody></table>
+        </div>
+      </section>
+    </div>
+  `;
+  attachTaxDataYearSelector();
+  el("formGenerateBtn").addEventListener("click", async () => {
+    const generated = await request(root, { method: "POST", body: "{}" });
+    log(`${formCode} 자동 생성 완료`, generated);
+    await renderFormPreviewScreen(formCode);
+  });
+  el("formDataEditForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const fields = {};
+    document.querySelectorAll("[data-form-field]").forEach((input) => {
+      if (input.value !== input.dataset.original) {
+        fields[input.dataset.formField] = parseFormFieldValue(input.value);
+      }
+    });
+    if (!Object.keys(fields).length) {
+      log("서식 수동 수정 없음", { form_code: formCode });
+      return;
+    }
+    const updated = await request(root, {
+      method: "PUT",
+      body: JSON.stringify({ fields, reason: "UI manual edit", changed_by: state.user?.login_id || "ui" }),
+    });
+    log(`${formCode} 수동 수정 저장`, updated);
+    await renderFormPreviewScreen(formCode);
+  });
+}
+
+function formFieldInputValue(value) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  if (typeof value === "object") {
+    return JSON.stringify(value);
+  }
+  return String(value);
+}
+
+function parseFormFieldValue(value) {
+  const trimmed = value.trim();
+  if (/^-?\d+$/.test(trimmed)) {
+    return Number(trimmed);
+  }
+  if (!trimmed) {
+    return null;
+  }
+  return trimmed;
 }
 
 async function refreshHealth() {
