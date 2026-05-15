@@ -569,6 +569,27 @@ async fn assert_web_ui_is_available(client: &Client, base_url: &str) {
         .await
         .expect("index response");
     assert_eq!(index.status(), StatusCode::OK);
+    assert_eq!(
+        index
+            .headers()
+            .get("x-content-type-options")
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff")
+    );
+    assert_eq!(
+        index
+            .headers()
+            .get("x-frame-options")
+            .and_then(|value| value.to_str().ok()),
+        Some("DENY")
+    );
+    assert_eq!(
+        index
+            .headers()
+            .get("referrer-policy")
+            .and_then(|value| value.to_str().ok()),
+        Some("no-referrer")
+    );
     let html = index.text().await.expect("index html");
     assert!(html.contains("법인세 세무조정계산서 시스템"));
     assert!(html.contains("loginForm"));
@@ -634,6 +655,8 @@ async fn assert_web_ui_is_available(client: &Client, base_url: &str) {
 
     let health = get_json(client, &format!("{base_url}/health")).await;
     assert_eq!(health["status"], "ok");
+    let ready = get_json(client, &format!("{base_url}/ready")).await;
+    assert_eq!(ready["status"], "ok");
 
     let auth = post_json(
         client,

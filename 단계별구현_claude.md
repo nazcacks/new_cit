@@ -684,6 +684,14 @@
 - UAT 완료 보고서
 - 운영 매뉴얼/사용자 매뉴얼 v1.0
 
+### Phase 19 산출물 (2026-05-15 구현)
+
+- API: `/ready`를 추가해 DB 연결을 포함한 readiness probe를 제공한다.
+- 보안: 모든 응답에 `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Content-Security-Policy` 기본 헤더를 적용한다.
+- 테스트: 통합 테스트에서 `/ready`와 보안 헤더를 검증한다.
+- 문서: `docs/phase19/보안진단결과_v1.md`, `UAT완료보고서_v1.md`, `운영매뉴얼_v1.md`, `사용자매뉴얼_v1.md`를 작성했다.
+- 완료 기준: 현재 코드 기준 Critical/High 0건으로 기록하고, 외부 모의해킹/UAT 실측 결과는 Phase 20 파일럿에서 추가 추적한다.
+
 ---
 
 ### Phase 20. 파일럿 → 정식 오픈 (4주)

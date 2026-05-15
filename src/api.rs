@@ -4,8 +4,9 @@ use axum::{
     http::{
         header::AUTHORIZATION,
         header::{CONTENT_DISPOSITION, CONTENT_TYPE},
-        HeaderMap, HeaderValue, Response, StatusCode,
+        HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode,
     },
+    middleware::{self, Next},
     routing::{get, post, put},
     Json, Router,
 };
@@ -42,6 +43,7 @@ pub fn router(state: AppState) -> Router {
         .route("/app.css", get(web::app_css))
         .route("/app.js", get(web::app_js))
         .route("/health", get(health))
+        .route("/ready", get(ready))
         .route("/api/auth/login", post(login))
         .route("/api/auth/me", get(me))
         .route("/api/auth/logout", post(logout))
@@ -268,6 +270,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/jobs/:job_id/retry", post(retry_job))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn(security_headers))
         .with_state(state)
 }
 
@@ -276,6 +279,39 @@ async fn health() -> Json<HealthResponse> {
         status: "ok",
         service: "cit-system",
     })
+}
+
+async fn ready(State(state): State<AppState>) -> AppResult<Json<HealthResponse>> {
+    sqlx::query("SELECT 1")
+        .execute(&state.pool)
+        .await
+        .map_err(AppError::Sqlx)?;
+    Ok(Json(HealthResponse {
+        status: "ok",
+        service: "cit-system",
+    }))
+}
+
+async fn security_headers(request: Request<Body>, next: Next) -> axum::response::Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-frame-options"),
+        HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static("default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'"),
+    );
+    response
 }
 
 async fn login(

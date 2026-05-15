@@ -7,6 +7,17 @@
 - Use `/api/tenants/{tenant_code}/audit-logs` to inspect action history and hash-chain fields.
 - Use `/api/tenants/{tenant_code}/reports/tax-burden` and `/reports/year-comparison` for separated report screens.
 
+## Phase 19 Test / Security / UAT Examples (2026-05-15)
+
+- Use `/ready` for DB-backed readiness checks before UAT or load smoke tests.
+- Confirm default security headers on `/`, `/app.js`, and API responses.
+- Use `docs/phase19/운영매뉴얼_v1.md` and `docs/phase19/사용자매뉴얼_v1.md` as the manual baseline.
+
+```powershell
+Invoke-RestMethod http://localhost:8080/ready
+(Invoke-WebRequest http://localhost:8080/).Headers
+```
+
 Use these examples after starting the stack:
 
 ```powershell

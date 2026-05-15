@@ -7,6 +7,12 @@
 - Dashboard and report APIs aggregate from `customers`, `business_years`, `notifications`, `audit_logs`, `tax_adjustments`, and `reserves`.
 - Tenant/customer/work-scope access remains separated: customer target work scopes are stored on `customers.work_scopes`, while user grants are constrained to that customer scope.
 
+## Phase 19 Test / Security / UAT DB Note (2026-05-15)
+
+- `/ready` validates PostgreSQL connectivity before the API is marked ready.
+- Phase 19 evidence records DB-backed audit integrity and tenant/customer/work-scope isolation as security diagnosis targets.
+- No schema change is required for Phase 19; the readiness gate and security headers are application-layer controls.
+
 > **문서 버전**: v1.0
 > **작성일**: 2026-05-14
 > **작성자**: 강수 (Kang-Soo.Cho@kr.ey.com)

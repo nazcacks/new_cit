@@ -406,3 +406,15 @@ Invoke-RestMethod http://localhost:8080/api/tenants/demo/audit-logs
 Invoke-RestMethod http://localhost:8080/api/tenants/demo/reports/tax-burden
 Invoke-RestMethod http://localhost:8080/api/tenants/demo/reports/year-comparison
 ```
+
+## Phase 19 Test / Security / UAT Gate (2026-05-15)
+
+- Added `/ready` for DB-backed readiness checks.
+- Added default security headers to every response.
+- Added integration assertions for readiness and security headers.
+- Added Phase 19 evidence documents under `docs/phase19/`:
+  `보안진단결과_v1.md`, `UAT완료보고서_v1.md`, `운영매뉴얼_v1.md`, `사용자매뉴얼_v1.md`.
+
+```powershell
+Invoke-RestMethod http://localhost:8080/ready
+```
