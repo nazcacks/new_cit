@@ -272,6 +272,65 @@ pub struct AmendmentPreview {
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct AuditLog {
+    pub audit_id: i64,
+    pub table_name: String,
+    pub record_id: String,
+    pub action: String,
+    pub old_data: Option<Value>,
+    pub new_data: Option<Value>,
+    pub changed_by: String,
+    pub changed_at: DateTime<Utc>,
+    pub event_date: NaiveDate,
+    pub prev_hash: Option<String>,
+    pub hash_current: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct Notification {
+    pub notification_id: i64,
+    pub by_id: Option<i64>,
+    pub title: String,
+    pub message: String,
+    pub severity: String,
+    pub status: String,
+    pub metadata: Value,
+    pub created_at: DateTime<Utc>,
+    pub read_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DashboardSummary {
+    pub tenant_code: String,
+    pub customer_count: i64,
+    pub business_year_count: i64,
+    pub filed_count: i64,
+    pub pending_review_count: i64,
+    pub due_soon_count: i64,
+    pub unread_notifications: i64,
+    pub audit_log_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct TaxBurdenReportRow {
+    pub by_id: i64,
+    pub customer_id: i64,
+    pub year_label: i32,
+    pub taxable_income: i64,
+    pub total_tax_due: i64,
+    pub effective_tax_rate_bps: i64,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct YearComparisonReportRow {
+    pub customer_id: i64,
+    pub year_label: i32,
+    pub status: String,
+    pub total_adjustment_amount: i64,
+    pub reserve_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct ImportBatch {
     pub batch_id: i64,
     pub by_id: i64,

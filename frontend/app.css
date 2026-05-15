@@ -327,14 +327,22 @@ h2 {
 }
 
 .admin-workspace,
+.customer-workspace,
 .tax-data-workspace,
-.adjustment-workspace {
+.adjustment-workspace,
+.form-workspace,
+.efiling-workspace,
+.reports-workspace {
   margin-bottom: 14px;
 }
 
 .admin-screen-body,
+.customer-screen-body,
 .tax-data-screen-body,
-.adjustment-screen-body {
+.adjustment-screen-body,
+.form-screen-body,
+.efiling-screen-body,
+.reports-screen-body {
   min-width: 0;
 }
 
@@ -370,6 +378,18 @@ h2 {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
   margin-bottom: 12px;
+}
+
+.reports-toolbar {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.report-metrics {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.reports-layout {
+  margin-top: 12px;
 }
 
 .badge-list {

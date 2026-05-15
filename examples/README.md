@@ -1,5 +1,12 @@
 # Examples
 
+## Phase 18 Cross-Cutting Ops Examples (2026-05-15)
+
+- Use `/api/tenants/{tenant_code}/dashboard` to check customer count, business-year count, due-soon count, unread notifications, and audit-log count.
+- Use `/api/tenants/{tenant_code}/notifications` to list generated D-30 business-year closing alerts.
+- Use `/api/tenants/{tenant_code}/audit-logs` to inspect action history and hash-chain fields.
+- Use `/api/tenants/{tenant_code}/reports/tax-burden` and `/reports/year-comparison` for separated report screens.
+
 Use these examples after starting the stack:
 
 ```powershell

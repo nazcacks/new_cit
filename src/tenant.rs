@@ -5,9 +5,10 @@ use sqlx::PgPool;
 use crate::{
     db::{execute_batch, quote_ident},
     domain::{
-        AmendmentDiff, AmendmentPreview, ApprovalLine, BusinessYear, BusinessYearWorkflow,
-        CreateBusinessYearRequest, CreateCustomerRequest, CreateTenantRequest, Customer, Tenant,
-        TenantRef, UpdateBusinessYearStatusRequest, WorkflowEvent,
+        AmendmentDiff, AmendmentPreview, ApprovalLine, AuditLog, BusinessYear,
+        BusinessYearWorkflow, CreateBusinessYearRequest, CreateCustomerRequest,
+        CreateTenantRequest, Customer, DashboardSummary, Notification, TaxBurdenReportRow, Tenant,
+        TenantRef, UpdateBusinessYearStatusRequest, WorkflowEvent, YearComparisonReportRow,
     },
 };
 
@@ -636,8 +637,27 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
             old_data        JSONB,
             new_data        JSONB,
             changed_by      VARCHAR(100) NOT NULL DEFAULT 'system',
-            changed_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            changed_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            event_date      DATE NOT NULL DEFAULT CURRENT_DATE,
+            prev_hash       VARCHAR(64),
+            hash_current    VARCHAR(64)
         );
+        CREATE INDEX IF NOT EXISTS idx_audit_logs_event_date
+            ON {schema}.audit_logs(event_date, audit_id);
+
+        CREATE TABLE IF NOT EXISTS {schema}.notifications (
+            notification_id BIGSERIAL PRIMARY KEY,
+            by_id           BIGINT REFERENCES {schema}.business_years(by_id),
+            title           VARCHAR(200) NOT NULL,
+            message         TEXT NOT NULL,
+            severity        VARCHAR(20) NOT NULL DEFAULT 'INFO',
+            status          VARCHAR(20) NOT NULL DEFAULT 'UNREAD',
+            metadata        JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            read_at         TIMESTAMPTZ
+        );
+        CREATE INDEX IF NOT EXISTS idx_notifications_status
+            ON {schema}.notifications(status, created_at DESC);
         "#
     );
     execute_batch(pool, &sql).await
@@ -661,7 +681,7 @@ pub async fn create_customer(
         "#
     );
 
-    sqlx::query_as::<_, Customer>(&sql)
+    let customer = sqlx::query_as::<_, Customer>(&sql)
         .bind(tenant.tenant_id)
         .bind(request.customer_code.trim())
         .bind(request.customer_name.trim())
@@ -672,7 +692,25 @@ pub async fn create_customer(
         .bind(work_scopes)
         .fetch_one(pool)
         .await
-        .context("failed to create customer")
+        .context("failed to create customer")?;
+    insert_audit_log(
+        pool,
+        tenant,
+        AuditLogEntry {
+            table_name: "customers",
+            record_id: customer.customer_id.to_string(),
+            action: "CREATE",
+            old_data: None,
+            new_data: json!({
+                "customer_code": customer.customer_code.clone(),
+                "customer_name": customer.customer_name.clone(),
+                "work_scopes": customer.work_scopes.clone()
+            }),
+            changed_by: "system",
+        },
+    )
+    .await?;
+    Ok(customer)
 }
 
 pub async fn list_customers(pool: &PgPool, tenant: &TenantRef) -> Result<Vec<Customer>> {
@@ -736,14 +774,32 @@ pub async fn create_business_year(
         "#
     );
 
-    sqlx::query_as::<_, BusinessYear>(&sql)
+    let business_year = sqlx::query_as::<_, BusinessYear>(&sql)
         .bind(request.customer_id)
         .bind(request.year_label)
         .bind(request.start_date)
         .bind(request.end_date)
         .fetch_one(pool)
         .await
-        .context("failed to create business year")
+        .context("failed to create business year")?;
+    insert_audit_log(
+        pool,
+        tenant,
+        AuditLogEntry {
+            table_name: "business_years",
+            record_id: business_year.by_id.to_string(),
+            action: "CREATE",
+            old_data: None,
+            new_data: json!({
+                "customer_id": business_year.customer_id,
+                "year_label": business_year.year_label,
+                "status": business_year.status.clone()
+            }),
+            changed_by: "system",
+        },
+    )
+    .await?;
+    Ok(business_year)
 }
 
 pub async fn list_business_years(pool: &PgPool, tenant: &TenantRef) -> Result<Vec<BusinessYear>> {
@@ -820,6 +876,19 @@ pub async fn update_business_year_status(
         &by.status,
         approver,
         comment,
+    )
+    .await?;
+    insert_audit_log(
+        pool,
+        tenant,
+        AuditLogEntry {
+            table_name: "business_years",
+            record_id: by_id.to_string(),
+            action: "UPDATE",
+            old_data: Some(json!({ "status": current.status, "locked_at": current.locked_at })),
+            new_data: json!({ "status": by.status.clone(), "locked_at": by.locked_at }),
+            changed_by: actor,
+        },
     )
     .await?;
     Ok(by)
@@ -959,6 +1028,225 @@ fn workflow_action(from_status: &str, to_status: &str) -> &'static str {
         ("AMENDED", "IN_REVIEW") => "RESUBMIT_AMENDMENT",
         _ => "STATUS_CHANGE",
     }
+}
+
+struct AuditLogEntry<'a> {
+    table_name: &'a str,
+    record_id: String,
+    action: &'a str,
+    old_data: Option<Value>,
+    new_data: Value,
+    changed_by: &'a str,
+}
+
+async fn insert_audit_log(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    entry: AuditLogEntry<'_>,
+) -> Result<()> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        WITH prev AS (
+            SELECT hash_current
+            FROM {schema}.audit_logs
+            WHERE event_date = CURRENT_DATE
+            ORDER BY audit_id DESC
+            LIMIT 1
+        )
+        INSERT INTO {schema}.audit_logs (
+            table_name, record_id, action, old_data, new_data, changed_by,
+            event_date, prev_hash, hash_current
+        )
+        SELECT $1, $2, $3, $4, $5, $6, CURRENT_DATE,
+               prev.hash_current,
+               md5(COALESCE(prev.hash_current, '') || $1 || $2 || $3 ||
+                   COALESCE($4::text, '') || COALESCE($5::text, '') || $6)
+        FROM (SELECT 1) seed
+        LEFT JOIN prev ON TRUE
+        "#
+    );
+    sqlx::query(&sql)
+        .bind(entry.table_name)
+        .bind(&entry.record_id)
+        .bind(entry.action)
+        .bind(entry.old_data)
+        .bind(entry.new_data)
+        .bind(entry.changed_by)
+        .execute(pool)
+        .await
+        .context("failed to insert audit log")?;
+    Ok(())
+}
+
+pub async fn list_audit_logs(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    limit: i64,
+) -> Result<Vec<AuditLog>> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        SELECT audit_id, table_name, record_id, action, old_data, new_data,
+               changed_by, changed_at, event_date, prev_hash, hash_current
+        FROM {schema}.audit_logs
+        ORDER BY audit_id DESC
+        LIMIT $1
+        "#
+    );
+    sqlx::query_as::<_, AuditLog>(&sql)
+        .bind(limit.clamp(1, 200))
+        .fetch_all(pool)
+        .await
+        .context("failed to list audit logs")
+}
+
+pub async fn ensure_due_notifications(pool: &PgPool, tenant: &TenantRef) -> Result<()> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        INSERT INTO {schema}.notifications (by_id, title, message, severity, metadata)
+        SELECT b.by_id,
+               '사업연도 마감 D-30',
+               CONCAT(b.year_label, ' 사업연도 마감일이 30일 이내입니다.'),
+               'WARN',
+               jsonb_build_object('by_id', b.by_id, 'end_date', b.end_date)
+        FROM {schema}.business_years b
+        WHERE b.status <> 'FILED'
+          AND b.end_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days'
+          AND NOT EXISTS (
+              SELECT 1 FROM {schema}.notifications n
+              WHERE n.by_id = b.by_id
+                AND n.title = '사업연도 마감 D-30'
+          )
+        "#
+    );
+    sqlx::query(&sql)
+        .execute(pool)
+        .await
+        .context("failed to ensure due notifications")?;
+    Ok(())
+}
+
+pub async fn list_notifications(pool: &PgPool, tenant: &TenantRef) -> Result<Vec<Notification>> {
+    ensure_due_notifications(pool, tenant).await?;
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        SELECT notification_id, by_id, title, message, severity, status,
+               metadata, created_at, read_at
+        FROM {schema}.notifications
+        ORDER BY created_at DESC, notification_id DESC
+        LIMIT 100
+        "#
+    );
+    sqlx::query_as::<_, Notification>(&sql)
+        .fetch_all(pool)
+        .await
+        .context("failed to list notifications")
+}
+
+pub async fn dashboard_summary(pool: &PgPool, tenant: &TenantRef) -> Result<DashboardSummary> {
+    ensure_due_notifications(pool, tenant).await?;
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        SELECT
+            (SELECT COUNT(*) FROM {schema}.customers) AS customer_count,
+            (SELECT COUNT(*) FROM {schema}.business_years) AS business_year_count,
+            (SELECT COUNT(*) FROM {schema}.business_years WHERE status = 'FILED') AS filed_count,
+            (SELECT COUNT(*) FROM {schema}.business_years WHERE status = 'IN_REVIEW') AS pending_review_count,
+            (SELECT COUNT(*) FROM {schema}.business_years
+             WHERE status <> 'FILED'
+               AND end_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days') AS due_soon_count,
+            (SELECT COUNT(*) FROM {schema}.notifications WHERE status = 'UNREAD') AS unread_notifications,
+            (SELECT COUNT(*) FROM {schema}.audit_logs) AS audit_log_count
+        "#
+    );
+    let row = sqlx::query_as::<_, DashboardCounts>(&sql)
+        .fetch_one(pool)
+        .await
+        .context("failed to load dashboard summary")?;
+    Ok(DashboardSummary {
+        tenant_code: tenant.tenant_code.clone(),
+        customer_count: row.customer_count,
+        business_year_count: row.business_year_count,
+        filed_count: row.filed_count,
+        pending_review_count: row.pending_review_count,
+        due_soon_count: row.due_soon_count,
+        unread_notifications: row.unread_notifications,
+        audit_log_count: row.audit_log_count,
+    })
+}
+
+#[derive(sqlx::FromRow)]
+struct DashboardCounts {
+    customer_count: i64,
+    business_year_count: i64,
+    filed_count: i64,
+    pending_review_count: i64,
+    due_soon_count: i64,
+    unread_notifications: i64,
+    audit_log_count: i64,
+}
+
+pub async fn tax_burden_report(
+    pool: &PgPool,
+    tenant: &TenantRef,
+) -> Result<Vec<TaxBurdenReportRow>> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        SELECT b.by_id, b.customer_id, b.year_label,
+               COALESCE(MAX(a.amount) FILTER (WHERE a.adj_code = 'TAXABLE_INCOME'), 0)::BIGINT AS taxable_income,
+               COALESCE(MAX(a.amount) FILTER (WHERE a.adj_code = 'TOTAL_TAX_DUE'), 0)::BIGINT AS total_tax_due,
+               CASE
+                   WHEN COALESCE(MAX(a.amount) FILTER (WHERE a.adj_code = 'TAXABLE_INCOME'), 0) = 0 THEN 0
+                   ELSE (
+                       COALESCE(MAX(a.amount) FILTER (WHERE a.adj_code = 'TOTAL_TAX_DUE'), 0) * 10000
+                       / COALESCE(MAX(a.amount) FILTER (WHERE a.adj_code = 'TAXABLE_INCOME'), 1)
+                   )::BIGINT
+               END AS effective_tax_rate_bps
+        FROM {schema}.business_years b
+        LEFT JOIN {schema}.tax_adjustments a ON a.by_id = b.by_id
+        GROUP BY b.by_id, b.customer_id, b.year_label
+        ORDER BY b.year_label DESC, b.by_id DESC
+        "#
+    );
+    sqlx::query_as::<_, TaxBurdenReportRow>(&sql)
+        .fetch_all(pool)
+        .await
+        .context("failed to load tax burden report")
+}
+
+pub async fn year_comparison_report(
+    pool: &PgPool,
+    tenant: &TenantRef,
+) -> Result<Vec<YearComparisonReportRow>> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        SELECT b.customer_id, b.year_label, b.status,
+               COALESCE(a.total_adjustment_amount, 0)::BIGINT AS total_adjustment_amount,
+               COALESCE(r.reserve_count, 0)::BIGINT AS reserve_count
+        FROM {schema}.business_years b
+        LEFT JOIN (
+            SELECT by_id, SUM(amount)::BIGINT AS total_adjustment_amount
+            FROM {schema}.tax_adjustments
+            GROUP BY by_id
+        ) a ON a.by_id = b.by_id
+        LEFT JOIN (
+            SELECT by_id, COUNT(*)::BIGINT AS reserve_count
+            FROM {schema}.reserves
+            GROUP BY by_id
+        ) r ON r.by_id = b.by_id
+        ORDER BY b.customer_id, b.year_label DESC
+        "#
+    );
+    sqlx::query_as::<_, YearComparisonReportRow>(&sql)
+        .fetch_all(pool)
+        .await
+        .context("failed to load year comparison report")
 }
 
 pub async fn get_business_year_workflow(

@@ -13,6 +13,7 @@ const state = {
   activeAdjustmentPath: "/modules/adjustment/income",
   activeFormPath: "/modules/forms/versions",
   activeEfilingPath: "/modules/efiling/hometax-record",
+  activeReportsPath: "/modules/reports/dashboard",
   lawVersions: [],
   selectedLawVersionId: null,
   lawSummary: null,
@@ -417,6 +418,9 @@ function renderModuleMenu(tree) {
       } else if (path?.startsWith("/modules/efiling")) {
         event.preventDefault();
         await navigateEfilingRoute(path);
+      } else if (path?.startsWith("/modules/reports")) {
+        event.preventDefault();
+        await navigateReportsRoute(path);
       }
     });
   });
@@ -424,6 +428,7 @@ function renderModuleMenu(tree) {
   highlightTaxDataMenu();
   highlightAdjustmentMenu();
   highlightEfilingMenu();
+  highlightReportsMenu();
 }
 
 function renderModuleCards(tree) {
@@ -506,9 +511,15 @@ async function navigateAdjustmentRoute(path) {
     "/modules/adjustment/depreciation",
     "/modules/adjustment/retirement-reserve",
     "/modules/adjustment/bad-debt-reserve",
+    "/modules/adjustment/fx-valuation",
+    "/modules/adjustment/inventory-valuation",
     "/modules/adjustment/carryforward-loss",
     "/modules/adjustment/tax-credits",
+    "/modules/adjustment/minimum-tax",
     "/modules/adjustment/penalty-tax",
+    "/modules/adjustment/capital-reserves",
+    "/modules/adjustment/foreign-corporation",
+    "/modules/adjustment/consolidated-tax",
   ];
   state.activeAdjustmentPath = supported.includes(path) ? path : "/modules/adjustment/income";
   highlightAdjustmentMenu();
@@ -545,6 +556,20 @@ async function navigateEfilingRoute(path) {
   el("efilingWorkspace").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
+async function navigateReportsRoute(path) {
+  const supported = [
+    "/modules/reports/dashboard",
+    "/modules/reports/notifications",
+    "/modules/reports/tax-burden",
+    "/modules/reports/year-comparison",
+    "/modules/reports/audit-logs",
+  ];
+  state.activeReportsPath = supported.includes(path) ? path : "/modules/reports/dashboard";
+  highlightReportsMenu();
+  await renderReportsScreen();
+  el("reportsWorkspace").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
 function highlightLawMenu() {
   document.querySelectorAll("#moduleMenu .submenu-link, #moduleMenu .menu-link").forEach((link) => {
     link.classList.toggle("active", link.dataset.path === state.activeLawPath);
@@ -564,6 +589,14 @@ function highlightEfilingMenu() {
   document.querySelectorAll("#moduleMenu .submenu-link, #moduleMenu .menu-link").forEach((link) => {
     if (link.dataset.path?.startsWith("/modules/efiling")) {
       link.classList.toggle("active", link.dataset.path === state.activeEfilingPath);
+    }
+  });
+}
+
+function highlightReportsMenu() {
+  document.querySelectorAll("#moduleMenu .submenu-link, #moduleMenu .menu-link").forEach((link) => {
+    if (link.dataset.path?.startsWith("/modules/reports")) {
+      link.classList.toggle("active", link.dataset.path === state.activeReportsPath);
     }
   });
 }
@@ -613,11 +646,338 @@ async function optionalRequest(path, fallback) {
   }
 }
 
+function reportsRoot() {
+  return `/api/tenants/${encodeURIComponent(currentTenantCode())}`;
+}
+
+function reportsTabNav() {
+  const tabs = [
+    ["/modules/reports/dashboard", "운영 대시보드"],
+    ["/modules/reports/notifications", "알림 센터"],
+    ["/modules/reports/tax-burden", "세부담 분석"],
+    ["/modules/reports/year-comparison", "연도 비교"],
+    ["/modules/reports/audit-logs", "감사 로그"],
+  ];
+  return `<div class="admin-toolbar reports-toolbar">${tabs
+    .map(
+      ([path, label]) => `
+        <button class="${state.activeReportsPath === path ? "primary-btn" : "secondary-btn"} compact" data-report-path="${path}" type="button">
+          ${escapeHtml(label)}
+        </button>
+      `,
+    )
+    .join("")}</div>`;
+}
+
+function bindReportsTabs() {
+  document.querySelectorAll("[data-report-path]").forEach((button) => {
+    button.addEventListener("click", () => {
+      navigateReportsRoute(button.dataset.reportPath).catch((error) =>
+        log("분석/운영 화면 전환 실패", { message: error.message }),
+      );
+    });
+  });
+}
+
+async function renderReportsScreen() {
+  const titles = {
+    "/modules/reports/dashboard": "운영 대시보드",
+    "/modules/reports/notifications": "알림 센터",
+    "/modules/reports/tax-burden": "세부담 분석",
+    "/modules/reports/year-comparison": "연도 비교",
+    "/modules/reports/audit-logs": "감사 로그",
+  };
+  el("reportsScreenTitle").textContent = titles[state.activeReportsPath] || "분석/운영";
+  if (state.activeReportsPath === "/modules/reports/notifications") {
+    await renderNotificationsScreen();
+  } else if (state.activeReportsPath === "/modules/reports/tax-burden") {
+    await renderTaxBurdenReportScreen();
+  } else if (state.activeReportsPath === "/modules/reports/year-comparison") {
+    await renderYearComparisonReportScreen();
+  } else if (state.activeReportsPath === "/modules/reports/audit-logs") {
+    await renderAuditLogScreen();
+  } else {
+    await renderOpsDashboardScreen();
+  }
+  bindReportsTabs();
+  highlightReportsMenu();
+}
+
+async function renderOpsDashboardScreen() {
+  const root = reportsRoot();
+  const [summary, notifications, burden, comparison, auditLogs] = await Promise.all([
+    optionalRequest(`${root}/dashboard`, null),
+    optionalRequest(`${root}/notifications`, []),
+    optionalRequest(`${root}/reports/tax-burden`, []),
+    optionalRequest(`${root}/reports/year-comparison`, []),
+    optionalRequest(`${root}/audit-logs`, []),
+  ]);
+  const cards = [
+    ["고객사", summary?.customer_count ?? "-"],
+    ["사업연도", summary?.business_year_count ?? "-"],
+    ["검토 대기", summary?.pending_review_count ?? "-"],
+    ["마감 D-30", summary?.due_soon_count ?? "-"],
+    ["미확인 알림", summary?.unread_notifications ?? "-"],
+    ["감사 로그", summary?.audit_log_count ?? "-"],
+  ]
+    .map(
+      ([label, value]) => `
+        <article>
+          <span>${escapeHtml(label)}</span>
+          <strong>${escapeHtml(value)}</strong>
+        </article>
+      `,
+    )
+    .join("");
+  const notificationRows = notifications.slice(0, 5).length
+    ? notifications
+        .slice(0, 5)
+        .map(
+          (row) => `
+            <tr>
+              <td>${escapeHtml(row.severity)}</td>
+              <td>${escapeHtml(row.title)}</td>
+              <td>${escapeHtml(row.status)}</td>
+              <td>${formatDateTime(row.created_at)}</td>
+            </tr>
+          `,
+        )
+        .join("")
+    : `<tr><td colspan="4">알림이 없습니다.</td></tr>`;
+  const burdenRows = burden.slice(0, 5).length
+    ? burden
+        .slice(0, 5)
+        .map(
+          (row) => `
+            <tr>
+              <td>${row.by_id}</td>
+              <td>${row.year_label}</td>
+              <td class="num">${money.format(row.taxable_income)}</td>
+              <td class="num">${money.format(row.total_tax_due)}</td>
+              <td class="num">${formatBps(row.effective_tax_rate_bps)}</td>
+            </tr>
+          `,
+        )
+        .join("")
+    : `<tr><td colspan="5">세부담 데이터가 없습니다.</td></tr>`;
+  const comparisonRows = comparison.slice(0, 5).length
+    ? comparison
+        .slice(0, 5)
+        .map(
+          (row) => `
+            <tr>
+              <td>${row.customer_id}</td>
+              <td>${row.year_label}</td>
+              <td>${escapeHtml(row.status)}</td>
+              <td class="num">${money.format(row.total_adjustment_amount)}</td>
+              <td class="num">${money.format(row.reserve_count)}</td>
+            </tr>
+          `,
+        )
+        .join("")
+    : `<tr><td colspan="5">연도 비교 데이터가 없습니다.</td></tr>`;
+  const auditRows = auditLogs.slice(0, 5).length
+    ? auditLogs
+        .slice(0, 5)
+        .map(
+          (row) => `
+            <tr>
+              <td>${escapeHtml(row.action)}</td>
+              <td>${escapeHtml(row.table_name)}</td>
+              <td>${escapeHtml(row.record_id)}</td>
+              <td>${escapeHtml(row.changed_by)}</td>
+              <td><code>${escapeHtml((row.hash_current || "").slice(0, 10))}</code></td>
+            </tr>
+          `,
+        )
+        .join("")
+    : `<tr><td colspan="5">감사 로그가 없습니다.</td></tr>`;
+  el("reportsScreenBody").innerHTML = `
+    ${reportsTabNav()}
+    <section class="metrics report-metrics">${cards}</section>
+    <div class="admin-layout reports-layout">
+      <div class="admin-table-panel">
+        <h3>최근 알림</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>등급</th><th>제목</th><th>상태</th><th>생성시각</th></tr></thead>
+            <tbody>${notificationRows}</tbody>
+          </table>
+        </div>
+      </div>
+      <div class="admin-table-panel">
+        <h3>최근 감사 로그</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>행위</th><th>테이블</th><th>레코드</th><th>작업자</th><th>해시</th></tr></thead>
+            <tbody>${auditRows}</tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div class="admin-layout reports-layout">
+      <div class="admin-table-panel">
+        <h3>세부담 요약</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>BY ID</th><th>연도</th><th>과세표준</th><th>납부세액</th><th>실효세율</th></tr></thead>
+            <tbody>${burdenRows}</tbody>
+          </table>
+        </div>
+      </div>
+      <div class="admin-table-panel">
+        <h3>연도 비교</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>고객사</th><th>연도</th><th>상태</th><th>조정 합계</th><th>유보</th></tr></thead>
+            <tbody>${comparisonRows}</tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function renderNotificationsScreen() {
+  const notifications = await optionalRequest(`${reportsRoot()}/notifications`, []);
+  const rows = notifications.length
+    ? notifications
+        .map(
+          (row) => `
+            <tr>
+              <td>${row.notification_id}</td>
+              <td>${row.by_id ?? "-"}</td>
+              <td><span class="status-pill ${escapeHtml(row.severity)}">${escapeHtml(row.severity)}</span></td>
+              <td>${escapeHtml(row.title)}</td>
+              <td>${escapeHtml(row.message)}</td>
+              <td>${escapeHtml(row.status)}</td>
+              <td>${formatDateTime(row.created_at)}</td>
+            </tr>
+          `,
+        )
+        .join("")
+    : `<tr><td colspan="7">알림이 없습니다.</td></tr>`;
+  el("reportsScreenBody").innerHTML = `
+    ${reportsTabNav()}
+    <div class="law-table-panel">
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>ID</th><th>BY ID</th><th>등급</th><th>제목</th><th>메시지</th><th>상태</th><th>생성시각</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+async function renderTaxBurdenReportScreen() {
+  const rowsData = await optionalRequest(`${reportsRoot()}/reports/tax-burden`, []);
+  const rows = rowsData.length
+    ? rowsData
+        .map(
+          (row) => `
+            <tr>
+              <td>${row.by_id}</td>
+              <td>${row.customer_id}</td>
+              <td>${row.year_label}</td>
+              <td class="num">${money.format(row.taxable_income)}</td>
+              <td class="num">${money.format(row.total_tax_due)}</td>
+              <td class="num">${formatBps(row.effective_tax_rate_bps)}</td>
+            </tr>
+          `,
+        )
+        .join("")
+    : `<tr><td colspan="6">세부담 데이터가 없습니다.</td></tr>`;
+  el("reportsScreenBody").innerHTML = `
+    ${reportsTabNav()}
+    <div class="law-table-panel">
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>BY ID</th><th>고객사</th><th>연도</th><th>과세표준</th><th>납부세액</th><th>실효세율</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+async function renderYearComparisonReportScreen() {
+  const rowsData = await optionalRequest(`${reportsRoot()}/reports/year-comparison`, []);
+  const rows = rowsData.length
+    ? rowsData
+        .map(
+          (row) => `
+            <tr>
+              <td>${row.customer_id}</td>
+              <td>${row.year_label}</td>
+              <td>${escapeHtml(row.status)}</td>
+              <td class="num">${money.format(row.total_adjustment_amount)}</td>
+              <td class="num">${money.format(row.reserve_count)}</td>
+            </tr>
+          `,
+        )
+        .join("")
+    : `<tr><td colspan="5">연도 비교 데이터가 없습니다.</td></tr>`;
+  el("reportsScreenBody").innerHTML = `
+    ${reportsTabNav()}
+    <div class="law-table-panel">
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>고객사</th><th>연도</th><th>상태</th><th>조정 합계</th><th>유보 건수</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+async function renderAuditLogScreen() {
+  const logs = await optionalRequest(`${reportsRoot()}/audit-logs`, []);
+  const rows = logs.length
+    ? logs
+        .map(
+          (row) => `
+            <tr>
+              <td>${row.audit_id}</td>
+              <td>${escapeHtml(row.action)}</td>
+              <td>${escapeHtml(row.table_name)}</td>
+              <td>${escapeHtml(row.record_id)}</td>
+              <td>${escapeHtml(row.changed_by)}</td>
+              <td>${formatDateTime(row.changed_at)}</td>
+              <td><code>${escapeHtml(row.prev_hash || "-")}</code></td>
+              <td><code>${escapeHtml(row.hash_current || "-")}</code></td>
+            </tr>
+          `,
+        )
+        .join("")
+    : `<tr><td colspan="8">감사 로그가 없습니다.</td></tr>`;
+  el("reportsScreenBody").innerHTML = `
+    ${reportsTabNav()}
+    <div class="law-table-panel">
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>ID</th><th>행위</th><th>테이블</th><th>레코드</th><th>작업자</th><th>시각</th><th>이전 해시</th><th>현재 해시</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function formatBps(value) {
+  const number = Number(value || 0) / 100;
+  return `${number.toFixed(2)}%`;
+}
+
 async function renderAdminScreen() {
   if (state.activeAdminPath === "/modules/admin/roles") {
     await renderAdminRolesScreen();
   } else if (state.activeAdminPath === "/modules/admin/tenants") {
     await renderAdminTenantsScreen();
+  } else if (state.activeAdminPath === "/modules/admin/audit-logs") {
+    await renderAdminAuditLogsScreen();
+  } else if (state.activeAdminPath === "/modules/admin/menus") {
+    renderAdminMenusScreen();
   } else {
     await renderAdminUsersScreen();
   }
@@ -1078,6 +1438,76 @@ async function renderAdminTenantsScreen() {
               )
               .join("")}
           </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function renderAdminMenusScreen() {
+  el("adminScreenTitle").textContent = "메뉴 관리";
+  const modules = topModules(state.moduleTree);
+  const rows = modules
+    .flatMap((module) => [
+      { number: nodeNumber(module, ""), name: nodeName(module), path: module.path, level: "상위" },
+      ...(Array.isArray(module.children) ? module.children : []).map((child) => ({
+        number: nodeNumber(child, ""),
+        name: nodeName(child),
+        path: child.path,
+        level: "하위",
+      })),
+    ])
+    .map(
+      (menu) => `
+        <tr>
+          <td>${escapeHtml(menu.number)}</td>
+          <td>${escapeHtml(menu.level)}</td>
+          <td>${escapeHtml(menu.name)}</td>
+          <td><code>${escapeHtml(menu.path || "-")}</code></td>
+        </tr>
+      `,
+    )
+    .join("");
+  el("adminScreenBody").innerHTML = `
+    <div class="admin-table-panel">
+      <h3>메뉴 구성</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>번호</th><th>구분</th><th>메뉴명</th><th>경로</th></tr></thead>
+          <tbody>${rows || `<tr><td colspan="4">메뉴 데이터가 없습니다.</td></tr>`}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+async function renderAdminAuditLogsScreen() {
+  el("adminScreenTitle").textContent = "감사 로그";
+  const logs = await optionalRequest(`${reportsRoot()}/audit-logs`, []);
+  const rows = logs.length
+    ? logs
+        .map(
+          (row) => `
+            <tr>
+              <td>${row.audit_id}</td>
+              <td>${escapeHtml(row.action)}</td>
+              <td>${escapeHtml(row.table_name)}</td>
+              <td>${escapeHtml(row.record_id)}</td>
+              <td>${escapeHtml(row.changed_by)}</td>
+              <td>${formatDateTime(row.changed_at)}</td>
+              <td><code>${escapeHtml(row.hash_current || "-")}</code></td>
+            </tr>
+          `,
+        )
+        .join("")
+    : `<tr><td colspan="7">감사 로그가 없습니다.</td></tr>`;
+  el("adminScreenBody").innerHTML = `
+    <div class="admin-table-panel">
+      <h3>테넌트 감사 로그</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>ID</th><th>행위</th><th>테이블</th><th>레코드</th><th>작업자</th><th>시각</th><th>해시</th></tr></thead>
+          <tbody>${rows}</tbody>
         </table>
       </div>
     </div>
@@ -3063,7 +3493,7 @@ async function refreshJobs() {
 
 async function refreshDashboard() {
   await refreshHealth();
-  await Promise.all([refreshTenants(), refreshJobs(), refreshLawData(false)]);
+  await Promise.all([refreshTenants(), refreshJobs(), refreshLawData(false), renderReportsScreen()]);
 }
 
 async function refreshLawData(rerender = true) {
@@ -4325,6 +4755,9 @@ el("formRefreshBtn").addEventListener("click", () => {
 });
 el("efilingRefreshBtn").addEventListener("click", () => {
   renderEfilingScreen().catch((error) => log("전자신고 새로고침 실패", { message: error.message }));
+});
+el("reportsRefreshBtn").addEventListener("click", () => {
+  renderReportsScreen().catch((error) => log("분석/운영 새로고침 실패", { message: error.message }));
 });
 document.querySelectorAll(".law-screen-refresh").forEach((button) => {
   button.addEventListener("click", () => {

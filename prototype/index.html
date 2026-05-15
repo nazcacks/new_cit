@@ -142,6 +142,7 @@ const MENU = [
     { key: "post-amend", label: "수정신고/경정청구" },
   ] },
   { key: "reports", label: "④ 분석/보고서", icon: "📈", children: [
+    { key: "rp-alerts",  label: "알림 센터" },
     { key: "rp-compare", label: "사업연도 비교" },
     { key: "rp-burden",  label: "세부담 분석" },
     { key: "rp-reserve", label: "유보 잔액 추이" },
@@ -1065,16 +1066,53 @@ const PostAmend = () => (
 );
 
 /* ---------- 보고서 ---------- */
-const Reports = ({menuKey}) => (
-  <div className="p-6 space-y-4">
-    <h1 className="text-xl font-bold text-slate-800">
-      {menuKey==="rp-compare"?"사업연도 비교":menuKey==="rp-burden"?"세부담 분석":"유보 잔액 추이"}
-    </h1>
-    <Card>
-      <div className="h-64 bg-slate-50 rounded flex items-center justify-center text-slate-400">차트 영역 (Chart.js)</div>
-    </Card>
-  </div>
-);
+const Reports = ({menuKey}) => {
+  const title = menuKey==="rp-alerts" ? "알림 센터"
+              : menuKey==="rp-compare" ? "사업연도 비교"
+              : menuKey==="rp-burden" ? "세부담 분석"
+              : "유보 잔액 추이";
+  const rows = {
+    "rp-alerts": [
+      ["WARN", "㈜OOO 2025 사업연도 마감 D-30", "UNREAD", "2026-02-15 09:00"],
+      ["INFO", "△△사 수정신고 검토 요청", "UNREAD", "2026-02-14 17:20"],
+    ],
+    "rp-compare": [
+      ["㈜OOO", "2025", "AMENDED", "129,000,000", "3"],
+      ["㈜OOO", "2024", "FILED", "118,000,000", "2"],
+    ],
+    "rp-burden": [
+      ["BY-2025-001", "㈜OOO", "2025", "508,000,000", "94,210,000", "18.55%"],
+      ["BY-2024-001", "㈜OOO", "2024", "471,000,000", "86,080,000", "18.28%"],
+    ],
+    "rp-reserve": [
+      ["퇴직급여충당금", "㈜OOO", "2025", "28,000,000", "익금산입 유보"],
+      ["대손충당금", "△△사", "2025", "11,500,000", "손금산입 유보"],
+    ],
+  }[menuKey] || [];
+  const headers = menuKey==="rp-alerts" ? ["등급","제목","상태","생성시각"]
+                : menuKey==="rp-burden" ? ["BY ID","고객사","연도","과세표준","납부세액","실효세율"]
+                : menuKey==="rp-compare" ? ["고객사","연도","상태","조정 합계","유보 건수"]
+                : ["유보 항목","고객사","연도","잔액","구분"];
+  return (
+    <div className="p-6 space-y-4">
+      <h1 className="text-xl font-bold text-slate-800">{title}</h1>
+      <Card title={title}>
+        <table className="w-full text-sm">
+          <thead className="text-xs text-slate-500 border-b">
+            <tr>{headers.map(h=><th key={h} className="text-left py-1">{h}</th>)}</tr>
+          </thead>
+          <tbody>
+            {rows.map((row, idx)=>(
+              <tr key={idx} className="border-b">
+                {row.map((cell, i)=><td key={i} className="py-2">{i===0 && menuKey==="rp-alerts" ? <Badge color={cell==="WARN"?"bg-amber-100 text-amber-700":"bg-sky-100 text-sky-700"}>{cell}</Badge> : cell}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Card>
+    </div>
+  );
+};
 
 /* ---------- 관리(Admin) ---------- */
 const AdminTenant = () => {
@@ -2433,14 +2471,14 @@ const AdminFormVer = () => (
 
 const AdminAudit = () => (
   <div className="p-6 space-y-4">
-    <h1 className="text-xl font-bold text-slate-800">5-G 감사 로그</h1>
+    <h1 className="text-xl font-bold text-slate-800">5-H 감사·로그</h1>
     <Card>
       <table className="w-full text-sm">
-        <thead className="text-xs text-slate-500 border-b"><tr><th className="text-left py-1">시각</th><th>사용자</th><th>행위</th><th>대상</th><th>IP</th></tr></thead>
+        <thead className="text-xs text-slate-500 border-b"><tr><th className="text-left py-1">시각</th><th>사용자</th><th>행위</th><th>대상</th><th>IP</th><th>해시 체인</th></tr></thead>
         <tbody>
-          <tr className="border-b"><td className="text-xs">10:32:01</td><td>ksc</td><td>UPDATE</td><td>tax_adjustments #1042</td><td>10.0.1.23</td></tr>
-          <tr className="border-b"><td className="text-xs">10:30:18</td><td>ksc</td><td>LOGIN</td><td>—</td><td>10.0.1.23</td></tr>
-          <tr className="border-b"><td className="text-xs">09:55:09</td><td>park</td><td>SUBMIT</td><td>efiling_history #99</td><td>10.0.2.55</td></tr>
+          <tr className="border-b"><td className="text-xs">10:32:01</td><td>ksc</td><td>UPDATE</td><td>business_years #1042</td><td>10.0.1.23</td><td className="font-mono text-xs">9f2a...e31c</td></tr>
+          <tr className="border-b"><td className="text-xs">10:30:18</td><td>system</td><td>CREATE</td><td>customers #18</td><td>10.0.1.23</td><td className="font-mono text-xs">4a11...88bd</td></tr>
+          <tr className="border-b"><td className="text-xs">09:55:09</td><td>park</td><td>SUBMIT</td><td>efiling_history #99</td><td>10.0.2.55</td><td className="font-mono text-xs">7cb2...019a</td></tr>
         </tbody>
       </table>
     </Card>
@@ -2465,6 +2503,7 @@ const Shell = () => {
     "ws-file":  <WorkFile/>,
     "post-hist":<PostHist/>,
     "post-amend":<PostAmend/>,
+    "rp-alerts":<Reports menuKey={menuKey}/>,
     "rp-compare":<Reports menuKey={menuKey}/>,
     "rp-burden":<Reports menuKey={menuKey}/>,
     "rp-reserve":<Reports menuKey={menuKey}/>,

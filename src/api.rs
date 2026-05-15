@@ -121,6 +121,20 @@ pub fn router(state: AppState) -> Router {
             "/api/tenants/:tenant_code/customers",
             get(list_customers).post(create_customer),
         )
+        .route("/api/tenants/:tenant_code/dashboard", get(get_dashboard))
+        .route("/api/tenants/:tenant_code/audit-logs", get(list_audit_logs))
+        .route(
+            "/api/tenants/:tenant_code/notifications",
+            get(list_notifications),
+        )
+        .route(
+            "/api/tenants/:tenant_code/reports/tax-burden",
+            get(get_tax_burden_report),
+        )
+        .route(
+            "/api/tenants/:tenant_code/reports/year-comparison",
+            get(get_year_comparison_report),
+        )
         .route(
             "/api/tenants/:tenant_code/business-years",
             get(list_business_years).post(create_business_year),
@@ -479,6 +493,71 @@ async fn list_business_years(
         .await
         .map_err(map_anyhow)?;
     Ok(Json(years))
+}
+
+async fn get_dashboard(
+    State(state): State<AppState>,
+    Path(tenant_code): Path<String>,
+) -> AppResult<Json<crate::domain::DashboardSummary>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let dashboard = tenant::dashboard_summary(&state.pool, &tenant_ref)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(dashboard))
+}
+
+async fn list_audit_logs(
+    State(state): State<AppState>,
+    Path(tenant_code): Path<String>,
+) -> AppResult<Json<Vec<crate::domain::AuditLog>>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let logs = tenant::list_audit_logs(&state.pool, &tenant_ref, 100)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(logs))
+}
+
+async fn list_notifications(
+    State(state): State<AppState>,
+    Path(tenant_code): Path<String>,
+) -> AppResult<Json<Vec<crate::domain::Notification>>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let notifications = tenant::list_notifications(&state.pool, &tenant_ref)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(notifications))
+}
+
+async fn get_tax_burden_report(
+    State(state): State<AppState>,
+    Path(tenant_code): Path<String>,
+) -> AppResult<Json<Vec<crate::domain::TaxBurdenReportRow>>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let rows = tenant::tax_burden_report(&state.pool, &tenant_ref)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(rows))
+}
+
+async fn get_year_comparison_report(
+    State(state): State<AppState>,
+    Path(tenant_code): Path<String>,
+) -> AppResult<Json<Vec<crate::domain::YearComparisonReportRow>>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let rows = tenant::year_comparison_report(&state.pool, &tenant_ref)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(rows))
 }
 
 async fn update_business_year_status(

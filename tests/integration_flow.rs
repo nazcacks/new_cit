@@ -1,6 +1,7 @@
 use std::env;
 
 use axum::serve;
+use chrono::{Datelike, Duration, Utc};
 use cit_system::{db, queue, router, AppState, Config};
 use reqwest::{
     header::CONTENT_TYPE,
@@ -78,6 +79,21 @@ async fn api_flow_persists_to_postgres_generates_efiling_and_handles_dlq() {
     .await;
     let by_id = business_year["by_id"].as_i64().expect("by_id");
     assert_eq!(business_year["status"], "DRAFT");
+    let today = Utc::now().date_naive();
+    let due_end = today + Duration::days(20);
+    let due_year = post_json(
+        &client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years"),
+        json!({
+            "customer_id": customer_id,
+            "year_label": today.year() + 1,
+            "start_date": today.to_string(),
+            "end_date": due_end.to_string()
+        }),
+        StatusCode::CREATED,
+    )
+    .await;
+    assert_eq!(due_year["status"], "DRAFT");
 
     let auto_snapshot = get_json(
         &client,
@@ -245,6 +261,7 @@ async fn api_flow_persists_to_postgres_generates_efiling_and_handles_dlq() {
     assert_special_tax_adjustment_modules_work(&client, &base_url, &tenant_code, by_id).await;
     assert_form_versioning_module_works(&client, &base_url, &tenant_code, by_id).await;
     assert_business_year_workflow_works(&client, &base_url, &tenant_code, by_id).await;
+    assert_cross_cutting_ops_work(&client, &base_url, &tenant_code, by_id).await;
 
     let efile_precheck = get_json(
         &client,
@@ -1636,15 +1653,82 @@ async fn assert_business_year_workflow_works(
         .any(|diff| diff["field"] == "status"));
 }
 
+async fn assert_cross_cutting_ops_work(
+    client: &Client,
+    base_url: &str,
+    tenant_code: &str,
+    by_id: i64,
+) {
+    let dashboard = get_json(
+        client,
+        &format!("{base_url}/api/tenants/{tenant_code}/dashboard"),
+    )
+    .await;
+    assert!(
+        dashboard["business_year_count"]
+            .as_i64()
+            .unwrap_or_default()
+            >= 2
+    );
+    assert!(dashboard["due_soon_count"].as_i64().unwrap_or_default() >= 1);
+    assert!(
+        dashboard["unread_notifications"]
+            .as_i64()
+            .unwrap_or_default()
+            >= 1
+    );
+    assert!(dashboard["audit_log_count"].as_i64().unwrap_or_default() >= 1);
+
+    let notifications = get_json(
+        client,
+        &format!("{base_url}/api/tenants/{tenant_code}/notifications"),
+    )
+    .await;
+    assert!(notifications
+        .as_array()
+        .expect("notifications")
+        .iter()
+        .any(|row| row["title"] == "사업연도 마감 D-30"));
+
+    let audit_logs = get_json(
+        client,
+        &format!("{base_url}/api/tenants/{tenant_code}/audit-logs"),
+    )
+    .await;
+    assert!(audit_logs
+        .as_array()
+        .expect("audit logs")
+        .iter()
+        .any(|row| row["hash_current"].as_str().unwrap_or_default().len() == 32));
+
+    let burden = get_json(
+        client,
+        &format!("{base_url}/api/tenants/{tenant_code}/reports/tax-burden"),
+    )
+    .await;
+    assert!(burden
+        .as_array()
+        .expect("tax burden")
+        .iter()
+        .any(|row| row["by_id"] == by_id && row["total_tax_due"].as_i64().unwrap_or_default() > 0));
+
+    let comparison = get_json(
+        client,
+        &format!("{base_url}/api/tenants/{tenant_code}/reports/year-comparison"),
+    )
+    .await;
+    assert!(comparison.as_array().expect("comparison").len() >= 2);
+}
+
 fn assert_module_tree_matches_design(tree: &Value) {
     assert_eq!(tree["code"], "cit-system");
     assert_eq!(tree["display_name"], "CIT System");
 
     let modules = tree["children"].as_array().expect("module children");
-    assert_eq!(modules.len(), 9);
+    assert_eq!(modules.len(), 10);
     assert_eq!(
         modules.iter().map(child_count).sum::<usize>(),
-        50,
+        55,
         "detailed module count including law-versioning menus"
     );
 
@@ -1755,6 +1839,16 @@ fn assert_module_tree_matches_design(tree: &Value) {
             "8.1 홈택스 전자신고 레코드 파일 생성",
             "8.2 검증 및 오류 점검",
             "8.3 신고 이력 관리",
+        ],
+    );
+    assert_children(
+        module_by_code(modules, "reports"),
+        &[
+            "9.1 운영 대시보드",
+            "9.2 알림 센터",
+            "9.3 세부담 분석",
+            "9.4 연도 비교",
+            "9.5 감사 로그",
         ],
     );
 }

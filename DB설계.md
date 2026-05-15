@@ -1,5 +1,12 @@
 # 법인세 세무조정계산서 시스템 — DB 설계서
 
+## Phase 18 Cross-Cutting Ops DB Update (2026-05-15)
+
+- Tenant schema `audit_logs` now includes `event_date`, `prev_hash`, and `hash_current` for daily hash-chain audit integrity.
+- Tenant schema `notifications` stores in-app alerts such as business-year closing D-30 warnings.
+- Dashboard and report APIs aggregate from `customers`, `business_years`, `notifications`, `audit_logs`, `tax_adjustments`, and `reserves`.
+- Tenant/customer/work-scope access remains separated: customer target work scopes are stored on `customers.work_scopes`, while user grants are constrained to that customer scope.
+
 > **문서 버전**: v1.0
 > **작성일**: 2026-05-14
 > **작성자**: 강수 (Kang-Soo.Cho@kr.ey.com)

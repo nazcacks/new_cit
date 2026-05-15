@@ -391,3 +391,18 @@ Invoke-RestMethod -Method Post http://localhost:8080/api/tenants/demo/business-y
 Invoke-RestMethod http://localhost:8080/api/tenants/demo/business-years/1/workflow
 Invoke-RestMethod http://localhost:8080/api/tenants/demo/business-years/1/amendment-preview
 ```
+
+## Cross-Cutting Ops API (2026-05-15)
+
+- Added tenant-scoped dashboard, notification center, audit log, tax-burden report, and year-comparison report APIs.
+- `audit_logs` now keep `event_date`, `prev_hash`, and `hash_current` for daily hash-chain integrity.
+- Business-year D-30 notifications are generated automatically for non-filed business years.
+- The embedded UI adds a separated `9. Reports & Ops` module with dashboard, notifications, reports, and audit-log screens.
+
+```powershell
+Invoke-RestMethod http://localhost:8080/api/tenants/demo/dashboard
+Invoke-RestMethod http://localhost:8080/api/tenants/demo/notifications
+Invoke-RestMethod http://localhost:8080/api/tenants/demo/audit-logs
+Invoke-RestMethod http://localhost:8080/api/tenants/demo/reports/tax-burden
+Invoke-RestMethod http://localhost:8080/api/tenants/demo/reports/year-comparison
+```

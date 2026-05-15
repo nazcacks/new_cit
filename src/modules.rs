@@ -148,6 +148,21 @@ pub fn module_tree() -> Value {
                     submodule("efiling.history", "8.3", "신고 이력 관리", "/modules/efiling/history"),
                 ],
             ),
+            module(
+                "reports",
+                "9",
+                "분석/운영 모듈",
+                "Reports & Operations",
+                None,
+                "/modules/reports",
+                vec![
+                    submodule("reports.dashboard", "9.1", "운영 대시보드", "/modules/reports/dashboard"),
+                    submodule("reports.notifications", "9.2", "알림 센터", "/modules/reports/notifications"),
+                    submodule("reports.tax-burden", "9.3", "세부담 분석", "/modules/reports/tax-burden"),
+                    submodule("reports.year-comparison", "9.4", "연도 비교", "/modules/reports/year-comparison"),
+                    submodule("reports.audit-logs", "9.5", "감사 로그", "/modules/reports/audit-logs"),
+                ],
+            ),
         ]
     })
 }
