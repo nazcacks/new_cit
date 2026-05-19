@@ -1,13 +1,13 @@
 use axum::{
     body::Body,
-    extract::{Multipart, Path, Query, State},
+    extract::{Extension, Multipart, Path, Query, State},
     http::{
         header::AUTHORIZATION,
         header::{CONTENT_DISPOSITION, CONTENT_TYPE},
-        HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode,
+        HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode,
     },
     middleware::{self, Next},
-    routing::{get, post, put},
+    routing::{get, patch, post, put},
     Json, Router,
 };
 use serde::Deserialize;
@@ -18,40 +18,57 @@ use uuid::Uuid;
 use crate::{
     admin, auth,
     domain::{
-        AssetBasedAdjustmentRequest, CalculateAdjustmentRequest, CreateAccountMappingRequest,
-        CreateAdminUserRequest, CreateBusinessYearRequest, CreateCustomerRequest,
-        CreateFormRelationshipRequest, CreateFormVersionRequest, CreateIncomeAdjustmentRequest,
-        CreateLawAmendmentRequest, CreateTaxFormRequest, CreateTaxLawRequest,
-        CreateTaxLimitRequest, CreateTaxRateRequest, CreateTenantRequest,
-        CreateVehicleUsageLogRequest, EnqueueEfilingRequest, EnqueueJobRequest,
+        AssetBasedAdjustmentRequest, AuthUser, CalculateAdjustmentRequest,
+        CreateAccessDelegationRequest, CreateAccountMappingRequest,
+        CreateAdjustmentAttachmentRequest, CreateAdminUserRequest, CreateBusinessYearRequest,
+        CreateCustomerRequest, CreateFormRelationshipRequest, CreateFormVersionRequest,
+        CreateIncomeAdjustmentRequest, CreateLawAmendmentRequest, CreateTaxFormRequest,
+        CreateTaxLawRequest, CreateTaxLimitRequest, CreateTaxRateRequest, CreateTenantRequest,
+        CreateUserReportDefinitionRequest, CreateVehicleUsageLogRequest,
+        DismissValidationIssueRequest, EnqueueEfilingRequest, EnqueueJobRequest,
         EvaluationAdjustmentRequest, FormMigrationRequest, HealthResponse,
         LawVersioningImpactRequest, LoginRequest, ResolveFormVersionQuery,
         SpecialTaxAdjustmentRequest, TaxAmountAdjustmentRequest, TransactionBasedAdjustmentRequest,
-        UpdateAdminUserRequest, UpdateAdminUserStatusRequest, UpdateBusinessYearStatusRequest,
-        UpdateFormDataRequest, UpdateFormVersionStatusRequest, UpdateRolePermissionsRequest,
-        UpdateTaxLawStatusRequest,
+        UnlockBusinessYearRequest, UpdateAdminUserRequest, UpdateAdminUserStatusRequest,
+        UpdateBusinessYearStatusRequest, UpdateFormDataRequest, UpdateFormVersionStatusRequest,
+        UpdateMenuFunctionsRequest, UpdateMenuNodeRequest, UpdateNotificationRequest,
+        UpdateRoleMenuFunctionsRequest, UpdateRolePermissionsRequest, UpdateTaxLawStatusRequest,
+        WorkflowEventRequest,
     },
     efiling,
     error::{AppError, AppResult},
-    forms, modules, queue,
+    forms, menu, modules, permissions, queue, scheduler,
     state::AppState,
-    tax, tax_data, tenant, web,
+    tax, tax_data, tenant, validation_rules, web,
 };
 
 pub fn router(state: AppState) -> Router {
+    let cors = cors_layer(&state);
     Router::new()
         .route("/", get(web::index))
         .route("/app.css", get(web::app_css))
         .route("/app.js", get(web::app_js))
+        .route("/app/api.js", get(web::app_api_js))
+        .route("/app/context.js", get(web::app_context_js))
+        .route("/app/i18n.js", get(web::app_i18n_js))
+        .route("/app/components/grid.js", get(web::app_grid_js))
+        .route("/app/menu.js", get(web::app_menu_js))
+        .route("/app/router.js", get(web::app_router_js))
+        .route("/app/screens.js", get(web::app_screens_js))
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/api/auth/login", post(login))
         .route("/api/auth/me", get(me))
         .route("/api/auth/logout", post(logout))
         .route("/api/modules/tree", get(get_module_tree))
+        .route("/api/modules/legacy-tree", get(get_legacy_module_tree))
         .route(
             "/api/operations/launch-readiness",
             get(get_launch_readiness),
+        )
+        .route(
+            "/api/operations/scheduler/due-alerts/run",
+            post(run_due_alert_scheduler),
         )
         .route("/api/tenants", get(list_tenants).post(create_tenant))
         .route(
@@ -72,9 +89,28 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/admin/roles", get(list_roles))
         .route("/api/admin/role-permissions", get(list_role_permissions))
+        .route("/api/admin/function-codes", get(list_function_codes))
+        .route("/api/admin/menu-functions", get(list_menu_functions))
         .route(
             "/api/admin/roles/:role_code/permissions",
             put(replace_role_permissions),
+        )
+        .route(
+            "/api/admin/role-menu-functions",
+            get(list_role_menu_functions),
+        )
+        .route(
+            "/api/admin/roles/:role_code/menu-functions",
+            put(replace_role_menu_functions),
+        )
+        .route("/api/admin/menus", get(list_admin_menu_nodes))
+        .route(
+            "/api/admin/menus/:menu_key",
+            put(update_admin_menu_node),
+        )
+        .route(
+            "/api/admin/menus/:menu_key/functions",
+            put(replace_menu_functions),
         )
         .route(
             "/api/law-versioning/summary",
@@ -111,6 +147,10 @@ pub fn router(state: AppState) -> Router {
             "/api/form-versioning/relationships",
             get(list_form_relationships).post(create_form_relationship),
         )
+        .route(
+            "/api/form-versioning/cycle-check",
+            get(check_form_relationship_cycles),
+        )
         .route("/api/form-versioning/resolve", get(resolve_form_version))
         .route(
             "/api/form-versioning/migrations/dry-run",
@@ -131,8 +171,20 @@ pub fn router(state: AppState) -> Router {
         .route("/api/tenants/:tenant_code/dashboard", get(get_dashboard))
         .route("/api/tenants/:tenant_code/audit-logs", get(list_audit_logs))
         .route(
+            "/api/tenants/:tenant_code/audit-logs/verify",
+            get(verify_audit_chain),
+        )
+        .route(
+            "/api/tenants/:tenant_code/access-delegations",
+            get(list_access_delegations).post(create_access_delegation),
+        )
+        .route(
             "/api/tenants/:tenant_code/notifications",
             get(list_notifications),
+        )
+        .route(
+            "/api/tenants/:tenant_code/notifications/:notification_id",
+            patch(update_notification),
         )
         .route(
             "/api/tenants/:tenant_code/reports/tax-burden",
@@ -141,6 +193,34 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/tenants/:tenant_code/reports/year-comparison",
             get(get_year_comparison_report),
+        )
+        .route(
+            "/api/tenants/:tenant_code/reports/reserve-trend",
+            get(get_reserve_trend_report),
+        )
+        .route(
+            "/api/tenants/:tenant_code/reports/loss-expiry",
+            get(get_loss_expiry_report),
+        )
+        .route(
+            "/api/tenants/:tenant_code/reports/industry-statistics",
+            get(get_industry_statistics_report),
+        )
+        .route(
+            "/api/tenants/:tenant_code/reports/user-defined",
+            get(list_user_report_definitions).post(create_user_report_definition),
+        )
+        .route(
+            "/api/tenants/:tenant_code/reports/user-defined/:report_id/run",
+            get(run_user_report),
+        )
+        .route(
+            "/api/tenants/:tenant_code/validation/rules",
+            get(list_validation_rules),
+        )
+        .route(
+            "/api/tenants/:tenant_code/workflow/queue",
+            get(get_workflow_queue),
         )
         .route(
             "/api/tenants/:tenant_code/business-years",
@@ -155,8 +235,16 @@ pub fn router(state: AppState) -> Router {
             get(get_business_year_workflow),
         )
         .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/workflow/events",
+            post(create_workflow_event),
+        )
+        .route(
             "/api/tenants/:tenant_code/business-years/:by_id/amendment-preview",
             get(get_amendment_preview),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/unlock",
+            post(unlock_business_year),
         )
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/snapshot",
@@ -192,7 +280,15 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/tax-data/validation",
-            get(get_tax_data_validation),
+            get(get_tax_data_validation).post(get_tax_data_validation),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/validation/run",
+            post(run_validation),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/validation/issues/:issue_id/dismiss",
+            post(dismiss_validation_issue),
         )
         .route(
             "/api/tenants/:tenant_code/customers/:customer_id/account-mappings",
@@ -227,6 +323,14 @@ pub fn router(state: AppState) -> Router {
             get(list_special_tax_adjustment_items).post(calculate_special_tax_adjustment),
         )
         .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/adjustments/history",
+            get(list_adjustment_item_history),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/adjustments/items/:adjustment_item_id/attachments",
+            get(list_adjustment_item_attachments).post(create_adjustment_item_attachment),
+        )
+        .route(
             "/api/tenants/:tenant_code/business-years/:by_id/vehicle-usage-logs",
             get(list_vehicle_usage_logs).post(create_vehicle_usage_log),
         )
@@ -241,6 +345,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/forms/pdf-bundle/download",
             get(download_form_pdf_bundle),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/forms/print-history",
+            get(list_print_history),
         )
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/forms/:form_code",
@@ -273,10 +381,37 @@ pub fn router(state: AppState) -> Router {
         .route("/api/jobs", get(list_jobs).post(enqueue_job))
         .route("/api/jobs/:job_id", get(get_job))
         .route("/api/jobs/:job_id/retry", post(retry_job))
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .layer(middleware::from_fn(security_headers))
         .with_state(state)
+}
+
+fn cors_layer(state: &AppState) -> CorsLayer {
+    let origins = state
+        .config
+        .allowed_origins
+        .iter()
+        .filter_map(|origin| HeaderValue::from_str(origin).ok())
+        .collect::<Vec<_>>();
+
+    CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            AUTHORIZATION,
+            CONTENT_TYPE,
+            HeaderName::from_static("x-cit-otp"),
+            HeaderName::from_static("x-forwarded-for"),
+            HeaderName::from_static("x-real-ip"),
+        ])
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -319,6 +454,48 @@ async fn security_headers(request: Request<Body>, next: Next) -> axum::response:
     response
 }
 
+async fn require_auth(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    mut request: Request<Body>,
+    next: Next,
+) -> AppResult<Response<Body>> {
+    let path = request.uri().path();
+    if request.method() == Method::OPTIONS || is_public_path(path) {
+        return Ok(next.run(request).await);
+    }
+
+    let token = auth::parse_bearer_token(
+        headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+    )
+    .map_err(|error| AppError::Unauthorized(error.to_string()))?;
+    let session = auth::me(&state.pool, token)
+        .await
+        .map_err(|error| AppError::Unauthorized(format!("{error:#}")))?;
+    auth::enforce_ip_allowlist(
+        &state.pool,
+        session.user.tenant_id,
+        client_ip(&headers).as_deref(),
+    )
+    .await
+    .map_err(|error| AppError::Unauthorized(format!("{error:#}")))?;
+    request.extensions_mut().insert(session.user);
+
+    Ok(next.run(request).await)
+}
+
+fn is_public_path(path: &str) -> bool {
+    if path.starts_with("/app/") {
+        return true;
+    }
+    matches!(
+        path,
+        "/" | "/app.css" | "/app.js" | "/favicon.ico" | "/health" | "/ready" | "/api/auth/login"
+    )
+}
+
 async fn get_launch_readiness() -> Json<Value> {
     Json(json!({
         "phase": 20,
@@ -347,11 +524,20 @@ async fn get_launch_readiness() -> Json<Value> {
     }))
 }
 
+async fn run_due_alert_scheduler(State(state): State<AppState>) -> AppResult<Json<Value>> {
+    let result = scheduler::run_due_alerts(&state.pool)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(result))
+}
+
 async fn login(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(request): Json<LoginRequest>,
 ) -> AppResult<Json<crate::domain::LoginResponse>> {
-    match auth::login(&state.pool, request.clone()).await {
+    let ip = client_ip(&headers);
+    match auth::login(&state.pool, request.clone(), ip.as_deref()).await {
         Ok(response) => Ok(Json(response)),
         Err(error) => {
             let message = format!("{error:#}");
@@ -360,11 +546,40 @@ async fn login(
                     .await
                     .map_err(map_anyhow)?;
                 Err(AppError::Unauthorized(message))
+            } else if message.contains("2fa")
+                || message.contains("client IP")
+                || message.contains("allowlist")
+            {
+                Err(AppError::Unauthorized(message))
             } else {
                 Err(map_anyhow(error))
             }
         }
     }
+}
+
+fn client_ip(headers: &HeaderMap) -> Option<String> {
+    for name in [
+        "x-forwarded-for",
+        "x-real-ip",
+        "cf-connecting-ip",
+        "forwarded",
+    ] {
+        if let Some(value) = headers.get(name).and_then(|value| value.to_str().ok()) {
+            let first = value
+                .split(',')
+                .next()
+                .unwrap_or(value)
+                .trim()
+                .trim_start_matches("for=")
+                .trim_matches('"')
+                .trim_matches(['[', ']']);
+            if !first.is_empty() {
+                return Some(first.to_string());
+            }
+        }
+    }
+    Some("127.0.0.1".to_string())
 }
 
 async fn me(
@@ -408,6 +623,42 @@ async fn get_module_tree(
         .await
         .map_err(|error| AppError::Unauthorized(format!("{error:#}")))?;
     Ok(Json(modules::module_tree()))
+}
+
+async fn get_legacy_module_tree(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Json<serde_json::Value>> {
+    let token = auth::parse_bearer_token(
+        headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+    )
+    .map_err(|error| AppError::Unauthorized(error.to_string()))?;
+    auth::me(&state.pool, token)
+        .await
+        .map_err(|error| AppError::Unauthorized(format!("{error:#}")))?;
+    Ok(Json(modules::legacy_module_tree()))
+}
+
+async fn list_admin_menu_nodes(
+    State(state): State<AppState>,
+) -> AppResult<Json<Vec<crate::domain::MenuNodeRecord>>> {
+    let nodes = menu::list_menu_nodes(&state.pool)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(nodes))
+}
+
+async fn update_admin_menu_node(
+    State(state): State<AppState>,
+    Path(menu_key): Path<String>,
+    Json(request): Json<UpdateMenuNodeRequest>,
+) -> AppResult<Json<crate::domain::MenuNodeRecord>> {
+    let node = menu::update_menu_node(&state.pool, &menu_key, request)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(node))
 }
 
 async fn list_admin_users(
@@ -477,6 +728,49 @@ async fn list_role_permissions(
     Ok(Json(permissions))
 }
 
+async fn list_function_codes(State(state): State<AppState>) -> AppResult<Json<Vec<Value>>> {
+    let functions = permissions::list_function_codes(&state.pool)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(functions))
+}
+
+async fn list_menu_functions(State(state): State<AppState>) -> AppResult<Json<Vec<Value>>> {
+    let functions = permissions::list_menu_functions(&state.pool)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(functions))
+}
+
+async fn replace_menu_functions(
+    State(state): State<AppState>,
+    Path(menu_key): Path<String>,
+    Json(request): Json<UpdateMenuFunctionsRequest>,
+) -> AppResult<Json<Vec<Value>>> {
+    let functions = permissions::replace_menu_functions(&state.pool, &menu_key, request)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(functions))
+}
+
+async fn list_role_menu_functions(State(state): State<AppState>) -> AppResult<Json<Vec<Value>>> {
+    let grants = permissions::list_role_menu_functions(&state.pool)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(grants))
+}
+
+async fn replace_role_menu_functions(
+    State(state): State<AppState>,
+    Path(role_code): Path<String>,
+    Json(request): Json<UpdateRoleMenuFunctionsRequest>,
+) -> AppResult<Json<Vec<Value>>> {
+    let grants = permissions::replace_role_menu_functions(&state.pool, &role_code, request)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(grants))
+}
+
 async fn replace_role_permissions(
     State(state): State<AppState>,
     Path(role_code): Path<String>,
@@ -523,12 +817,13 @@ async fn create_customer(
 
 async fn list_customers(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path(tenant_code): Path<String>,
 ) -> AppResult<Json<Vec<crate::domain::Customer>>> {
     let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
         .await
         .map_err(map_anyhow)?;
-    let customers = tenant::list_customers(&state.pool, &tenant_ref)
+    let customers = permissions::filtered_customers(&state.pool, &tenant_ref, &user)
         .await
         .map_err(map_anyhow)?;
     Ok(Json(customers))
@@ -553,12 +848,13 @@ async fn create_business_year(
 
 async fn list_business_years(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path(tenant_code): Path<String>,
 ) -> AppResult<Json<Vec<crate::domain::BusinessYear>>> {
     let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
         .await
         .map_err(map_anyhow)?;
-    let years = tenant::list_business_years(&state.pool, &tenant_ref)
+    let years = permissions::filtered_business_years(&state.pool, &tenant_ref, &user)
         .await
         .map_err(map_anyhow)?;
     Ok(Json(years))
@@ -590,6 +886,46 @@ async fn list_audit_logs(
     Ok(Json(logs))
 }
 
+async fn verify_audit_chain(
+    State(state): State<AppState>,
+    Path(tenant_code): Path<String>,
+) -> AppResult<Json<Value>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let result = permissions::verify_audit_chain(&state.pool, &tenant_ref)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(result))
+}
+
+async fn list_access_delegations(
+    State(state): State<AppState>,
+    Path(tenant_code): Path<String>,
+) -> AppResult<Json<Vec<Value>>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let rows = permissions::list_access_delegations(&state.pool, &tenant_ref)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(rows))
+}
+
+async fn create_access_delegation(
+    State(state): State<AppState>,
+    Path(tenant_code): Path<String>,
+    Json(request): Json<CreateAccessDelegationRequest>,
+) -> AppResult<(StatusCode, Json<Value>)> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let row = permissions::create_access_delegation(&state.pool, &tenant_ref, request)
+        .await
+        .map_err(map_anyhow)?;
+    Ok((StatusCode::CREATED, Json(row)))
+}
+
 async fn list_notifications(
     State(state): State<AppState>,
     Path(tenant_code): Path<String>,
@@ -601,6 +937,21 @@ async fn list_notifications(
         .await
         .map_err(map_anyhow)?;
     Ok(Json(notifications))
+}
+
+async fn update_notification(
+    State(state): State<AppState>,
+    Path((tenant_code, notification_id)): Path<(String, i64)>,
+    Json(request): Json<UpdateNotificationRequest>,
+) -> AppResult<Json<crate::domain::Notification>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let notification =
+        tenant::update_notification(&state.pool, &tenant_ref, notification_id, request)
+            .await
+            .map_err(map_anyhow)?;
+    Ok(Json(notification))
 }
 
 async fn get_tax_burden_report(
@@ -624,6 +975,119 @@ async fn get_year_comparison_report(
         .await
         .map_err(map_anyhow)?;
     let rows = tenant::year_comparison_report(&state.pool, &tenant_ref)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(rows))
+}
+
+async fn get_reserve_trend_report(
+    State(state): State<AppState>,
+    Path(tenant_code): Path<String>,
+) -> AppResult<Json<Vec<crate::domain::ReserveTrendReportRow>>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let rows = tenant::reserve_trend_report(&state.pool, &tenant_ref)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(rows))
+}
+
+async fn get_loss_expiry_report(
+    State(state): State<AppState>,
+    Path(tenant_code): Path<String>,
+) -> AppResult<Json<Vec<Value>>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let rows = tenant::loss_expiry_report(&state.pool, &tenant_ref)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(rows))
+}
+
+async fn get_industry_statistics_report(
+    State(state): State<AppState>,
+    Path(tenant_code): Path<String>,
+) -> AppResult<Json<Vec<Value>>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let rows = tenant::industry_statistics_report(&state.pool, &tenant_ref)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(rows))
+}
+
+async fn list_user_report_definitions(
+    State(state): State<AppState>,
+    Path(tenant_code): Path<String>,
+) -> AppResult<Json<Vec<Value>>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let rows = tenant::list_user_report_definitions(&state.pool, &tenant_ref)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(rows))
+}
+
+async fn create_user_report_definition(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(tenant_code): Path<String>,
+    Json(request): Json<CreateUserReportDefinitionRequest>,
+) -> AppResult<(StatusCode, Json<Value>)> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let report =
+        tenant::create_user_report_definition(&state.pool, &tenant_ref, user.user_id, request)
+            .await
+            .map_err(map_anyhow)?;
+    Ok((StatusCode::CREATED, Json(report)))
+}
+
+async fn run_user_report(
+    State(state): State<AppState>,
+    Path((tenant_code, report_id)): Path<(String, i64)>,
+) -> AppResult<Json<Value>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let report = tenant::run_user_report(&state.pool, &tenant_ref, report_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(report))
+}
+
+async fn list_validation_rules(
+    State(state): State<AppState>,
+    Path(tenant_code): Path<String>,
+) -> AppResult<Json<Vec<crate::domain::ValidationRuleRecord>>> {
+    tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let rules = validation_rules::list_rules(&state.pool)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(rules))
+}
+
+#[derive(Deserialize)]
+struct WorkflowQueueQuery {
+    assignee: Option<String>,
+}
+
+async fn get_workflow_queue(
+    State(state): State<AppState>,
+    Path(tenant_code): Path<String>,
+    Query(query): Query<WorkflowQueueQuery>,
+) -> AppResult<Json<Vec<crate::domain::WorkflowQueueItem>>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let rows = tenant::workflow_queue(&state.pool, &tenant_ref, query.assignee.as_deref())
         .await
         .map_err(map_anyhow)?;
     Ok(Json(rows))
@@ -662,6 +1126,20 @@ async fn get_business_year_workflow(
     Ok(Json(workflow))
 }
 
+async fn create_workflow_event(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+    Json(request): Json<WorkflowEventRequest>,
+) -> AppResult<(StatusCode, Json<crate::domain::WorkflowEvent>)> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let event = tenant::append_workflow_event(&state.pool, &tenant_ref, by_id, request)
+        .await
+        .map_err(map_anyhow)?;
+    Ok((StatusCode::CREATED, Json(event)))
+}
+
 async fn get_amendment_preview(
     State(state): State<AppState>,
     Path((tenant_code, by_id)): Path<(String, i64)>,
@@ -673,6 +1151,20 @@ async fn get_amendment_preview(
         .await
         .map_err(map_anyhow)?;
     Ok(Json(preview))
+}
+
+async fn unlock_business_year(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+    Json(request): Json<UnlockBusinessYearRequest>,
+) -> AppResult<Json<crate::domain::BusinessYear>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let by = tenant::unlock_business_year(&state.pool, &tenant_ref, by_id, request)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(by))
 }
 
 async fn create_tax_law(
@@ -849,6 +1341,13 @@ async fn create_form_relationship(
         .await
         .map_err(map_anyhow)?;
     Ok((StatusCode::CREATED, Json(relationship)))
+}
+
+async fn check_form_relationship_cycles(State(state): State<AppState>) -> AppResult<Json<Value>> {
+    let result = forms::check_form_relationship_cycles(&state.pool)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(result))
 }
 
 async fn resolve_form_version(
@@ -1064,6 +1563,33 @@ async fn get_tax_data_validation(
         .await
         .map_err(map_anyhow)?;
     Ok(Json(validation))
+}
+
+async fn run_validation(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+) -> AppResult<Json<crate::domain::ValidationRunResult>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let result = validation_rules::run_validation(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(result))
+}
+
+async fn dismiss_validation_issue(
+    State(state): State<AppState>,
+    Path((tenant_code, _by_id, issue_id)): Path<(String, i64, i64)>,
+    Json(request): Json<DismissValidationIssueRequest>,
+) -> AppResult<Json<crate::domain::ValidationIssue>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let issue = validation_rules::dismiss_issue(&state.pool, &tenant_ref, issue_id, request)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(issue))
 }
 
 async fn list_account_mappings(
@@ -1312,6 +1838,59 @@ async fn list_special_tax_adjustment_items(
     Ok(Json(items))
 }
 
+#[derive(Deserialize)]
+struct AdjustmentHistoryQuery {
+    module_code: Option<String>,
+}
+
+async fn list_adjustment_item_history(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+    Query(query): Query<AdjustmentHistoryQuery>,
+) -> AppResult<Json<Vec<Value>>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let rows = tax::list_adjustment_item_history(
+        &state.pool,
+        &tenant_ref,
+        by_id,
+        query.module_code.as_deref(),
+    )
+    .await
+    .map_err(map_anyhow)?;
+    Ok(Json(rows))
+}
+
+async fn list_adjustment_item_attachments(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id, adjustment_item_id)): Path<(String, i64, i64)>,
+) -> AppResult<Json<Vec<Value>>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let rows =
+        tax::list_adjustment_item_attachments(&state.pool, &tenant_ref, by_id, adjustment_item_id)
+            .await
+            .map_err(map_anyhow)?;
+    Ok(Json(rows))
+}
+
+async fn create_adjustment_item_attachment(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id, adjustment_item_id)): Path<(String, i64, i64)>,
+    Json(mut request): Json<CreateAdjustmentAttachmentRequest>,
+) -> AppResult<(StatusCode, Json<Value>)> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    request.adjustment_item_id = adjustment_item_id;
+    let row = tax::create_adjustment_item_attachment(&state.pool, &tenant_ref, by_id, request)
+        .await
+        .map_err(map_anyhow)?;
+    Ok((StatusCode::CREATED, Json(row)))
+}
+
 async fn create_vehicle_usage_log(
     State(state): State<AppState>,
     Path((tenant_code, by_id)): Path<(String, i64)>,
@@ -1418,6 +1997,19 @@ async fn list_form_attachments(
     Ok(Json(attachments))
 }
 
+async fn list_print_history(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+) -> AppResult<Json<Vec<Value>>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let rows = tax::list_print_history(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(rows))
+}
+
 async fn download_form_pdf(
     State(state): State<AppState>,
     Path((tenant_code, by_id, form_code)): Path<(String, i64, String)>,
@@ -1470,12 +2062,22 @@ async fn download_form_pdf_bundle(
 
 async fn enqueue_efiling(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path((tenant_code, by_id)): Path<(String, i64)>,
+    headers: HeaderMap,
     Json(request): Json<EnqueueEfilingRequest>,
 ) -> AppResult<(StatusCode, Json<crate::domain::Job>)> {
     tenant::resolve_tenant(&state.pool, &tenant_code)
         .await
         .map_err(map_anyhow)?;
+    let otp = request.otp.as_deref().or_else(|| {
+        headers
+            .get("x-cit-otp")
+            .and_then(|value| value.to_str().ok())
+    });
+    auth::enforce_2fa_for_user(&state.pool, user.user_id, user.use_2fa, otp)
+        .await
+        .map_err(|error| AppError::Unauthorized(format!("{error:#}")))?;
     let payload = efiling::job_payload(&tenant_code, by_id);
     let job = queue::enqueue(
         &state.pool,
@@ -1607,9 +2209,14 @@ fn map_anyhow(error: anyhow::Error) -> AppError {
         AppError::not_found(message)
     } else if message.contains("invalid or expired session")
         || message.contains("missing authorization")
+        || message.contains("access denied")
     {
         AppError::Unauthorized(message)
-    } else if message.contains("duplicate key") || message.contains("unique constraint") {
+    } else if message.contains("duplicate key")
+        || message.contains("unique constraint")
+        || message.contains("blocked")
+        || message.contains("locked after FILED")
+    {
         AppError::Conflict(message)
     } else if message.contains("invalid")
         || message.contains("unsupported")

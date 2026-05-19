@@ -9,17 +9,17 @@ use crate::{
     domain::{
         AdjustmentItem, AssetBasedAdjustmentRequest, AssetBasedAdjustmentResult,
         CalculateAdjustmentRequest, CalculationResult, CapitalChange, CapitalChangeInput,
-        ConsolidatedEntityInput, ConsolidationEliminationInput, CreateIncomeAdjustmentRequest,
-        CreateLawAmendmentRequest, CreateTaxLawRequest, CreateTaxLimitRequest,
-        CreateTaxRateRequest, CreateVehicleUsageLogRequest, DonationCarryforward,
-        EvaluationAdjustmentRequest, EvaluationAdjustmentResult, ForeignIncomeInput,
-        FormAttachmentSummary, FormData, FormDataHistory, FormOutputFile, FormPreviewField,
-        FormPreviewResult, FormValidationIssue, IncomeAdjustmentItemInput, IncomeAdjustmentResult,
-        LawAmendmentHistory, LawSnapshot, LawVersioningImpactRequest, LossCarryforwardInput,
-        LossCarryforwardRecord, PenaltyTaxInput, ReserveRecord, RevenueBreakdownInput,
-        SpecialTaxAdjustmentRequest, SpecialTaxAdjustmentResult, TaxAdjustment,
-        TaxAmountAdjustmentRequest, TaxAmountAdjustmentResult, TaxCreditInput, TaxLawVersion,
-        TaxLimit, TaxRate, TenantRef, TransactionBasedAdjustmentRequest,
+        ConsolidatedEntityInput, ConsolidationEliminationInput, CreateAdjustmentAttachmentRequest,
+        CreateIncomeAdjustmentRequest, CreateLawAmendmentRequest, CreateTaxLawRequest,
+        CreateTaxLimitRequest, CreateTaxRateRequest, CreateVehicleUsageLogRequest,
+        DonationCarryforward, EvaluationAdjustmentRequest, EvaluationAdjustmentResult,
+        ForeignIncomeInput, FormAttachmentSummary, FormData, FormDataHistory, FormOutputFile,
+        FormPreviewField, FormPreviewResult, FormValidationIssue, IncomeAdjustmentItemInput,
+        IncomeAdjustmentResult, LawAmendmentHistory, LawSnapshot, LawVersioningImpactRequest,
+        LossCarryforwardInput, LossCarryforwardRecord, PenaltyTaxInput, ReserveRecord,
+        RevenueBreakdownInput, SpecialTaxAdjustmentRequest, SpecialTaxAdjustmentResult,
+        TaxAdjustment, TaxAmountAdjustmentRequest, TaxAmountAdjustmentResult, TaxCreditInput,
+        TaxLawVersion, TaxLimit, TaxRate, TenantRef, TransactionBasedAdjustmentRequest,
         TransactionBasedAdjustmentResult, UpdateFormDataRequest, UpdateTaxLawStatusRequest,
         ValuationPositionInput, VehicleUsageLog,
     },
@@ -459,7 +459,15 @@ pub async fn ensure_law_snapshot(
         WHERE status IN ('APPROVED', 'ACTIVE')
           AND effective_from <= $1
           AND (effective_to IS NULL OR effective_to >= $2)
-        ORDER BY effective_from DESC, law_version_id DESC
+        ORDER BY
+          EXISTS (
+              SELECT 1
+              FROM tax_rates r
+              WHERE r.law_version_id = tax_law_versions.law_version_id
+                AND r.item_code = 'CORPORATE_TAX'
+          ) DESC,
+          effective_from DESC,
+          law_version_id DESC
         LIMIT 1
         "#,
     )
@@ -664,6 +672,7 @@ pub async fn calculate_income_adjustment(
     by_id: i64,
     request: CreateIncomeAdjustmentRequest,
 ) -> Result<IncomeAdjustmentResult> {
+    tenant::ensure_business_year_editable(pool, tenant, by_id, "adjustment").await?;
     let by = tenant::get_business_year(pool, tenant, by_id).await?;
     let snapshot = ensure_law_snapshot(pool, tenant, by_id).await?;
     let accounting_income = match request.accounting_income {
@@ -813,6 +822,7 @@ pub async fn calculate_asset_based_adjustment(
     module_code: &str,
     request: AssetBasedAdjustmentRequest,
 ) -> Result<AssetBasedAdjustmentResult> {
+    tenant::ensure_business_year_editable(pool, tenant, by_id, "adjustment").await?;
     let module_code = normalize_asset_module(module_code)?;
     let by = tenant::get_business_year(pool, tenant, by_id).await?;
     let snapshot = ensure_law_snapshot(pool, tenant, by_id).await?;
@@ -911,6 +921,7 @@ pub async fn calculate_transaction_based_adjustment(
     module_code: &str,
     request: TransactionBasedAdjustmentRequest,
 ) -> Result<TransactionBasedAdjustmentResult> {
+    tenant::ensure_business_year_editable(pool, tenant, by_id, "adjustment").await?;
     let by = tenant::get_business_year(pool, tenant, by_id).await?;
     let snapshot = ensure_law_snapshot(pool, tenant, by_id).await?;
     let module_code = normalize_transaction_module(module_code)?;
@@ -1052,6 +1063,7 @@ pub async fn calculate_evaluation_adjustment(
     module_code: &str,
     request: EvaluationAdjustmentRequest,
 ) -> Result<EvaluationAdjustmentResult> {
+    tenant::ensure_business_year_editable(pool, tenant, by_id, "adjustment").await?;
     let by = tenant::get_business_year(pool, tenant, by_id).await?;
     let snapshot = ensure_law_snapshot(pool, tenant, by_id).await?;
     let module_code = normalize_evaluation_module(module_code)?;
@@ -1174,6 +1186,7 @@ pub async fn calculate_tax_amount_adjustment(
     module_code: &str,
     request: TaxAmountAdjustmentRequest,
 ) -> Result<TaxAmountAdjustmentResult> {
+    tenant::ensure_business_year_editable(pool, tenant, by_id, "adjustment").await?;
     let by = tenant::get_business_year(pool, tenant, by_id).await?;
     let snapshot = ensure_law_snapshot(pool, tenant, by_id).await?;
     let rates =
@@ -1286,6 +1299,7 @@ pub async fn calculate_special_tax_adjustment(
     module_code: &str,
     request: SpecialTaxAdjustmentRequest,
 ) -> Result<SpecialTaxAdjustmentResult> {
+    tenant::ensure_business_year_editable(pool, tenant, by_id, "adjustment").await?;
     let by = tenant::get_business_year(pool, tenant, by_id).await?;
     let snapshot = ensure_law_snapshot(pool, tenant, by_id).await?;
     let rates =
@@ -1381,6 +1395,7 @@ pub async fn calculate_adjustments(
     by_id: i64,
     request: CalculateAdjustmentRequest,
 ) -> Result<CalculationResult> {
+    tenant::ensure_business_year_editable(pool, tenant, by_id, "adjustment").await?;
     let by = tenant::get_business_year(pool, tenant, by_id).await?;
     let snapshot = ensure_law_snapshot(pool, tenant, by_id).await?;
     let rates =
@@ -2822,6 +2837,7 @@ async fn resolve_accounting_income(pool: &PgPool, tenant: &TenantRef, by_id: i64
 
 async fn clear_income_adjustment(pool: &PgPool, tenant: &TenantRef, by_id: i64) -> Result<()> {
     let schema = quote_ident(&tenant.schema_name)?;
+    archive_adjustment_items(pool, tenant, by_id, "B1", "RECALCULATE_CLEAR").await?;
     let reserve_sql =
         format!("DELETE FROM {schema}.reserves WHERE by_id = $1 AND source_module = 'B1'");
     sqlx::query(&reserve_sql).bind(by_id).execute(pool).await?;
@@ -2846,6 +2862,7 @@ async fn clear_module_adjustment(
     module_code: &str,
 ) -> Result<()> {
     let schema = quote_ident(&tenant.schema_name)?;
+    archive_adjustment_items(pool, tenant, by_id, module_code, "RECALCULATE_CLEAR").await?;
     let reserve_sql =
         format!("DELETE FROM {schema}.reserves WHERE by_id = $1 AND source_module = $2");
     sqlx::query(&reserve_sql)
@@ -3946,7 +3963,7 @@ async fn insert_adjustment_item(
                   metadata, created_at
         "#
     );
-    sqlx::query_as::<_, AdjustmentItem>(&sql)
+    let saved = sqlx::query_as::<_, AdjustmentItem>(&sql)
         .bind(by_id)
         .bind(adjustment_id)
         .bind(&item.section)
@@ -3960,7 +3977,97 @@ async fn insert_adjustment_item(
         .bind(&item.metadata)
         .fetch_one(pool)
         .await
-        .context("failed to insert B-1 adjustment item")
+        .context("failed to insert B-1 adjustment item")?;
+    record_adjustment_item_history(
+        pool,
+        tenant,
+        AdjustmentItemHistory {
+            adjustment_item_id: saved.adjustment_item_id,
+            by_id,
+            source_module,
+            action: "CREATE",
+            old_data: None,
+            new_data: Some(json!(&saved)),
+            changed_by: "system",
+        },
+    )
+    .await?;
+    Ok(saved)
+}
+
+async fn archive_adjustment_items(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    source_module: &str,
+    action: &str,
+) -> Result<()> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        INSERT INTO {schema}.adjustment_items_history (
+            adjustment_item_id, by_id, source_module, action, old_data, changed_by
+        )
+        SELECT adjustment_item_id, by_id, source_module, $3, to_jsonb(item), 'system'
+        FROM {schema}.adjustment_items item
+        WHERE by_id = $1 AND source_module = $2
+        "#
+    );
+    sqlx::query(&sql)
+        .bind(by_id)
+        .bind(source_module)
+        .bind(action)
+        .execute(pool)
+        .await
+        .context("failed to archive adjustment item history")?;
+    Ok(())
+}
+
+struct AdjustmentItemHistory<'a> {
+    adjustment_item_id: i64,
+    by_id: i64,
+    source_module: &'a str,
+    action: &'a str,
+    old_data: Option<Value>,
+    new_data: Option<Value>,
+    changed_by: &'a str,
+}
+
+async fn record_adjustment_item_history(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    history: AdjustmentItemHistory<'_>,
+) -> Result<()> {
+    let AdjustmentItemHistory {
+        adjustment_item_id,
+        by_id,
+        source_module,
+        action,
+        old_data,
+        new_data,
+        changed_by,
+    } = history;
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        INSERT INTO {schema}.adjustment_items_history (
+            adjustment_item_id, by_id, source_module, action, old_data, new_data, changed_by
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        "#
+    );
+    sqlx::query(&sql)
+        .bind(adjustment_item_id)
+        .bind(by_id)
+        .bind(source_module)
+        .bind(action)
+        .bind(old_data)
+        .bind(new_data)
+        .bind(changed_by)
+        .execute(pool)
+        .await
+        .context("failed to insert adjustment item history")?;
+    Ok(())
 }
 
 async fn insert_reserve(
@@ -4161,6 +4268,133 @@ pub async fn list_adjustment_items_by_module(
         .context("failed to list asset based adjustment items")
 }
 
+pub async fn list_adjustment_item_history(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    module_code: Option<&str>,
+) -> Result<Vec<Value>> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let module_code = module_code
+        .map(normalize_any_adjustment_module)
+        .transpose()?;
+    let sql = format!(
+        r#"
+        SELECT history_id, adjustment_item_id, by_id, source_module, action,
+               old_data, new_data, changed_by, changed_at
+        FROM {schema}.adjustment_items_history
+        WHERE by_id = $1
+          AND ($2::TEXT IS NULL OR source_module = $2)
+        ORDER BY changed_at DESC, history_id DESC
+        LIMIT 300
+        "#
+    );
+    let rows = sqlx::query(&sql)
+        .bind(by_id)
+        .bind(module_code)
+        .fetch_all(pool)
+        .await
+        .context("failed to list adjustment item history")?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            json!({
+                "history_id": row.get::<i64, _>("history_id"),
+                "adjustment_item_id": row.get::<Option<i64>, _>("adjustment_item_id"),
+                "by_id": row.get::<i64, _>("by_id"),
+                "source_module": row.get::<String, _>("source_module"),
+                "action": row.get::<String, _>("action"),
+                "old_data": row.get::<Option<Value>, _>("old_data"),
+                "new_data": row.get::<Option<Value>, _>("new_data"),
+                "changed_by": row.get::<String, _>("changed_by"),
+                "changed_at": row.get::<chrono::DateTime<chrono::Utc>, _>("changed_at")
+            })
+        })
+        .collect())
+}
+
+pub async fn create_adjustment_item_attachment(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    request: CreateAdjustmentAttachmentRequest,
+) -> Result<Value> {
+    tenant::ensure_business_year_editable(pool, tenant, by_id, "adjustment attachments").await?;
+    if request.file_name.trim().is_empty() {
+        return Err(anyhow!("invalid attachment file_name"));
+    }
+    let schema = quote_ident(&tenant.schema_name)?;
+    sqlx::query_scalar::<_, i64>(&format!(
+        "SELECT adjustment_item_id FROM {schema}.adjustment_items WHERE by_id = $1 AND adjustment_item_id = $2"
+    ))
+    .bind(by_id)
+    .bind(request.adjustment_item_id)
+    .fetch_one(pool)
+    .await
+    .context("adjustment item not found")?;
+    let sql = format!(
+        r#"
+        INSERT INTO {schema}.adjustment_item_attachments (
+            adjustment_item_id, by_id, file_name, content_type, storage_url, memo, uploaded_by
+        )
+        VALUES ($1, $2, $3, COALESCE($4, 'application/octet-stream'), $5, $6, COALESCE($7, 'system'))
+        RETURNING attachment_id, adjustment_item_id, by_id, file_name, content_type,
+                  storage_url, memo, uploaded_by, created_at
+        "#
+    );
+    let row = sqlx::query(&sql)
+        .bind(request.adjustment_item_id)
+        .bind(by_id)
+        .bind(request.file_name.trim())
+        .bind(request.content_type)
+        .bind(request.storage_url)
+        .bind(request.memo)
+        .bind(request.uploaded_by)
+        .fetch_one(pool)
+        .await
+        .context("failed to create adjustment item attachment")?;
+    Ok(attachment_json(row))
+}
+
+pub async fn list_adjustment_item_attachments(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    adjustment_item_id: i64,
+) -> Result<Vec<Value>> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        SELECT attachment_id, adjustment_item_id, by_id, file_name, content_type,
+               storage_url, memo, uploaded_by, created_at
+        FROM {schema}.adjustment_item_attachments
+        WHERE by_id = $1 AND adjustment_item_id = $2
+        ORDER BY created_at DESC, attachment_id DESC
+        "#
+    );
+    let rows = sqlx::query(&sql)
+        .bind(by_id)
+        .bind(adjustment_item_id)
+        .fetch_all(pool)
+        .await
+        .context("failed to list adjustment item attachments")?;
+    Ok(rows.into_iter().map(attachment_json).collect())
+}
+
+fn attachment_json(row: sqlx::postgres::PgRow) -> Value {
+    json!({
+        "attachment_id": row.get::<i64, _>("attachment_id"),
+        "adjustment_item_id": row.get::<i64, _>("adjustment_item_id"),
+        "by_id": row.get::<i64, _>("by_id"),
+        "file_name": row.get::<String, _>("file_name"),
+        "content_type": row.get::<String, _>("content_type"),
+        "storage_url": row.get::<Option<String>, _>("storage_url"),
+        "memo": row.get::<Option<String>, _>("memo"),
+        "uploaded_by": row.get::<String, _>("uploaded_by"),
+        "created_at": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+    })
+}
+
 pub async fn list_reserves(
     pool: &PgPool,
     tenant: &TenantRef,
@@ -4189,6 +4423,7 @@ pub async fn create_vehicle_usage_log(
     by_id: i64,
     request: CreateVehicleUsageLogRequest,
 ) -> Result<VehicleUsageLog> {
+    tenant::ensure_business_year_editable(pool, tenant, by_id, "vehicle usage").await?;
     if request.total_distance_km < 0.0 || request.business_distance_km < 0.0 {
         return Err(anyhow!("invalid vehicle usage distance"));
     }
@@ -4258,6 +4493,7 @@ pub async fn generate_form(
     by_id: i64,
     form_code: &str,
 ) -> Result<FormData> {
+    tenant::ensure_business_year_editable(pool, tenant, by_id, "forms").await?;
     let by = tenant::get_business_year(pool, tenant, by_id).await?;
     let snapshot = ensure_law_snapshot(pool, tenant, by_id).await?;
     let form_version_id = sqlx::query_scalar::<_, i64>(
@@ -4369,6 +4605,7 @@ pub async fn update_form_data(
     form_code: &str,
     request: UpdateFormDataRequest,
 ) -> Result<FormData> {
+    tenant::ensure_business_year_editable(pool, tenant, by_id, "forms").await?;
     let current = match load_form_optional(pool, tenant, by_id, form_code).await? {
         Some(form) => form,
         None => generate_form(pool, tenant, by_id, form_code).await?,
@@ -4501,6 +4738,8 @@ pub async fn list_form_attachments(
         ("FORM15", "소득금액조정명세서"),
         ("FORM22", "기부금 조정명세서"),
     ];
+    let _ = forms;
+    let forms = form_attachment_catalog();
     let mut summaries = Vec::with_capacity(forms.len());
     for (form_code, form_name) in forms {
         let form = load_form_optional(pool, tenant, by_id, form_code).await?;
@@ -4535,11 +4774,13 @@ pub async fn generate_form_pdf(
     by_id: i64,
     form_code: &str,
 ) -> Result<FormOutputFile> {
+    let by = tenant::get_business_year(pool, tenant, by_id).await?;
     let preview = preview_form(pool, tenant, by_id, form_code).await?;
-    let watermark = if preview.form.status == "APPROVED" {
-        "APPROVED"
-    } else {
-        "DRAFT"
+    let watermark = match by.status.as_str() {
+        "FILED" => "FILED",
+        "APPROVED" => "APPROVED",
+        "AMENDED" => "AMENDED",
+        _ => "DRAFT",
     };
     let title = format!("CIT {form_code} {}", preview.form.form_code);
     let mut lines = vec![
@@ -4547,6 +4788,7 @@ pub async fn generate_form_pdf(
         format!("Business year id: {by_id}"),
         format!("Status: {}", preview.form.status),
         format!("Watermark: {watermark}"),
+        format!("Seal: CIT-{watermark}-{}", tenant.tenant_code),
     ];
     for field in &preview.fields {
         lines.push(format!(
@@ -4566,11 +4808,25 @@ pub async fn generate_form_pdf(
         }
     }
     let contents = render_simple_pdf(&title, &lines, watermark);
-    Ok(FormOutputFile {
+    let output = FormOutputFile {
         file_name: format!("{}_{}_{}.pdf", tenant.tenant_code, by_id, form_code),
         content_type: "application/pdf".to_string(),
         contents,
-    })
+    };
+    record_print_history(
+        pool,
+        tenant,
+        PrintHistoryEntry {
+            by_id,
+            form_code: Some(form_code),
+            file_name: &output.file_name,
+            content_type: &output.content_type,
+            watermark,
+            metadata: json!({ "form_status": preview.form.status }),
+        },
+    )
+    .await?;
+    Ok(output)
 }
 
 pub async fn generate_form_pdf_bundle(
@@ -4583,7 +4839,7 @@ pub async fn generate_form_pdf_bundle(
         let mut writer = zip::ZipWriter::new(&mut cursor);
         let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated);
-        for form_code in ["FORM3", "FORM15", "FORM22"] {
+        for (form_code, _) in form_attachment_catalog() {
             let file = generate_form_pdf(pool, tenant, by_id, form_code).await?;
             writer
                 .start_file(file.file_name, options)
@@ -4594,11 +4850,135 @@ pub async fn generate_form_pdf_bundle(
         }
         writer.finish().context("failed to finalize pdf bundle")?;
     }
-    Ok(FormOutputFile {
+    let output = FormOutputFile {
         file_name: format!("{}_{}_forms.zip", tenant.tenant_code, by_id),
         content_type: "application/zip".to_string(),
         contents: cursor.into_inner(),
+    };
+    let by = tenant::get_business_year(pool, tenant, by_id).await?;
+    let watermark = match by.status.as_str() {
+        "FILED" => "FILED",
+        "APPROVED" => "APPROVED",
+        "AMENDED" => "AMENDED",
+        _ => "DRAFT",
+    };
+    record_print_history(
+        pool,
+        tenant,
+        PrintHistoryEntry {
+            by_id,
+            form_code: None,
+            file_name: &output.file_name,
+            content_type: &output.content_type,
+            watermark,
+            metadata: json!({ "bundle": true }),
+        },
+    )
+    .await?;
+    Ok(output)
+}
+
+pub async fn list_print_history(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+) -> Result<Vec<Value>> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        SELECT print_id, by_id, form_code, file_name, content_type, watermark,
+               status, printed_by, metadata, created_at
+        FROM {schema}.print_history
+        WHERE by_id = $1
+        ORDER BY created_at DESC, print_id DESC
+        LIMIT 200
+        "#
+    );
+    let rows = sqlx::query(&sql)
+        .bind(by_id)
+        .fetch_all(pool)
+        .await
+        .context("failed to list print history")?;
+    Ok(rows.into_iter().map(print_history_json).collect())
+}
+
+struct PrintHistoryEntry<'a> {
+    by_id: i64,
+    form_code: Option<&'a str>,
+    file_name: &'a str,
+    content_type: &'a str,
+    watermark: &'a str,
+    metadata: Value,
+}
+
+async fn record_print_history(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    entry: PrintHistoryEntry<'_>,
+) -> Result<()> {
+    let PrintHistoryEntry {
+        by_id,
+        form_code,
+        file_name,
+        content_type,
+        watermark,
+        metadata,
+    } = entry;
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        INSERT INTO {schema}.print_history (
+            by_id, form_code, file_name, content_type, watermark, metadata
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+        "#
+    );
+    sqlx::query(&sql)
+        .bind(by_id)
+        .bind(form_code)
+        .bind(file_name)
+        .bind(content_type)
+        .bind(watermark)
+        .bind(metadata)
+        .execute(pool)
+        .await
+        .context("failed to record print history")?;
+    Ok(())
+}
+
+fn print_history_json(row: sqlx::postgres::PgRow) -> Value {
+    json!({
+        "print_id": row.get::<i64, _>("print_id"),
+        "by_id": row.get::<i64, _>("by_id"),
+        "form_code": row.get::<Option<String>, _>("form_code"),
+        "file_name": row.get::<String, _>("file_name"),
+        "content_type": row.get::<String, _>("content_type"),
+        "watermark": row.get::<String, _>("watermark"),
+        "status": row.get::<String, _>("status"),
+        "printed_by": row.get::<String, _>("printed_by"),
+        "metadata": row.get::<Value, _>("metadata"),
+        "created_at": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at")
     })
+}
+
+fn form_attachment_catalog() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("FORM3", "Corporate tax base and tax adjustment"),
+        ("FORM15", "Income adjustment statement"),
+        ("FORM22", "Donation adjustment statement"),
+        ("FORM32", "Reserve rollforward statement"),
+        ("FORM50", "E-filing summary statement"),
+        ("ATT01", "Financial statement attachment"),
+        ("ATT02", "Asset register attachment"),
+        ("ATT03", "Transaction detail attachment"),
+        ("ATT04", "Vehicle usage attachment"),
+        ("ATT05", "Workflow approval attachment"),
+        ("ATT06", "Validation result attachment"),
+        ("ATT07", "Tax credit attachment"),
+        ("ATT08", "Loss carryforward attachment"),
+        ("ATT09", "Foreign income attachment"),
+        ("ATT10", "Consolidated tax attachment"),
+    ]
 }
 
 fn form_total_amount(data_json: &Value) -> i64 {
@@ -4736,6 +5116,17 @@ fn summarize_adjustments(adjustments: &[TaxAdjustment]) -> Value {
 
 fn build_form_payload(form_code: &str, summary: &Value, snapshot_id: i64) -> Result<Value> {
     let get = |key: &str| summary.get(key).and_then(Value::as_i64).unwrap_or(0);
+    let donations = summary
+        .get("details")
+        .and_then(|value| value.get("donations"))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let donation_number = |key: &str| {
+        donations
+            .get(key)
+            .and_then(Value::as_i64)
+            .unwrap_or_default()
+    };
     let mut payload = match form_code {
         "FORM3" => json!({
             "snapshot_id": snapshot_id,
@@ -4760,8 +5151,42 @@ fn build_form_payload(form_code: &str, summary: &Value, snapshot_id: i64) -> Res
                 .cloned()
                 .unwrap_or_else(|| json!({}))
         }),
+        "FORM32" => json!({
+            "snapshot_id": snapshot_id,
+            "taxable_income": get("TAXABLE_INCOME"),
+            "addbacks": get("ADDBACKS"),
+            "deductions": get("DEDUCTIONS"),
+            "reserve_basis": get("ADDBACKS") - get("DEDUCTIONS")
+        }),
+        "FORM50" => json!({
+            "snapshot_id": snapshot_id,
+            "taxable_income": get("TAXABLE_INCOME"),
+            "corporate_tax": get("CORPORATE_TAX"),
+            "local_income_tax": get("LOCAL_INCOME_TAX"),
+            "total_tax_due": get("TOTAL_TAX_DUE"),
+            "efile_ready": get("TOTAL_TAX_DUE") > 0
+        }),
+        code if code.starts_with("ATT") => json!({
+            "snapshot_id": snapshot_id,
+            "attachment_code": code,
+            "taxable_income": get("TAXABLE_INCOME"),
+            "total_tax_due": get("TOTAL_TAX_DUE"),
+            "amount": get("TOTAL_TAX_DUE").max(get("TAXABLE_INCOME"))
+        }),
         _ => return Err(anyhow!("unsupported form code {form_code}")),
     };
+    if form_code == "FORM22" {
+        set_form_field(
+            &mut payload,
+            "deductible_donations",
+            json!(donation_number("deductible")),
+        )?;
+        set_form_field(
+            &mut payload,
+            "non_deductible_donations",
+            json!(donation_number("non_deductible")),
+        )?;
+    }
     if let Some(object) = payload.as_object().cloned() {
         for field in object.keys().filter(|field| *field != "snapshot_id") {
             set_form_field_meta(
@@ -4865,7 +5290,7 @@ async fn apply_form_relationships(
             .unwrap_or("copy_latest")
             .to_ascii_uppercase();
         match operation.as_str() {
-            "ADD" => {
+            "ADD" | "SUM" | "SUBTOTAL" => {
                 let current = data_json
                     .get(&target_field)
                     .and_then(Value::as_i64)
@@ -4875,6 +5300,26 @@ async fn apply_form_relationships(
             }
             "COPY" | "COPY_LATEST" => {
                 set_form_field(data_json, &target_field, source_value)?;
+            }
+            "NULL_AS_ZERO" => {
+                set_form_field(
+                    data_json,
+                    &target_field,
+                    json!(source_value.as_i64().unwrap_or(0)),
+                )?;
+            }
+            "ROUND" => {
+                let scale = rule_json.get("scale").and_then(Value::as_i64).unwrap_or(0);
+                let value = source_value
+                    .as_f64()
+                    .or_else(|| source_value.as_i64().map(|value| value as f64))
+                    .unwrap_or(0.0);
+                let factor = 10_f64.powi(scale.clamp(0, 6) as i32);
+                set_form_field(
+                    data_json,
+                    &target_field,
+                    json!((value * factor).round() / factor),
+                )?;
             }
             _ => continue,
         }

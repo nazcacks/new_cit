@@ -106,9 +106,10 @@ pub async fn create_user(
     let row = sqlx::query(
         r#"
         INSERT INTO users (
-            tenant_id, login_id, password_hash, user_name, email, phone, use_2fa, status, pwd_changed_at
+            tenant_id, login_id, password_hash, user_name, email, phone,
+            use_2fa, totp_secret, status, pwd_changed_at
         )
-        VALUES ($1, $2, crypt($3, gen_salt('bf')), $4, $5, $6, COALESCE($7, TRUE), $8, NOW())
+        VALUES ($1, $2, crypt($3, gen_salt('bf')), $4, $5, $6, COALESCE($7, TRUE), $8, $9, NOW())
         RETURNING user_id
         "#,
     )
@@ -119,6 +120,7 @@ pub async fn create_user(
     .bind(request.email)
     .bind(request.phone)
     .bind(request.use_2fa)
+    .bind(request.totp_secret)
     .bind(status)
     .fetch_one(pool)
     .await
@@ -159,7 +161,8 @@ pub async fn update_user(
         SET user_name = COALESCE($3, user_name),
             email = COALESCE($4, email),
             phone = COALESCE($5, phone),
-            use_2fa = COALESCE($6, use_2fa)
+            use_2fa = COALESCE($6, use_2fa),
+            totp_secret = COALESCE($7, totp_secret)
         WHERE tenant_id = $1 AND login_id = $2
         "#,
     )
@@ -169,6 +172,7 @@ pub async fn update_user(
     .bind(request.email)
     .bind(request.phone)
     .bind(request.use_2fa)
+    .bind(request.totp_secret)
     .execute(pool)
     .await
     .context("failed to update admin user")?;
@@ -204,7 +208,11 @@ pub async fn update_user_status(
         r#"
         UPDATE users
         SET status = COALESCE($3, status),
-            locked = COALESCE($4, locked)
+            locked = COALESCE($4, locked),
+            pwd_fail_count = CASE
+                WHEN COALESCE($4, locked) = FALSE OR COALESCE($3, status) = 'ACTIVE' THEN 0
+                ELSE pwd_fail_count
+            END
         WHERE tenant_id = $1 AND login_id = $2
         "#,
     )

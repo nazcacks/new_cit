@@ -2,7 +2,7 @@
 name = "cit-system"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Corporate Income Tax adjustment service with PostgreSQL persistence and e-filing jobs"
 license = "UNLICENSED"
 
@@ -13,6 +13,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "cit-system"
 path = "src/main.rs"
+
+[[bin]]
+name = "seed-demo"
+path = "src/bin/seed_demo.rs"
 
 [dependencies]
 anyhow = "1"

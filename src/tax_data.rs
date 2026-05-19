@@ -16,6 +16,7 @@ use crate::{
         ImportBatch, ImportError, TaxDataImportResponse, TaxDataValidationSummary, TenantRef,
         TransactionRecord,
     },
+    tenant as tenant_service,
 };
 
 #[derive(Debug, Clone)]
@@ -99,6 +100,7 @@ pub async fn import_tax_data(
     file_name: Option<String>,
     bytes: &[u8],
 ) -> Result<TaxDataImportResponse> {
+    tenant_service::ensure_business_year_editable(pool, tenant, by_id, "tax-data").await?;
     let data_type = normalize_data_type(data_type)?;
     let rows = parse_tabular(bytes, file_name.as_deref())?;
     let customer_id = business_year_customer_id(pool, tenant, by_id).await?;

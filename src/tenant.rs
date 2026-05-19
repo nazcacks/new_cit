@@ -1,14 +1,16 @@
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 
 use crate::{
     db::{execute_batch, quote_ident},
     domain::{
         AmendmentDiff, AmendmentPreview, ApprovalLine, AuditLog, BusinessYear,
         BusinessYearWorkflow, CreateBusinessYearRequest, CreateCustomerRequest,
-        CreateTenantRequest, Customer, DashboardSummary, Notification, TaxBurdenReportRow, Tenant,
-        TenantRef, UpdateBusinessYearStatusRequest, WorkflowEvent, YearComparisonReportRow,
+        CreateTenantRequest, CreateUserReportDefinitionRequest, Customer, DashboardSummary,
+        Notification, ReserveTrendReportRow, TaxBurdenReportRow, Tenant, TenantRef,
+        UnlockBusinessYearRequest, UpdateBusinessYearStatusRequest, UpdateNotificationRequest,
+        WorkflowEvent, WorkflowEventRequest, WorkflowQueueItem, YearComparisonReportRow,
     },
 };
 
@@ -69,8 +71,22 @@ pub async fn create_tenant(pool: &PgPool, request: CreateTenantRequest) -> Resul
     .await
     .context("failed to insert tenant")?;
 
-    provision_tenant_schema(pool, &tenant.schema_name).await?;
+    if let Err(error) = provision_tenant_schema(pool, &tenant.schema_name).await {
+        cleanup_failed_tenant(pool, tenant.tenant_id, &tenant.schema_name).await?;
+        return Err(error).context("failed to provision tenant schema");
+    }
     Ok(tenant)
+}
+
+async fn cleanup_failed_tenant(pool: &PgPool, tenant_id: i64, schema_name: &str) -> Result<()> {
+    let schema = quote_ident(schema_name)?;
+    let sql = format!("DROP SCHEMA IF EXISTS {schema} CASCADE");
+    let _ = sqlx::query(&sql).execute(pool).await;
+    let _ = sqlx::query("DELETE FROM tenants WHERE tenant_id = $1")
+        .bind(tenant_id)
+        .execute(pool)
+        .await;
+    Ok(())
 }
 
 pub async fn list_tenants(pool: &PgPool) -> Result<Vec<Tenant>> {
@@ -135,6 +151,7 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
             end_date        DATE NOT NULL,
             status          VARCHAR(20) NOT NULL DEFAULT 'DRAFT',
             locked_at       TIMESTAMPTZ,
+            lock_mode       VARCHAR(30) NOT NULL DEFAULT 'OPEN',
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             CHECK (start_date <= end_date),
@@ -142,6 +159,8 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
         );
         ALTER TABLE {schema}.business_years
             ALTER COLUMN status SET DEFAULT 'DRAFT';
+        ALTER TABLE {schema}.business_years
+            ADD COLUMN IF NOT EXISTS lock_mode VARCHAR(30) NOT NULL DEFAULT 'OPEN';
         UPDATE {schema}.business_years
             SET status = 'DRAFT'
             WHERE status = 'OPEN';
@@ -384,6 +403,34 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
         CREATE INDEX IF NOT EXISTS idx_adjustment_items_by
             ON {schema}.adjustment_items(by_id, source_module, section, item_code);
 
+        CREATE TABLE IF NOT EXISTS {schema}.adjustment_items_history (
+            history_id      BIGSERIAL PRIMARY KEY,
+            adjustment_item_id BIGINT,
+            by_id           BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
+            source_module   VARCHAR(50) NOT NULL,
+            action          VARCHAR(30) NOT NULL,
+            old_data        JSONB,
+            new_data        JSONB,
+            changed_by      VARCHAR(100) NOT NULL DEFAULT 'system',
+            changed_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_adjustment_items_history_by
+            ON {schema}.adjustment_items_history(by_id, source_module, changed_at DESC);
+
+        CREATE TABLE IF NOT EXISTS {schema}.adjustment_item_attachments (
+            attachment_id   BIGSERIAL PRIMARY KEY,
+            adjustment_item_id BIGINT NOT NULL REFERENCES {schema}.adjustment_items(adjustment_item_id) ON DELETE CASCADE,
+            by_id           BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
+            file_name       VARCHAR(255) NOT NULL,
+            content_type    VARCHAR(100) NOT NULL DEFAULT 'application/octet-stream',
+            storage_url     TEXT,
+            memo            TEXT,
+            uploaded_by     VARCHAR(100) NOT NULL DEFAULT 'system',
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_adjustment_item_attachments_by
+            ON {schema}.adjustment_item_attachments(by_id, adjustment_item_id, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS {schema}.reserves (
             reserve_id     BIGSERIAL PRIMARY KEY,
             by_id          BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
@@ -571,6 +618,21 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
         CREATE INDEX IF NOT EXISTS idx_form_data_history_by
             ON {schema}.form_data_history(by_id, form_code, changed_at DESC);
 
+        CREATE TABLE IF NOT EXISTS {schema}.print_history (
+            print_id        BIGSERIAL PRIMARY KEY,
+            by_id           BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
+            form_code       VARCHAR(50),
+            file_name       VARCHAR(255) NOT NULL,
+            content_type    VARCHAR(100) NOT NULL,
+            watermark       VARCHAR(40) NOT NULL,
+            status          VARCHAR(20) NOT NULL DEFAULT 'GENERATED',
+            printed_by      VARCHAR(100) NOT NULL DEFAULT 'system',
+            metadata        JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_print_history_by
+            ON {schema}.print_history(by_id, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS {schema}.efiling_history (
             efiling_id      BIGSERIAL PRIMARY KEY,
             by_id           BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
@@ -658,6 +720,22 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
         );
         CREATE INDEX IF NOT EXISTS idx_notifications_status
             ON {schema}.notifications(status, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS {schema}.validation_issues (
+            issue_id      BIGSERIAL PRIMARY KEY,
+            by_id         BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
+            rule_code     VARCHAR(80) NOT NULL REFERENCES public.validation_rules(rule_code),
+            severity      VARCHAR(20) NOT NULL,
+            area          VARCHAR(40) NOT NULL,
+            message       TEXT NOT NULL,
+            target_path   VARCHAR(200),
+            status        VARCHAR(20) NOT NULL DEFAULT 'OPEN',
+            metadata      JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+            created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            dismissed_at  TIMESTAMPTZ
+        );
+        CREATE INDEX IF NOT EXISTS idx_validation_issues_by
+            ON {schema}.validation_issues(by_id, status, severity, created_at DESC);
         "#
     );
     execute_batch(pool, &sql).await
@@ -770,7 +848,7 @@ pub async fn create_business_year(
         INSERT INTO {schema}.business_years (customer_id, year_label, start_date, end_date)
         VALUES ($1, $2, $3, $4)
         RETURNING by_id, customer_id, year_label, start_date, end_date, status,
-                  locked_at, created_at, updated_at
+                  locked_at, lock_mode, created_at, updated_at
         "#
     );
 
@@ -807,7 +885,7 @@ pub async fn list_business_years(pool: &PgPool, tenant: &TenantRef) -> Result<Ve
     let sql = format!(
         r#"
         SELECT by_id, customer_id, year_label, start_date, end_date, status,
-               locked_at, created_at, updated_at
+               locked_at, lock_mode, created_at, updated_at
         FROM {schema}.business_years
         ORDER BY year_label DESC, by_id DESC
         "#
@@ -826,11 +904,29 @@ pub async fn update_business_year_status(
     request: UpdateBusinessYearStatusRequest,
 ) -> Result<BusinessYear> {
     let current = get_business_year(pool, tenant, by_id).await?;
-    let next = normalize_business_year_status(&request.status)?;
+    let requested_next = normalize_business_year_status(&request.status)?;
+    let pending_count = if current.status == "IN_REVIEW" && requested_next == "APPROVED" {
+        pending_approval_count(pool, tenant, by_id).await?
+    } else {
+        0
+    };
+    let partial_approval =
+        current.status == "IN_REVIEW" && requested_next == "APPROVED" && pending_count > 1;
+    let next = if partial_approval {
+        "IN_REVIEW".to_string()
+    } else {
+        requested_next.clone()
+    };
     validate_business_year_status_transition(&current.status, &next)?;
     let actor = request.actor.as_deref().unwrap_or("system");
     let comment = request.comment.as_deref();
     let approver = request.approver.as_deref().unwrap_or(actor);
+    let approvers = request
+        .approvers
+        .as_deref()
+        .filter(|items| !items.is_empty())
+        .map(|items| items.iter().map(|item| item.as_str()).collect::<Vec<_>>())
+        .unwrap_or_else(|| vec![approver]);
     let lock_on_file = next == "FILED";
     let unlock_for_amendment = next == "AMENDED";
     let schema = quote_ident(&tenant.schema_name)?;
@@ -843,10 +939,15 @@ pub async fn update_business_year_status(
                 WHEN $4 THEN NULL
                 ELSE locked_at
             END,
+            lock_mode = CASE
+                WHEN $3 THEN 'FILED_LOCK'
+                WHEN $4 THEN 'AMENDMENT_UNLOCK'
+                ELSE lock_mode
+            END,
             updated_at = NOW()
         WHERE by_id = $1
         RETURNING by_id, customer_id, year_label, start_date, end_date, status,
-                  locked_at, created_at, updated_at
+                  locked_at, lock_mode, created_at, updated_at
         "#
     );
 
@@ -871,13 +972,35 @@ pub async fn update_business_year_status(
     sync_approval_line(
         pool,
         tenant,
-        by_id,
-        &current.status,
-        &by.status,
-        approver,
-        comment,
+        ApprovalLineSync {
+            by_id,
+            from_status: &current.status,
+            requested_status: &requested_next,
+            approvers: &approvers,
+            approver,
+            comment,
+        },
     )
     .await?;
+    if partial_approval {
+        append_workflow_event(
+            pool,
+            tenant,
+            by_id,
+            WorkflowEventRequest {
+                action: Some("APPROVE_STEP".to_string()),
+                actor: Some(actor.to_string()),
+                comment: comment.map(ToString::to_string),
+                to_status: Some("IN_REVIEW".to_string()),
+                metadata: Some(json!({
+                    "approved_by": approver,
+                    "remaining_pending": pending_count - 1,
+                    "next_step": "wait_for_next_approver"
+                })),
+            },
+        )
+        .await?;
+    }
     insert_audit_log(
         pool,
         tenant,
@@ -892,6 +1015,26 @@ pub async fn update_business_year_status(
     )
     .await?;
     Ok(by)
+}
+
+struct ApprovalLineSync<'a> {
+    by_id: i64,
+    from_status: &'a str,
+    requested_status: &'a str,
+    approvers: &'a [&'a str],
+    approver: &'a str,
+    comment: Option<&'a str>,
+}
+
+async fn pending_approval_count(pool: &PgPool, tenant: &TenantRef, by_id: i64) -> Result<i64> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    sqlx::query_scalar::<_, i64>(&format!(
+        "SELECT COUNT(*) FROM {schema}.approval_lines WHERE by_id = $1 AND status = 'PENDING'"
+    ))
+    .bind(by_id)
+    .fetch_one(pool)
+    .await
+    .context("failed to count pending approval lines")
 }
 
 async fn record_workflow_transition(
@@ -922,47 +1065,63 @@ async fn record_workflow_transition(
         .bind(workflow_action(from_status, to_status))
         .bind(actor)
         .bind(comment)
-        .bind(json!({ "from_status": from_status, "to_status": to_status }))
+        .bind(json!({
+            "from_status": from_status,
+            "to_status": to_status,
+            "next_step": next_step_for_status(to_status)
+        }))
         .execute(pool)
         .await
         .context("failed to insert workflow event")?;
+    insert_workflow_notification(pool, tenant, by_id, to_status, actor).await?;
     Ok(())
 }
 
 async fn sync_approval_line(
     pool: &PgPool,
     tenant: &TenantRef,
-    by_id: i64,
-    from_status: &str,
-    to_status: &str,
-    approver: &str,
-    comment: Option<&str>,
+    sync: ApprovalLineSync<'_>,
 ) -> Result<()> {
-    if from_status == to_status {
+    let ApprovalLineSync {
+        by_id,
+        from_status,
+        requested_status,
+        approvers,
+        approver,
+        comment,
+    } = sync;
+    if from_status == requested_status && requested_status != "APPROVED" {
         return Ok(());
     }
     let schema = quote_ident(&tenant.schema_name)?;
-    match to_status {
+    match requested_status {
         "IN_REVIEW" => {
+            let clear_sql = format!(
+                "DELETE FROM {schema}.approval_lines WHERE by_id = $1 AND status = 'PENDING'"
+            );
+            sqlx::query(&clear_sql)
+                .bind(by_id)
+                .execute(pool)
+                .await
+                .context("failed to clear pending approval lines")?;
             let sql = format!(
                 r#"
                 INSERT INTO {schema}.approval_lines (
                     by_id, step_order, approver_login_id, status, comment
                 )
-                SELECT $1, 1, $2, 'PENDING', $3
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM {schema}.approval_lines
-                    WHERE by_id = $1 AND status = 'PENDING'
-                )
+                VALUES ($1, $2, $3, 'PENDING', $4)
                 "#
             );
-            sqlx::query(&sql)
-                .bind(by_id)
-                .bind(approver)
-                .bind(comment)
-                .execute(pool)
-                .await
-                .context("failed to create approval line")?;
+            for (index, line_approver) in approvers.iter().enumerate() {
+                sqlx::query(&sql)
+                    .bind(by_id)
+                    .bind((index + 1) as i32)
+                    .bind(line_approver)
+                    .bind(comment)
+                    .execute(pool)
+                    .await
+                    .context("failed to create approval line")?;
+            }
         }
         "APPROVED" => {
             let update_sql = format!(
@@ -970,7 +1129,13 @@ async fn sync_approval_line(
                 UPDATE {schema}.approval_lines
                 SET status = 'APPROVED', approver_login_id = $2,
                     acted_at = NOW(), comment = $3
-                WHERE by_id = $1 AND status = 'PENDING'
+                WHERE line_id = (
+                    SELECT line_id
+                    FROM {schema}.approval_lines
+                    WHERE by_id = $1 AND status = 'PENDING'
+                    ORDER BY step_order, line_id
+                    LIMIT 1
+                )
                 "#
             );
             let updated = sqlx::query(&update_sql)
@@ -1016,6 +1181,71 @@ async fn sync_approval_line(
         _ => {}
     }
     Ok(())
+}
+
+async fn insert_workflow_notification(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    to_status: &str,
+    actor: &str,
+) -> Result<()> {
+    let (title, message, severity) = match to_status {
+        "IN_REVIEW" => (
+            "Approval requested",
+            "A business year is waiting for approval",
+            "INFO",
+        ),
+        "APPROVED" => (
+            "Approval completed",
+            "All approval lines are approved",
+            "INFO",
+        ),
+        "DRAFT" => (
+            "Approval returned",
+            "Approval was returned to draft",
+            "WARN",
+        ),
+        "FILED" => (
+            "Filing completed",
+            "The business year has been filed and locked",
+            "INFO",
+        ),
+        "AMENDED" => (
+            "Amendment opened",
+            "The filed business year was unlocked for amendment",
+            "WARN",
+        ),
+        _ => return Ok(()),
+    };
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        INSERT INTO {schema}.notifications (by_id, title, message, severity, metadata)
+        VALUES ($1, $2, $3, $4, $5)
+        "#
+    );
+    sqlx::query(&sql)
+        .bind(by_id)
+        .bind(title)
+        .bind(message)
+        .bind(severity)
+        .bind(json!({ "workflow_status": to_status, "actor": actor }))
+        .execute(pool)
+        .await
+        .context("failed to insert workflow notification")?;
+    Ok(())
+}
+
+fn next_step_for_status(status: &str) -> &'static str {
+    match status {
+        "DRAFT" => "review_rework",
+        "IN_REVIEW" => "approval",
+        "APPROVED" => "efiling",
+        "FILED" => "post_filing",
+        "AMENDED" => "amendment_rework",
+        _ => "review",
+    }
 }
 
 fn workflow_action(from_status: &str, to_status: &str) -> &'static str {
@@ -1101,7 +1331,61 @@ pub async fn list_audit_logs(
         .context("failed to list audit logs")
 }
 
-pub async fn ensure_due_notifications(pool: &PgPool, tenant: &TenantRef) -> Result<()> {
+pub async fn ensure_due_notifications(pool: &PgPool, tenant: &TenantRef) -> Result<i64> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let mut created = 0_i64;
+    for (bucket, days, severity) in [("D-30", 30_i64, "WARN"), ("D-7", 7_i64, "ERROR")] {
+        let title = format!("사업연도 마감 {bucket}");
+        let message_suffix = format!(" 사업연도 마감일이 {days}일 이내입니다.");
+        sqlx::query(&format!(
+            r#"
+            UPDATE {schema}.notifications
+            SET title = $2,
+                message = CONCAT(COALESCE(metadata->>'year_label', ''), $3)
+            WHERE metadata->>'due_bucket' = $1::TEXT
+              AND title LIKE 'Business year due%'
+            "#
+        ))
+        .bind(bucket)
+        .bind(&title)
+        .bind(&message_suffix)
+        .execute(pool)
+        .await
+        .context("failed to normalize due notifications")?;
+        let sql = format!(
+            r#"
+            INSERT INTO {schema}.notifications (by_id, title, message, severity, metadata)
+            SELECT b.by_id,
+                   $4,
+                   CONCAT(b.year_label, $5),
+                   $3,
+                   jsonb_build_object('by_id', b.by_id, 'year_label', b.year_label, 'end_date', b.end_date, 'due_bucket', $1::TEXT)
+            FROM {schema}.business_years b
+            WHERE b.status <> 'FILED'
+              AND b.end_date BETWEEN CURRENT_DATE AND CURRENT_DATE + ($2::INT * INTERVAL '1 day')
+              AND NOT EXISTS (
+                  SELECT 1 FROM {schema}.notifications n
+                  WHERE n.by_id = b.by_id
+                    AND n.metadata->>'due_bucket' = $1::TEXT
+              )
+            "#
+        );
+        created += sqlx::query(&sql)
+            .bind(bucket)
+            .bind(days as i32)
+            .bind(severity)
+            .bind(&title)
+            .bind(&message_suffix)
+            .execute(pool)
+            .await
+            .context("failed to ensure due notifications")?
+            .rows_affected() as i64;
+    }
+    Ok(created)
+}
+
+#[allow(dead_code)]
+async fn ensure_due_notifications_legacy(pool: &PgPool, tenant: &TenantRef) -> Result<()> {
     let schema = quote_ident(&tenant.schema_name)?;
     let sql = format!(
         r#"
@@ -1144,6 +1428,58 @@ pub async fn list_notifications(pool: &PgPool, tenant: &TenantRef) -> Result<Vec
         .fetch_all(pool)
         .await
         .context("failed to list notifications")
+}
+
+pub async fn update_notification(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    notification_id: i64,
+    request: UpdateNotificationRequest,
+) -> Result<Notification> {
+    let status = request
+        .status
+        .as_deref()
+        .unwrap_or("READ")
+        .trim()
+        .to_ascii_uppercase();
+    if !matches!(status.as_str(), "READ" | "UNREAD" | "ARCHIVED") {
+        anyhow::bail!("invalid notification status");
+    }
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        UPDATE {schema}.notifications
+        SET status = $2,
+            read_at = CASE
+                WHEN $2 = 'READ' THEN COALESCE(read_at, NOW())
+                WHEN $2 = 'UNREAD' THEN NULL
+                ELSE read_at
+            END
+        WHERE notification_id = $1
+        RETURNING notification_id, by_id, title, message, severity, status,
+                  metadata, created_at, read_at
+        "#
+    );
+    let notification = sqlx::query_as::<_, Notification>(&sql)
+        .bind(notification_id)
+        .bind(&status)
+        .fetch_one(pool)
+        .await
+        .context("notification not found")?;
+    insert_audit_log(
+        pool,
+        tenant,
+        AuditLogEntry {
+            table_name: "notifications",
+            record_id: notification_id.to_string(),
+            action: "UPDATE",
+            old_data: None,
+            new_data: json!({ "status": notification.status.clone() }),
+            changed_by: "system",
+        },
+    )
+    .await?;
+    Ok(notification)
 }
 
 pub async fn dashboard_summary(pool: &PgPool, tenant: &TenantRef) -> Result<DashboardSummary> {
@@ -1249,6 +1585,263 @@ pub async fn year_comparison_report(
         .context("failed to load year comparison report")
 }
 
+pub async fn reserve_trend_report(
+    pool: &PgPool,
+    tenant: &TenantRef,
+) -> Result<Vec<ReserveTrendReportRow>> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        SELECT b.customer_id, b.year_label, r.reserve_code, r.direction,
+               SUM(r.amount)::BIGINT AS amount
+        FROM {schema}.business_years b
+        JOIN {schema}.reserves r ON r.by_id = b.by_id
+        GROUP BY b.customer_id, b.year_label, r.reserve_code, r.direction
+        ORDER BY b.customer_id, r.reserve_code, b.year_label
+        "#
+    );
+    sqlx::query_as::<_, ReserveTrendReportRow>(&sql)
+        .fetch_all(pool)
+        .await
+        .context("failed to load reserve trend report")
+}
+
+pub async fn loss_expiry_report(pool: &PgPool, tenant: &TenantRef) -> Result<Vec<Value>> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        SELECT c.customer_id, c.customer_code, c.customer_name,
+               l.loss_id, l.origin_year, l.original_amount, l.used_amount,
+               l.expired_amount, l.remaining_amount, l.expires_year,
+               (l.expires_year - EXTRACT(YEAR FROM CURRENT_DATE)::INT) AS years_until_expiry
+        FROM {schema}.carryforward_loss l
+        JOIN {schema}.customers c ON c.customer_id = l.customer_id
+        WHERE l.remaining_amount > 0
+        ORDER BY l.expires_year, c.customer_code, l.origin_year
+        "#
+    );
+    let rows = sqlx::query(&sql)
+        .fetch_all(pool)
+        .await
+        .context("failed to load loss expiry report")?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            json!({
+                "customer_id": row.get::<i64, _>("customer_id"),
+                "customer_code": row.get::<String, _>("customer_code"),
+                "customer_name": row.get::<String, _>("customer_name"),
+                "loss_id": row.get::<i64, _>("loss_id"),
+                "origin_year": row.get::<i32, _>("origin_year"),
+                "original_amount": row.get::<i64, _>("original_amount"),
+                "used_amount": row.get::<i64, _>("used_amount"),
+                "expired_amount": row.get::<i64, _>("expired_amount"),
+                "remaining_amount": row.get::<i64, _>("remaining_amount"),
+                "expires_year": row.get::<i32, _>("expires_year"),
+                "years_until_expiry": row.get::<i32, _>("years_until_expiry")
+            })
+        })
+        .collect())
+}
+
+pub async fn industry_statistics_report(pool: &PgPool, tenant: &TenantRef) -> Result<Vec<Value>> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        SELECT COALESCE(c.industry_code, 'UNSPECIFIED') AS industry_code,
+               c.is_sme,
+               COUNT(DISTINCT c.customer_id)::BIGINT AS customer_count,
+               COUNT(DISTINCT b.by_id)::BIGINT AS business_year_count,
+               COALESCE(SUM(a.amount) FILTER (WHERE a.adj_code = 'TOTAL_TAX_DUE'), 0)::BIGINT AS total_tax_due,
+               COALESCE(AVG(a.amount) FILTER (WHERE a.adj_code = 'TOTAL_TAX_DUE'), 0)::BIGINT AS average_tax_due
+        FROM {schema}.customers c
+        LEFT JOIN {schema}.business_years b ON b.customer_id = c.customer_id
+        LEFT JOIN {schema}.tax_adjustments a ON a.by_id = b.by_id
+        GROUP BY COALESCE(c.industry_code, 'UNSPECIFIED'), c.is_sme
+        ORDER BY industry_code, c.is_sme DESC
+        "#
+    );
+    let rows = sqlx::query(&sql)
+        .fetch_all(pool)
+        .await
+        .context("failed to load industry statistics report")?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            json!({
+                "industry_code": row.get::<String, _>("industry_code"),
+                "is_sme": row.get::<bool, _>("is_sme"),
+                "customer_count": row.get::<i64, _>("customer_count"),
+                "business_year_count": row.get::<i64, _>("business_year_count"),
+                "total_tax_due": row.get::<i64, _>("total_tax_due"),
+                "average_tax_due": row.get::<i64, _>("average_tax_due")
+            })
+        })
+        .collect())
+}
+
+pub async fn list_user_report_definitions(pool: &PgPool, tenant: &TenantRef) -> Result<Vec<Value>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT report_id, tenant_id, user_id, report_name, source, columns,
+               filters, active, created_at, updated_at
+        FROM user_report_definitions
+        WHERE tenant_id = $1 AND active = TRUE
+        ORDER BY updated_at DESC, report_id DESC
+        "#,
+    )
+    .bind(tenant.tenant_id)
+    .fetch_all(pool)
+    .await
+    .context("failed to list user report definitions")?;
+    Ok(rows.into_iter().map(user_report_json).collect())
+}
+
+pub async fn create_user_report_definition(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    user_id: i64,
+    request: CreateUserReportDefinitionRequest,
+) -> Result<Value> {
+    let report_name = request.report_name.trim();
+    let source = request.source.trim().to_ascii_uppercase();
+    if report_name.is_empty() || source.is_empty() {
+        anyhow::bail!("invalid user report definition");
+    }
+    if !matches!(
+        source.as_str(),
+        "TAX_BURDEN" | "YEAR_COMPARISON" | "RESERVE_TREND" | "LOSS_EXPIRY" | "INDUSTRY"
+    ) {
+        anyhow::bail!("unsupported user report source");
+    }
+    let columns = json!(request.columns.unwrap_or_default());
+    let filters = request.filters.unwrap_or_else(|| json!({}));
+    let row = sqlx::query(
+        r#"
+        INSERT INTO user_report_definitions (
+            tenant_id, user_id, report_name, source, columns, filters
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING report_id, tenant_id, user_id, report_name, source, columns,
+                  filters, active, created_at, updated_at
+        "#,
+    )
+    .bind(tenant.tenant_id)
+    .bind(user_id)
+    .bind(report_name)
+    .bind(source)
+    .bind(columns)
+    .bind(filters)
+    .fetch_one(pool)
+    .await
+    .context("failed to create user report definition")?;
+    Ok(user_report_json(row))
+}
+
+pub async fn run_user_report(pool: &PgPool, tenant: &TenantRef, report_id: i64) -> Result<Value> {
+    let report = sqlx::query(
+        r#"
+        SELECT report_id, report_name, source, columns, filters
+        FROM user_report_definitions
+        WHERE tenant_id = $1 AND report_id = $2 AND active = TRUE
+        "#,
+    )
+    .bind(tenant.tenant_id)
+    .bind(report_id)
+    .fetch_one(pool)
+    .await
+    .context("user report definition not found")?;
+    let source = report.get::<String, _>("source");
+    let rows = match source.as_str() {
+        "TAX_BURDEN" => tax_burden_report(pool, tenant)
+            .await?
+            .into_iter()
+            .map(|row| json!(row))
+            .collect::<Vec<_>>(),
+        "YEAR_COMPARISON" => year_comparison_report(pool, tenant)
+            .await?
+            .into_iter()
+            .map(|row| json!(row))
+            .collect::<Vec<_>>(),
+        "RESERVE_TREND" => reserve_trend_report(pool, tenant)
+            .await?
+            .into_iter()
+            .map(|row| json!(row))
+            .collect::<Vec<_>>(),
+        "LOSS_EXPIRY" => loss_expiry_report(pool, tenant).await?,
+        "INDUSTRY" => industry_statistics_report(pool, tenant).await?,
+        _ => Vec::new(),
+    };
+    Ok(json!({
+        "report_id": report.get::<i64, _>("report_id"),
+        "report_name": report.get::<String, _>("report_name"),
+        "source": source,
+        "columns": report.get::<Value, _>("columns"),
+        "filters": report.get::<Value, _>("filters"),
+        "rows": rows
+    }))
+}
+
+fn user_report_json(row: sqlx::postgres::PgRow) -> Value {
+    json!({
+        "report_id": row.get::<i64, _>("report_id"),
+        "tenant_id": row.get::<i64, _>("tenant_id"),
+        "user_id": row.get::<Option<i64>, _>("user_id"),
+        "report_name": row.get::<String, _>("report_name"),
+        "source": row.get::<String, _>("source"),
+        "columns": row.get::<Value, _>("columns"),
+        "filters": row.get::<Value, _>("filters"),
+        "active": row.get::<bool, _>("active"),
+        "created_at": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
+        "updated_at": row.get::<chrono::DateTime<chrono::Utc>, _>("updated_at")
+    })
+}
+
+pub async fn workflow_queue(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    assignee: Option<&str>,
+) -> Result<Vec<WorkflowQueueItem>> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let assignee = assignee.filter(|value| !value.eq_ignore_ascii_case("me"));
+    let sql = format!(
+        r#"
+        SELECT b.by_id,
+               b.customer_id,
+               c.customer_name,
+               b.year_label,
+               b.status,
+               al.approver_login_id,
+               we.created_at AS submitted_at,
+               GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - COALESCE(we.created_at, b.updated_at))) / 86400))::BIGINT AS pending_days
+        FROM {schema}.business_years b
+        JOIN {schema}.customers c ON c.customer_id = b.customer_id
+        LEFT JOIN LATERAL (
+            SELECT approver_login_id
+            FROM {schema}.approval_lines
+            WHERE by_id = b.by_id AND status = 'PENDING'
+            ORDER BY step_order, line_id
+            LIMIT 1
+        ) al ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT created_at
+            FROM {schema}.workflow_events
+            WHERE by_id = b.by_id AND to_status = 'IN_REVIEW'
+            ORDER BY created_at DESC, event_id DESC
+            LIMIT 1
+        ) we ON TRUE
+        WHERE b.status = 'IN_REVIEW'
+          AND ($1::TEXT IS NULL OR al.approver_login_id = $1)
+        ORDER BY pending_days DESC, b.updated_at DESC
+        "#
+    );
+    sqlx::query_as::<_, WorkflowQueueItem>(&sql)
+        .bind(assignee)
+        .fetch_all(pool)
+        .await
+        .context("failed to load workflow queue")
+}
+
 pub async fn get_business_year_workflow(
     pool: &PgPool,
     tenant: &TenantRef,
@@ -1281,6 +1874,51 @@ pub async fn list_workflow_events(
         .fetch_all(pool)
         .await
         .context("failed to list workflow events")
+}
+
+pub async fn append_workflow_event(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    request: WorkflowEventRequest,
+) -> Result<WorkflowEvent> {
+    let business_year = get_business_year(pool, tenant, by_id).await?;
+    let action = request
+        .action
+        .as_deref()
+        .unwrap_or("COMMENT")
+        .trim()
+        .to_ascii_uppercase();
+    let to_status = request
+        .to_status
+        .as_deref()
+        .unwrap_or(&business_year.status)
+        .trim()
+        .to_ascii_uppercase();
+    let actor = request.actor.as_deref().unwrap_or("system");
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        INSERT INTO {schema}.workflow_events (
+            by_id, from_status, to_status, action, actor, comment, metadata
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING event_id, by_id, from_status, to_status, action, actor,
+                  comment, metadata, created_at
+        "#
+    );
+    let event = sqlx::query_as::<_, WorkflowEvent>(&sql)
+        .bind(by_id)
+        .bind(&business_year.status)
+        .bind(to_status)
+        .bind(action)
+        .bind(actor)
+        .bind(request.comment)
+        .bind(request.metadata.unwrap_or_else(|| json!({})))
+        .fetch_one(pool)
+        .await
+        .context("failed to append workflow event")?;
+    Ok(event)
 }
 
 pub async fn list_approval_lines(
@@ -1345,6 +1983,84 @@ pub async fn preview_amendment(
     })
 }
 
+pub async fn unlock_business_year(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    request: UnlockBusinessYearRequest,
+) -> Result<BusinessYear> {
+    let current = get_business_year(pool, tenant, by_id).await?;
+    let actor = request.actor.unwrap_or_else(|| "system".to_string());
+    let reason = request
+        .reason
+        .unwrap_or_else(|| "amendment unlock".to_string());
+    let version_mode = request
+        .version_mode
+        .unwrap_or_else(|| "CURRENT".to_string());
+
+    if current.status == "FILED" {
+        return update_business_year_status(
+            pool,
+            tenant,
+            by_id,
+            UpdateBusinessYearStatusRequest {
+                status: "AMENDED".to_string(),
+                actor: Some(actor),
+                approver: None,
+                approvers: None,
+                comment: Some(format!("{reason}; version_mode={version_mode}")),
+            },
+        )
+        .await;
+    }
+
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        UPDATE {schema}.business_years
+            SET status = 'AMENDED',
+                locked_at = NULL,
+                lock_mode = 'AMENDMENT_UNLOCK',
+                updated_at = NOW()
+        WHERE by_id = $1
+        RETURNING by_id, customer_id, year_label, start_date, end_date, status,
+                  locked_at, lock_mode, created_at, updated_at
+        "#
+    );
+    let by = sqlx::query_as::<_, BusinessYear>(&sql)
+        .bind(by_id)
+        .fetch_one(pool)
+        .await
+        .context("failed to unlock business year")?;
+    append_workflow_event(
+        pool,
+        tenant,
+        by_id,
+        WorkflowEventRequest {
+            action: Some("UNLOCK".to_string()),
+            actor: Some(actor.clone()),
+            comment: Some(reason),
+            to_status: Some("AMENDED".to_string()),
+            metadata: Some(json!({ "version_mode": version_mode })),
+        },
+    )
+    .await?;
+    insert_audit_log(
+        pool,
+        tenant,
+        AuditLogEntry {
+            table_name: "business_years",
+            record_id: by_id.to_string(),
+            action: "UPDATE",
+            old_data: Some(json!({ "status": current.status, "locked_at": current.locked_at })),
+            new_data: json!({ "status": by.status.clone(), "locked_at": by.locked_at }),
+            changed_by: &actor,
+        },
+    )
+    .await?;
+    Ok(by)
+}
+
 pub async fn get_business_year(
     pool: &PgPool,
     tenant: &TenantRef,
@@ -1354,7 +2070,7 @@ pub async fn get_business_year(
     let sql = format!(
         r#"
         SELECT by_id, customer_id, year_label, start_date, end_date, status,
-               locked_at, created_at, updated_at
+               locked_at, lock_mode, created_at, updated_at
         FROM {schema}.business_years
         WHERE by_id = $1
         "#
@@ -1365,6 +2081,21 @@ pub async fn get_business_year(
         .fetch_one(pool)
         .await
         .context("business year not found")
+}
+
+pub async fn ensure_business_year_editable(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    area: &str,
+) -> Result<()> {
+    let by = get_business_year(pool, tenant, by_id).await?;
+    if by.status == "FILED" || by.locked_at.is_some() {
+        anyhow::bail!(
+            "business year is locked after FILED status; {area} edits are blocked until amendment unlock"
+        );
+    }
+    Ok(())
 }
 
 fn normalize_business_year_status(status: &str) -> Result<String> {

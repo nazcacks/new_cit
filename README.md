@@ -8,9 +8,13 @@ Rust implementation of the 법인세 세무조정계산서 system described in `
 
 - PostgreSQL-backed multi-tenant API with one schema per tenant.
 - DB-backed user, role, permission, customer-access, and customer-work-scope administration.
+- TOTP 2FA, tenant IP allowlists, five-failure account lockout, admin unlock, and FILED-year write locks.
+- Advanced RBAC with function codes, menu functions, DENY-over-ALLOW evaluation, data scopes, field masking, and access delegation.
 - Tax-law/version snapshots for each business year.
-- Corporate income tax adjustment calculation with persisted adjustment rows.
-- Form generation for core forms (`FORM3`, `FORM15`, `FORM22`) using versioned form metadata.
+- Corporate income tax adjustment calculation with persisted B1~B17 module rows, item history, and evidence attachment metadata.
+- Form generation for core forms and demo attachments (`FORM3`, `FORM15`, `FORM22`, `FORM32`, `FORM50`, `ATT01`~`ATT10`) using versioned form metadata.
+- Law/form version workflow, relationship cycle checks, dry-run/execute/rollback migration endpoints.
+- Scheduler/reporting support for D-30/D-7 due alerts, loss expiry, industry statistics, user-defined reports, audit hash verification, PDF watermark/seal, and print history.
 - Windows-949 fixed-width e-filing file generation.
 - Durable job queue with retry, exponential backoff, and dead-letter status.
 - Docker Compose for PostgreSQL, API, test, and clippy services.
@@ -21,9 +25,10 @@ Rust implementation of the 법인세 세무조정계산서 system described in `
 ```powershell
 Copy-Item .env.example .env
 docker compose up --build -d postgres api
+docker compose run --rm test cargo run --bin seed-demo -- --reset
 ```
 
-The API listens on `http://localhost:8080`.
+The API listens on `http://localhost:8080`. The demo seed provisions `demo / admin / ChangeMe123!` for local menu smoke testing only.
 
 ```powershell
 Invoke-RestMethod http://localhost:8080/health
@@ -35,15 +40,12 @@ The web UI is available in a browser at:
 http://localhost:8080/
 ```
 
-The UI calls the live API endpoints directly and shows `/health` status, tenant count, job queue status, and an end-to-end demo tax adjustment flow.
+The UI calls the live API endpoints directly after login and now uses the Phase 2 prototype IA: dashboard, seven-step filing workspace, post-filing, reports, and administration menus. Workspace context is persisted in the browser and drives the 1~7 step enablement flow.
 
-Development login:
+The menu/API mapping is maintained in `메뉴_API_매트릭스.md`.
+The current menu smoke checklist is `docs/menu_smoke_checklist.md`; implementation findings and deferred P3 integrations are summarized in `docs/menu_smoke_findings.md`.
 
-```text
-Tenant: demo
-Login ID: admin
-Password: admin123!
-```
+For non-demo local development, use a tenant-scoped administrator account provisioned for your environment.
 
 ## Run Tests And Lints
 
@@ -64,12 +66,21 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ## Core API Flow
 
+All `/api/*` endpoints except `/api/auth/login` require a Bearer session token. In PowerShell, log in once and pass the header to the examples below:
+
+```powershell
+$loginBody = @{ tenant_code = "demo"; login_id = "admin"; password = "ChangeMe123!" } | ConvertTo-Json
+$token = (Invoke-RestMethod -Method Post http://localhost:8080/api/auth/login -ContentType "application/json" -Body $loginBody).token
+$headers = @{ Authorization = "Bearer $token" }
+```
+
 ## Admin User / Access API
 
 Create a tenant-scoped user with customer and work-scope access:
 
 ```powershell
 Invoke-RestMethod -Method Post http://localhost:8080/api/admin/tenants/demo/users `
+  -Headers $headers `
   -ContentType "application/json" `
   -Body '{"login_id":"tax01","password":"ChangeMe123!","user_name":"Tax User","roles":["TAX_EXPERT"],"customer_access":[{"customer_id":1,"access_level":"OWNER","work_scopes":["INFO","ADJUST","FORM"]}]}'
 ```
@@ -351,7 +362,7 @@ Invoke-RestMethod -Method Put http://localhost:8080/api/tenants/demo/business-ye
 ## Form Attachments / PDF API (2026-05-15)
 
 - Added a dedicated `6.2 100여 종 부속서식` UI route for attachment status and output actions.
-- `GET /api/tenants/{tenant_code}/business-years/{by_id}/forms/attachments` returns generated status, validation count, representative amount, and updated time for FORM3, FORM15, and FORM22.
+- `GET /api/tenants/{tenant_code}/business-years/{by_id}/forms/attachments` returns generated status, validation count, representative amount, and updated time for FORM3, FORM15, FORM22, FORM32, FORM50, and ATT01~ATT10.
 - `GET /api/tenants/{tenant_code}/business-years/{by_id}/forms/{form_code}/pdf` generates a PDF with a DRAFT/APPROVED watermark.
 - `GET /api/tenants/{tenant_code}/business-years/{by_id}/forms/pdf-bundle/download` returns a ZIP bundle of the main form PDFs.
 

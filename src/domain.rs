@@ -8,6 +8,7 @@ pub struct LoginRequest {
     pub tenant_code: String,
     pub login_id: String,
     pub password: String,
+    pub otp: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -53,6 +54,52 @@ pub struct RolePermissionInput {
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdateRolePermissionsRequest {
     pub permissions: Vec<RolePermissionInput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateMenuFunctionsRequest {
+    pub functions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RoleMenuFunctionInput {
+    pub menu_key: String,
+    pub function_code: String,
+    pub effect: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateRoleMenuFunctionsRequest {
+    pub grants: Vec<RoleMenuFunctionInput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateAccessDelegationRequest {
+    pub grantor_login_id: String,
+    pub delegatee_login_id: String,
+    pub customer_id: i64,
+    pub work_scope: String,
+    pub valid_from: Option<NaiveDate>,
+    pub valid_to: Option<NaiveDate>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateAdjustmentAttachmentRequest {
+    pub adjustment_item_id: i64,
+    pub file_name: String,
+    pub content_type: Option<String>,
+    pub storage_url: Option<String>,
+    pub memo: Option<String>,
+    pub uploaded_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateUserReportDefinitionRequest {
+    pub report_name: String,
+    pub source: String,
+    pub columns: Option<Vec<String>>,
+    pub filters: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -101,6 +148,7 @@ pub struct CreateAdminUserRequest {
     pub email: Option<String>,
     pub phone: Option<String>,
     pub use_2fa: Option<bool>,
+    pub totp_secret: Option<String>,
     pub status: Option<String>,
     pub roles: Option<Vec<String>>,
     pub customer_access: Option<Vec<UserCustomerAccessInput>>,
@@ -112,6 +160,7 @@ pub struct UpdateAdminUserRequest {
     pub email: Option<String>,
     pub phone: Option<String>,
     pub use_2fa: Option<bool>,
+    pub totp_secret: Option<String>,
     pub roles: Option<Vec<String>>,
     pub customer_access: Option<Vec<UserCustomerAccessInput>>,
 }
@@ -201,6 +250,7 @@ pub struct BusinessYear {
     pub end_date: NaiveDate,
     pub status: String,
     pub locked_at: Option<DateTime<Utc>>,
+    pub lock_mode: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -218,6 +268,7 @@ pub struct UpdateBusinessYearStatusRequest {
     pub status: String,
     pub actor: Option<String>,
     pub approver: Option<String>,
+    pub approvers: Option<Vec<String>>,
     pub comment: Option<String>,
 }
 
@@ -299,6 +350,11 @@ pub struct Notification {
     pub read_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateNotificationRequest {
+    pub status: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DashboardSummary {
     pub tenant_code: String,
@@ -328,6 +384,111 @@ pub struct YearComparisonReportRow {
     pub status: String,
     pub total_adjustment_amount: i64,
     pub reserve_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct ReserveTrendReportRow {
+    pub customer_id: i64,
+    pub year_label: i32,
+    pub reserve_code: String,
+    pub direction: String,
+    pub amount: i64,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct WorkflowQueueItem {
+    pub by_id: i64,
+    pub customer_id: i64,
+    pub customer_name: String,
+    pub year_label: i32,
+    pub status: String,
+    pub approver_login_id: Option<String>,
+    pub submitted_at: Option<DateTime<Utc>>,
+    pub pending_days: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkflowEventRequest {
+    pub action: Option<String>,
+    pub actor: Option<String>,
+    pub comment: Option<String>,
+    pub to_status: Option<String>,
+    pub metadata: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UnlockBusinessYearRequest {
+    pub reason: Option<String>,
+    pub actor: Option<String>,
+    pub version_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct MenuNodeRecord {
+    pub menu_key: String,
+    pub parent_key: Option<String>,
+    pub label: String,
+    pub path: String,
+    pub layout: String,
+    pub requires_context: Vec<String>,
+    pub feature_flag: Option<String>,
+    pub required_perm_module: Option<String>,
+    pub required_perm_function: Option<String>,
+    pub sort_order: i32,
+    pub enabled: bool,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateMenuNodeRequest {
+    pub feature_flag: Option<String>,
+    pub required_perm_module: Option<String>,
+    pub required_perm_function: Option<String>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct ValidationRuleRecord {
+    pub rule_code: String,
+    pub severity: String,
+    pub area: String,
+    pub message_template: String,
+    pub applies_to: String,
+    pub active: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct ValidationIssue {
+    pub issue_id: i64,
+    pub by_id: i64,
+    pub rule_code: String,
+    pub severity: String,
+    pub area: String,
+    pub message: String,
+    pub target_path: Option<String>,
+    pub status: String,
+    pub metadata: Value,
+    pub created_at: DateTime<Utc>,
+    pub dismissed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ValidationRunResult {
+    pub by_id: i64,
+    pub total_rules: usize,
+    pub executed_rules: usize,
+    pub pass: bool,
+    pub error_count: usize,
+    pub warn_count: usize,
+    pub info_count: usize,
+    pub issues: Vec<ValidationIssue>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DismissValidationIssueRequest {
+    pub reason: Option<String>,
+    pub dismissed_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -1187,6 +1348,7 @@ pub struct EnqueueJobRequest {
 #[derive(Debug, Deserialize)]
 pub struct EnqueueEfilingRequest {
     pub max_attempts: Option<i32>,
+    pub otp: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
@@ -179,6 +181,58 @@ pub async fn create_form_relationship(
     .context("failed to create form relationship")
 }
 
+pub async fn check_form_relationship_cycles(pool: &PgPool) -> Result<Value> {
+    let rows = sqlx::query(
+        r#"
+        SELECT source_form, source_field, target_form, target_field
+        FROM form_relationships
+        ORDER BY relationship_id
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to load form relationship graph")?;
+    let mut graph: HashMap<String, Vec<String>> = HashMap::new();
+    let mut references = Vec::new();
+    for row in rows {
+        let source = format!(
+            "{}.{}",
+            row.get::<String, _>("source_form"),
+            row.get::<String, _>("source_field")
+        );
+        let target = format!(
+            "{}.{}",
+            row.get::<String, _>("target_form"),
+            row.get::<String, _>("target_field")
+        );
+        graph
+            .entry(source.clone())
+            .or_default()
+            .push(target.clone());
+        references.push(json!({ "source": source, "target": target }));
+    }
+    let mut cycles = Vec::new();
+    let mut visiting = HashSet::new();
+    let mut visited = HashSet::new();
+    for node in graph.keys() {
+        let mut path = Vec::new();
+        find_cycles(
+            node,
+            &graph,
+            &mut visiting,
+            &mut visited,
+            &mut path,
+            &mut cycles,
+        );
+    }
+    Ok(json!({
+        "valid": cycles.is_empty(),
+        "relationship_count": references.len(),
+        "references": references,
+        "cycles": cycles
+    }))
+}
+
 pub async fn resolve_form_version(
     pool: &PgPool,
     query: ResolveFormVersionQuery,
@@ -250,6 +304,8 @@ pub async fn execute_migration(
         return Err(anyhow!("invalid form migration target status"));
     }
     let tenant_ref = tenant::resolve_tenant(pool, &dry_run.tenant_code).await?;
+    tenant::ensure_business_year_editable(pool, &tenant_ref, dry_run.by_id, "form migration")
+        .await?;
     let current =
         load_current_form_data(pool, &tenant_ref, dry_run.by_id, &dry_run.form_code).await?;
     let schema = quote_ident(&tenant_ref.schema_name)?;
@@ -287,6 +343,8 @@ pub async fn rollback_migration(
     request: FormMigrationRequest,
 ) -> Result<FormMigrationResult> {
     let tenant_ref = tenant::resolve_tenant(pool, &request.tenant_code).await?;
+    tenant::ensure_business_year_editable(pool, &tenant_ref, request.by_id, "form migration")
+        .await?;
     let schema = quote_ident(&tenant_ref.schema_name)?;
     let sql = format!(
         r#"
@@ -502,4 +560,30 @@ fn template_fields(template_json: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn find_cycles(
+    node: &str,
+    graph: &HashMap<String, Vec<String>>,
+    visiting: &mut HashSet<String>,
+    visited: &mut HashSet<String>,
+    path: &mut Vec<String>,
+    cycles: &mut Vec<Value>,
+) {
+    if let Some(position) = path.iter().position(|item| item == node) {
+        cycles.push(json!({ "path": path[position..].to_vec() }));
+        return;
+    }
+    if visited.contains(node) || !visiting.insert(node.to_string()) {
+        return;
+    }
+    path.push(node.to_string());
+    if let Some(next_nodes) = graph.get(node) {
+        for next in next_nodes {
+            find_cycles(next, graph, visiting, visited, path, cycles);
+        }
+    }
+    path.pop();
+    visiting.remove(node);
+    visited.insert(node.to_string());
 }

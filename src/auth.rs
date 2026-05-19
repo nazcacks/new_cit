@@ -1,3 +1,5 @@
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -8,7 +10,15 @@ use crate::{
     modules,
 };
 
-pub async fn login(pool: &PgPool, request: LoginRequest) -> Result<LoginResponse> {
+const TOTP_STEP_SECONDS: i64 = 30;
+const TOTP_WINDOW: i64 = 1;
+const TOTP_DIGITS: u32 = 6;
+
+pub async fn login(
+    pool: &PgPool,
+    request: LoginRequest,
+    client_ip: Option<&str>,
+) -> Result<LoginResponse> {
     let user = sqlx::query_as::<_, AuthUser>(
         r#"
         SELECT
@@ -47,6 +57,8 @@ pub async fn login(pool: &PgPool, request: LoginRequest) -> Result<LoginResponse
     .context("failed to verify login")?
     .ok_or_else(|| anyhow!("invalid tenant, login id, or password"))?;
 
+    enforce_ip_allowlist(pool, user.tenant_id, client_ip).await?;
+
     let token = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO auth_sessions (user_id, tenant_id)
@@ -64,16 +76,18 @@ pub async fn login(pool: &PgPool, request: LoginRequest) -> Result<LoginResponse
         r#"
         UPDATE users
         SET last_login_at = NOW(),
+            last_login_ip = $2,
             pwd_fail_count = 0
         WHERE user_id = $1
         "#,
     )
     .bind(user.user_id)
+    .bind(client_ip)
     .execute(pool)
     .await
     .context("failed to update login timestamp")?;
 
-    record_login(pool, Some(user.user_id), true, None).await?;
+    record_login(pool, Some(user.user_id), client_ip, None, true, None).await?;
 
     let expires_at = sqlx::query_scalar::<_, DateTime<Utc>>(
         "SELECT expires_at FROM auth_sessions WHERE session_token = $1",
@@ -183,29 +197,49 @@ pub async fn record_failed_login(pool: &PgPool, tenant_code: &str, login_id: &st
     .context("failed to find failed-login user")?;
 
     if let Some(user_id) = user_id {
-        sqlx::query("UPDATE users SET pwd_fail_count = pwd_fail_count + 1 WHERE user_id = $1")
-            .bind(user_id)
-            .execute(pool)
-            .await
-            .context("failed to increment failed-login count")?;
+        sqlx::query(
+            r#"
+            UPDATE users
+            SET pwd_fail_count = pwd_fail_count + 1,
+                locked = CASE WHEN pwd_fail_count + 1 >= 5 THEN TRUE ELSE locked END,
+                status = CASE WHEN pwd_fail_count + 1 >= 5 THEN 'LOCKED' ELSE status END
+            WHERE user_id = $1
+            "#,
+        )
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .context("failed to increment failed-login count")?;
     }
 
-    record_login(pool, user_id, false, Some("INVALID_CREDENTIALS")).await
+    record_login(
+        pool,
+        user_id,
+        None,
+        None,
+        false,
+        Some("INVALID_CREDENTIALS"),
+    )
+    .await
 }
 
 async fn record_login(
     pool: &PgPool,
     user_id: Option<i64>,
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
     success: bool,
     fail_reason: Option<&str>,
 ) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO login_history (user_id, success, fail_reason, session_id)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO login_history (user_id, ip_address, user_agent, success, fail_reason, session_id)
+        VALUES ($1, $2, $3, $4, $5, $6)
         "#,
     )
     .bind(user_id)
+    .bind(ip_address)
+    .bind(user_agent)
     .bind(success)
     .bind(fail_reason)
     .bind(if success { Some("web") } else { None })
@@ -213,6 +247,197 @@ async fn record_login(
     .await
     .context("failed to insert login history")?;
     Ok(())
+}
+
+pub async fn enforce_ip_allowlist(
+    pool: &PgPool,
+    tenant_id: i64,
+    client_ip: Option<&str>,
+) -> Result<()> {
+    let allowed_ips = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT allowed_ips FROM tenants WHERE tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .fetch_one(pool)
+    .await
+    .context("failed to load tenant IP allowlist")?;
+
+    let Some(allowed_ips) = allowed_ips.filter(|value| !value.trim().is_empty()) else {
+        return Ok(());
+    };
+    let client_ip = client_ip
+        .and_then(|value| first_ip(value).ok())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    if ip_allowed(&client_ip, &allowed_ips) {
+        Ok(())
+    } else {
+        Err(anyhow!("client IP is not allowed for this tenant"))
+    }
+}
+
+pub async fn enforce_2fa_for_user(
+    pool: &PgPool,
+    user_id: i64,
+    use_2fa: bool,
+    otp: Option<&str>,
+) -> Result<()> {
+    if !use_2fa {
+        return Ok(());
+    }
+    let code = otp
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("2fa otp is required"))?;
+    let secret =
+        sqlx::query_scalar::<_, Option<String>>("SELECT totp_secret FROM users WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await
+            .context("failed to load 2fa secret")?
+            .ok_or_else(|| anyhow!("2fa enrollment is required"))?;
+    if verify_totp(pool, &secret, code).await? {
+        Ok(())
+    } else {
+        Err(anyhow!("invalid 2fa otp"))
+    }
+}
+
+pub async fn verify_totp(pool: &PgPool, secret: &str, code: &str) -> Result<bool> {
+    let code = code.trim();
+    if code.len() != TOTP_DIGITS as usize
+        || !code.chars().all(|character| character.is_ascii_digit())
+    {
+        return Ok(false);
+    }
+    let secret_bytes = decode_totp_secret(secret)?;
+    let counter = Utc::now().timestamp() / TOTP_STEP_SECONDS;
+    for drift in -TOTP_WINDOW..=TOTP_WINDOW {
+        if hotp(pool, &secret_bytes, counter + drift).await? == code {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub async fn hotp(pool: &PgPool, secret: &[u8], counter: i64) -> Result<String> {
+    if counter < 0 {
+        return Ok("000000".to_string());
+    }
+    let message = (counter as u64).to_be_bytes().to_vec();
+    let digest = sqlx::query_scalar::<_, Vec<u8>>("SELECT hmac($1::bytea, $2::bytea, 'sha1')")
+        .bind(message)
+        .bind(secret)
+        .fetch_one(pool)
+        .await
+        .context("failed to calculate totp hmac")?;
+    if digest.len() < 20 {
+        return Err(anyhow!("invalid totp hmac length"));
+    }
+    let offset = usize::from(digest[19] & 0x0f);
+    let binary = (u32::from(digest[offset] & 0x7f) << 24)
+        | (u32::from(digest[offset + 1]) << 16)
+        | (u32::from(digest[offset + 2]) << 8)
+        | u32::from(digest[offset + 3]);
+    Ok(format!(
+        "{:0width$}",
+        binary % 10_u32.pow(TOTP_DIGITS),
+        width = TOTP_DIGITS as usize
+    ))
+}
+
+fn decode_totp_secret(secret: &str) -> Result<Vec<u8>> {
+    let normalized = secret
+        .chars()
+        .filter(|character| {
+            !character.is_ascii_whitespace() && *character != '-' && *character != '='
+        })
+        .map(|character| character.to_ascii_uppercase())
+        .collect::<String>();
+    if normalized.is_empty() {
+        return Err(anyhow!("totp secret is required"));
+    }
+    let mut buffer = 0_u32;
+    let mut bits = 0_u8;
+    let mut bytes = Vec::new();
+    for character in normalized.chars() {
+        let value = match character {
+            'A'..='Z' => character as u32 - 'A' as u32,
+            '2'..='7' => character as u32 - '2' as u32 + 26,
+            _ => return Ok(secret.as_bytes().to_vec()),
+        };
+        buffer = (buffer << 5) | value;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            bytes.push(((buffer >> bits) & 0xff) as u8);
+        }
+    }
+    if bytes.is_empty() {
+        Ok(secret.as_bytes().to_vec())
+    } else {
+        Ok(bytes)
+    }
+}
+
+fn ip_allowed(client_ip: &str, allowlist: &str) -> bool {
+    let Ok(ip) = client_ip.parse::<IpAddr>() else {
+        return false;
+    };
+    allowlist
+        .split([',', '\n', ';'])
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .any(|entry| entry == "*" || ip_entry_matches(ip, entry))
+}
+
+fn ip_entry_matches(ip: IpAddr, entry: &str) -> bool {
+    if let Ok(exact) = entry.parse::<IpAddr>() {
+        return exact == ip;
+    }
+    let Some((base, prefix)) = entry.split_once('/') else {
+        return false;
+    };
+    let Ok(prefix) = prefix.parse::<u8>() else {
+        return false;
+    };
+    match (ip, base.parse::<IpAddr>()) {
+        (IpAddr::V4(ip), Ok(IpAddr::V4(base))) if prefix <= 32 => cidr_v4(ip, base, prefix),
+        (IpAddr::V6(ip), Ok(IpAddr::V6(base))) if prefix <= 128 => cidr_v6(ip, base, prefix),
+        _ => false,
+    }
+}
+
+fn cidr_v4(ip: Ipv4Addr, base: Ipv4Addr, prefix: u8) -> bool {
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    (u32::from(ip) & mask) == (u32::from(base) & mask)
+}
+
+fn cidr_v6(ip: Ipv6Addr, base: Ipv6Addr, prefix: u8) -> bool {
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u128::MAX << (128 - prefix)
+    };
+    (u128::from(ip) & mask) == (u128::from(base) & mask)
+}
+
+fn first_ip(value: &str) -> Result<String> {
+    let candidate = value
+        .split(',')
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .trim_matches('"')
+        .trim_start_matches("for=")
+        .trim_matches(['[', ']']);
+    candidate
+        .parse::<IpAddr>()
+        .map(|ip| ip.to_string())
+        .context("invalid client IP")
 }
 
 pub fn parse_bearer_token(value: Option<&str>) -> Result<Uuid> {

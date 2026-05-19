@@ -7,12 +7,17 @@ pub mod domain;
 pub mod efiling;
 pub mod error;
 pub mod forms;
+pub mod menu;
 pub mod modules;
+pub mod permissions;
 pub mod queue;
+pub mod scheduler;
+pub mod seed;
 pub mod state;
 pub mod tax;
 pub mod tax_data;
 pub mod tenant;
+pub mod validation_rules;
 pub mod web;
 
 pub use api::router;
