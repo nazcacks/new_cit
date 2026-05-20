@@ -1,0 +1,6 @@
+{
+  "scripts": {
+    "test:frontend": "node tests/frontend/leaf_screens.spec.js",
+    "leaf-smoke": "node tests/frontend/leaf_screens.spec.js"
+  }
+}

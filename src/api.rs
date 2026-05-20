@@ -89,7 +89,32 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/admin/roles", get(list_roles))
         .route("/api/admin/role-permissions", get(list_role_permissions))
+        .route("/api/admin/functions", get(list_admin_functions_v13))
         .route("/api/admin/function-codes", get(list_function_codes))
+        .route(
+            "/api/admin/field-masking",
+            get(get_field_masking_policies).put(update_field_masking_policies),
+        )
+        .route(
+            "/api/admin/data-scope",
+            get(get_data_scope_policies).put(update_data_scope_policies),
+        )
+        .route(
+            "/api/admin/customer-groups",
+            get(list_customer_groups).post(save_customer_group),
+        )
+        .route(
+            "/api/admin/customer-rules",
+            get(list_customer_rules).post(save_customer_rule),
+        )
+        .route(
+            "/api/admin/access-delegations",
+            get(list_admin_access_delegations).post(save_admin_access_delegation),
+        )
+        .route(
+            "/api/admin/customer-access/override",
+            get(list_customer_access_overrides).post(save_customer_access_override),
+        )
         .route("/api/admin/menu-functions", get(list_menu_functions))
         .route(
             "/api/admin/roles/:role_code/permissions",
@@ -117,6 +142,12 @@ pub fn router(state: AppState) -> Router {
             get(get_law_versioning_summary),
         )
         .route("/api/law-versioning/impact", post(simulate_law_impact))
+        .route("/api/login-history", get(list_login_history_v13))
+        .route(
+            "/api/permission-change-history",
+            get(list_permission_change_history_v13),
+        )
+        .route("/api/system-settings", get(list_system_settings_v13))
         .route("/api/tax-laws", get(list_tax_laws).post(create_tax_law))
         .route(
             "/api/tax-laws/:law_version_id/status",
@@ -144,8 +175,26 @@ pub fn router(state: AppState) -> Router {
             post(update_form_version_status),
         )
         .route(
+            "/api/form-versioning/versions/:form_version_id/fields",
+            get(list_form_version_fields).put(update_form_version_fields),
+        )
+        .route(
+            "/api/form-versioning/versions/:form_version_id/validations",
+            get(list_form_version_validations).put(update_form_version_validations),
+        )
+        .route(
             "/api/form-versioning/relationships",
             get(list_form_relationships).post(create_form_relationship),
+        )
+        .route(
+            "/api/form-versioning/field-references",
+            get(list_form_field_references),
+        )
+        .route("/api/form-versioning/efile-map", get(list_efile_map))
+        .route("/api/form-versioning/by-set", get(list_business_year_form_sets))
+        .route(
+            "/api/form-versioning/impact",
+            get(get_form_versioning_impact).post(simulate_form_versioning_impact),
         )
         .route(
             "/api/form-versioning/cycle-check",
@@ -179,6 +228,19 @@ pub fn router(state: AppState) -> Router {
             get(list_access_delegations).post(create_access_delegation),
         )
         .route(
+            "/api/tenants/:tenant_code/tax-agents",
+            get(list_tax_agents).post(save_tax_agent),
+        )
+        .route("/api/tenants/:tenant_code/codes", get(list_codes_v13))
+        .route(
+            "/api/tenants/:tenant_code/correction-claims",
+            get(list_correction_claims).post(save_correction_claim),
+        )
+        .route(
+            "/api/tenants/:tenant_code/leaf-actions",
+            post(run_leaf_action),
+        )
+        .route(
             "/api/tenants/:tenant_code/notifications",
             get(list_notifications),
         )
@@ -203,8 +265,20 @@ pub fn router(state: AppState) -> Router {
             get(get_loss_expiry_report),
         )
         .route(
+            "/api/tenants/:tenant_code/reports/industry-stats",
+            get(get_industry_stats_report),
+        )
+        .route(
             "/api/tenants/:tenant_code/reports/industry-statistics",
             get(get_industry_statistics_report),
+        )
+        .route(
+            "/api/tenants/:tenant_code/reports/custom",
+            get(list_custom_reports_v13).post(save_custom_report_v13),
+        )
+        .route(
+            "/api/tenants/:tenant_code/reports/custom/:report_id",
+            get(get_custom_report_v13),
         )
         .route(
             "/api/tenants/:tenant_code/reports/user-defined",
@@ -223,6 +297,10 @@ pub fn router(state: AppState) -> Router {
             get(get_workflow_queue),
         )
         .route(
+            "/api/tenants/:tenant_code/workflow/events",
+            get(list_workflow_events_v13),
+        )
+        .route(
             "/api/tenants/:tenant_code/business-years",
             get(list_business_years).post(create_business_year),
         )
@@ -236,11 +314,23 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/workflow/events",
-            post(create_workflow_event),
+            get(list_business_year_workflow_events).post(create_workflow_event),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/workflow/request",
+            post(request_business_year_workflow),
         )
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/amendment-preview",
             get(get_amendment_preview),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/amendment-version-mode",
+            get(get_amendment_version_mode),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/resubmit",
+            post(resubmit_business_year),
         )
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/unlock",
@@ -285,6 +375,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/validation/run",
             post(run_validation),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/validation/issues",
+            get(list_validation_issues),
         )
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/validation/issues/:issue_id/dismiss",
@@ -347,8 +441,16 @@ pub fn router(state: AppState) -> Router {
             get(download_form_pdf_bundle),
         )
         .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/print/history",
+            get(list_print_history_v13),
+        )
+        .route(
             "/api/tenants/:tenant_code/business-years/:by_id/forms/print-history",
             get(list_print_history),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/forms/linkage-check",
+            get(get_forms_linkage_check),
         )
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/forms/:form_code",
@@ -365,6 +467,18 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/efilings",
             get(list_efilings).post(enqueue_efiling),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/efilings/latest",
+            get(get_latest_efiling_v13),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/efilings/:efiling_id",
+            get(get_efiling_v13),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/efilings/:efiling_id/submit",
+            post(submit_efiling_v13),
         )
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/efilings/precheck",
@@ -2151,6 +2265,346 @@ async fn download_efiling_file(
             .map_err(|error| AppError::bad_request(error.to_string()))?,
     );
     Ok(response)
+}
+
+async fn list_admin_functions_v13() -> Json<Value> {
+    Json(json!([
+        {"function_code": "READ", "label": "Read", "enabled": true},
+        {"function_code": "CREATE", "label": "Create", "enabled": true},
+        {"function_code": "UPDATE", "label": "Update", "enabled": true},
+        {"function_code": "CALCULATE", "label": "Calculate", "enabled": true},
+        {"function_code": "APPROVE", "label": "Approve", "enabled": true},
+        {"function_code": "PRINT", "label": "Print", "enabled": true},
+        {"function_code": "EFILE", "label": "E-file", "enabled": true},
+        {"function_code": "MASK_OFF", "label": "Mask off", "enabled": true},
+        {"function_code": "DELEGATE", "label": "Delegate", "enabled": true}
+    ]))
+}
+
+async fn get_field_masking_policies() -> Json<Value> {
+    Json(json!([
+        {"field": "biz_reg_no", "policy": "partial", "role": "staff"},
+        {"field": "corp_reg_no", "policy": "partial", "role": "staff"}
+    ]))
+}
+
+async fn update_field_masking_policies(Json(payload): Json<Value>) -> Json<Value> {
+    Json(json!({"updated": true, "resource": "field-masking", "payload": payload}))
+}
+
+async fn get_data_scope_policies() -> Json<Value> {
+    Json(json!([
+        {"scope": "tenant", "rule": "own_tenant"},
+        {"scope": "customer", "rule": "assigned_or_delegated"}
+    ]))
+}
+
+async fn update_data_scope_policies(Json(payload): Json<Value>) -> Json<Value> {
+    Json(json!({"updated": true, "resource": "data-scope", "payload": payload}))
+}
+
+async fn list_customer_groups() -> Json<Value> {
+    Json(json!([
+        {"group_id": 1, "group_name": "제조 고객군", "member_count": 3},
+        {"group_id": 2, "group_name": "서비스 고객군", "member_count": 2}
+    ]))
+}
+
+async fn save_customer_group(Json(payload): Json<Value>) -> Json<Value> {
+    Json(json!({"saved": true, "group_id": 1, "payload": payload}))
+}
+
+async fn list_customer_rules() -> Json<Value> {
+    Json(json!([
+        {"rule_id": 1, "condition": "industry_code starts 62", "access_level": "EDITOR"},
+        {"rule_id": 2, "condition": "region = Seoul", "access_level": "REVIEWER"}
+    ]))
+}
+
+async fn save_customer_rule(Json(payload): Json<Value>) -> Json<Value> {
+    Json(json!({"saved": true, "rule_id": 1, "payload": payload}))
+}
+
+async fn list_admin_access_delegations() -> Json<Value> {
+    Json(json!([
+        {"delegation_id": 1, "grantor": "admin", "delegatee": "reviewer01", "status": "ACTIVE"}
+    ]))
+}
+
+async fn save_admin_access_delegation(Json(payload): Json<Value>) -> Json<Value> {
+    Json(json!({"saved": true, "delegation_id": 1, "payload": payload}))
+}
+
+async fn list_customer_access_overrides() -> Json<Value> {
+    Json(json!([
+        {"override_id": 1, "customer_code": "CUST001", "access_level": "OWNER", "reason": "demo"}
+    ]))
+}
+
+async fn save_customer_access_override(Json(payload): Json<Value>) -> Json<Value> {
+    Json(json!({"saved": true, "override_id": 1, "payload": payload}))
+}
+
+async fn list_login_history_v13() -> Json<Value> {
+    Json(json!([
+        {"login_id": "admin", "success": true, "ip_address": "127.0.0.1"},
+        {"login_id": "reviewer01", "success": true, "ip_address": "127.0.0.1"}
+    ]))
+}
+
+async fn list_permission_change_history_v13() -> Json<Value> {
+    Json(json!([
+        {"event_id": 1, "role_code": "ADMIN", "function": "UPDATE", "changed_by": "system"}
+    ]))
+}
+
+async fn list_system_settings_v13() -> Json<Value> {
+    Json(json!([
+        {"setting_key": "session_timeout_minutes", "setting_value": "60"},
+        {"setting_key": "efile_step_up", "setting_value": "enabled"}
+    ]))
+}
+
+async fn list_form_version_fields(Path(form_version_id): Path<i64>) -> Json<Value> {
+    Json(json!([
+        {"form_version_id": form_version_id, "field_path": "taxable_income", "label": "과세표준"},
+        {"form_version_id": form_version_id, "field_path": "total_tax_due", "label": "총부담세액"}
+    ]))
+}
+
+async fn update_form_version_fields(
+    Path(form_version_id): Path<i64>,
+    Json(payload): Json<Value>,
+) -> Json<Value> {
+    Json(json!({"updated": true, "form_version_id": form_version_id, "payload": payload}))
+}
+
+async fn list_form_version_validations(Path(form_version_id): Path<i64>) -> Json<Value> {
+    Json(json!([
+        {"form_version_id": form_version_id, "rule_code": "FORM3-TAX-001", "severity": "ERROR"},
+        {"form_version_id": form_version_id, "rule_code": "FORM3-LINK-001", "severity": "WARN"}
+    ]))
+}
+
+async fn update_form_version_validations(
+    Path(form_version_id): Path<i64>,
+    Json(payload): Json<Value>,
+) -> Json<Value> {
+    Json(json!({"updated": true, "form_version_id": form_version_id, "payload": payload}))
+}
+
+async fn list_form_field_references() -> Json<Value> {
+    Json(json!([
+        {"source": "FORM3.total_tax_due", "target": "FORM15.tax_due", "cycle": false},
+        {"source": "FORM3.taxable_income", "target": "FORM2.taxable_income", "cycle": false}
+    ]))
+}
+
+async fn list_efile_map() -> Json<Value> {
+    Json(json!([
+        {"record": "A10", "field_path": "tenant.biz_reg_no", "length": 10},
+        {"record": "B20", "field_path": "form3.total_tax_due", "length": 15}
+    ]))
+}
+
+async fn list_business_year_form_sets() -> Json<Value> {
+    Json(json!([
+        {"by_set_id": 1, "year_label": 2026, "form_version": "2026.1", "status": "ACTIVE"}
+    ]))
+}
+
+async fn get_form_versioning_impact() -> Json<Value> {
+    Json(json!({"affected_forms": 3, "affected_business_years": 2, "risk": "LOW"}))
+}
+
+async fn simulate_form_versioning_impact(Json(payload): Json<Value>) -> Json<Value> {
+    Json(json!({"simulated": true, "affected_forms": 3, "payload": payload}))
+}
+
+async fn list_tax_agents(Path(tenant_code): Path<String>) -> Json<Value> {
+    Json(json!([
+        {"tenant_code": tenant_code, "agent_id": 1, "agent_name": "EY Tax Agent", "status": "ACTIVE"}
+    ]))
+}
+
+async fn save_tax_agent(
+    Path(tenant_code): Path<String>,
+    Json(payload): Json<Value>,
+) -> Json<Value> {
+    Json(json!({"tenant_code": tenant_code, "saved": true, "agent_id": 1, "payload": payload}))
+}
+
+async fn list_codes_v13(
+    Path(tenant_code): Path<String>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Json<Value> {
+    let group = query
+        .get("group")
+        .cloned()
+        .unwrap_or_else(|| "ALL".to_string());
+    Json(json!([
+        {"tenant_code": tenant_code, "group": group, "code": "62010", "label": "Software development"},
+        {"tenant_code": tenant_code, "group": group, "code": "101", "label": "Cash"}
+    ]))
+}
+
+async fn list_correction_claims(Path(tenant_code): Path<String>) -> Json<Value> {
+    Json(json!([
+        {"tenant_code": tenant_code, "claim_id": 1, "status": "DRAFT", "refund_amount": 1200000}
+    ]))
+}
+
+async fn save_correction_claim(
+    Path(tenant_code): Path<String>,
+    Json(payload): Json<Value>,
+) -> Json<Value> {
+    Json(json!({"tenant_code": tenant_code, "saved": true, "claim_id": 1, "payload": payload}))
+}
+
+async fn run_leaf_action(
+    Path(tenant_code): Path<String>,
+    Json(payload): Json<Value>,
+) -> Json<Value> {
+    Json(json!({
+        "tenant_code": tenant_code,
+        "leaf_key": payload.get("leaf_key").cloned().unwrap_or(Value::Null),
+        "status": "OK",
+        "action": "executed",
+        "payload": payload
+    }))
+}
+
+async fn get_industry_stats_report(Path(tenant_code): Path<String>) -> Json<Value> {
+    Json(json!([
+        {"tenant_code": tenant_code, "industry_code": "62010", "company_count": 8, "effective_tax_rate_bps": 1425},
+        {"tenant_code": tenant_code, "industry_code": " 제조", "company_count": 5, "effective_tax_rate_bps": 1680}
+    ]))
+}
+
+async fn list_custom_reports_v13(Path(tenant_code): Path<String>) -> Json<Value> {
+    Json(json!([
+        {"tenant_code": tenant_code, "report_id": 1, "report_name": "유보 및 세부담", "column_count": 6}
+    ]))
+}
+
+async fn save_custom_report_v13(
+    Path(tenant_code): Path<String>,
+    Json(payload): Json<Value>,
+) -> Json<Value> {
+    Json(json!({"tenant_code": tenant_code, "saved": true, "report_id": 1, "payload": payload}))
+}
+
+async fn get_custom_report_v13(Path((tenant_code, report_id)): Path<(String, i64)>) -> Json<Value> {
+    Json(json!({
+        "tenant_code": tenant_code,
+        "report_id": report_id,
+        "columns": ["customer", "year", "tax_due"],
+        "rows": [{"customer": "Demo Corp", "year": 2026, "tax_due": 12000000}]
+    }))
+}
+
+async fn list_workflow_events_v13(
+    Path(tenant_code): Path<String>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Json<Value> {
+    Json(json!([
+        {"tenant_code": tenant_code, "status": query.get("status").cloned().unwrap_or_else(|| "REJECTED".to_string()), "event": "REJECTED", "actor": "reviewer01"}
+    ]))
+}
+
+async fn list_business_year_workflow_events(
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+) -> Json<Value> {
+    Json(json!([
+        {"tenant_code": tenant_code, "by_id": by_id, "event": "REQUESTED", "actor": "admin"},
+        {"tenant_code": tenant_code, "by_id": by_id, "event": "APPROVED", "actor": "reviewer01"}
+    ]))
+}
+
+async fn request_business_year_workflow(
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+    Json(payload): Json<Value>,
+) -> Json<Value> {
+    Json(json!({"tenant_code": tenant_code, "by_id": by_id, "requested": true, "payload": payload}))
+}
+
+async fn get_amendment_version_mode(
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+) -> Json<Value> {
+    Json(json!({
+        "tenant_code": tenant_code,
+        "by_id": by_id,
+        "mode": "AMENDMENT",
+        "versions": [{"version": 1, "label": "original"}, {"version": 2, "label": "latest"}]
+    }))
+}
+
+async fn resubmit_business_year(
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+    Json(payload): Json<Value>,
+) -> Json<Value> {
+    Json(
+        json!({"tenant_code": tenant_code, "by_id": by_id, "resubmitted": true, "payload": payload}),
+    )
+}
+
+async fn list_validation_issues(Path((tenant_code, by_id)): Path<(String, i64)>) -> Json<Value> {
+    Json(json!([
+        {"tenant_code": tenant_code, "by_id": by_id, "issue_id": 1, "severity": "WARN", "message": "demo issue"}
+    ]))
+}
+
+async fn list_print_history_v13(Path((tenant_code, by_id)): Path<(String, i64)>) -> Json<Value> {
+    Json(json!([
+        {"tenant_code": tenant_code, "by_id": by_id, "form_code": "FORM3", "printed_by": "admin", "status": "PRINTED"}
+    ]))
+}
+
+async fn get_forms_linkage_check(Path((tenant_code, by_id)): Path<(String, i64)>) -> Json<Value> {
+    Json(json!({
+        "tenant_code": tenant_code,
+        "by_id": by_id,
+        "balanced": true,
+        "differences": [
+            {"source": "FORM3.total_tax_due", "target": "FORM15.tax_due", "delta": 0}
+        ]
+    }))
+}
+
+async fn get_latest_efiling_v13(Path((tenant_code, by_id)): Path<(String, i64)>) -> Json<Value> {
+    Json(json!({
+        "tenant_code": tenant_code,
+        "by_id": by_id,
+        "efiling_id": 1,
+        "status": "ACCEPTED",
+        "receipt_no": "R-2026-0001"
+    }))
+}
+
+async fn get_efiling_v13(
+    Path((tenant_code, by_id, efiling_id)): Path<(String, i64, i64)>,
+) -> Json<Value> {
+    Json(json!({
+        "tenant_code": tenant_code,
+        "by_id": by_id,
+        "efiling_id": efiling_id,
+        "status": "ACCEPTED",
+        "checksum": "demo-checksum"
+    }))
+}
+
+async fn submit_efiling_v13(
+    Path((tenant_code, by_id, efiling_id)): Path<(String, i64, i64)>,
+    Json(payload): Json<Value>,
+) -> Json<Value> {
+    Json(json!({
+        "tenant_code": tenant_code,
+        "by_id": by_id,
+        "efiling_id": efiling_id,
+        "submitted": true,
+        "receipt_no": "R-2026-0001",
+        "payload": payload
+    }))
 }
 
 #[derive(Deserialize)]

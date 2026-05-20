@@ -190,10 +190,6 @@ const screenByDelegate = {
   "ad-audit": renderAdminAudit,
 };
 
-const screenByLeaf = Object.freeze({
-  // Track B leaf screens are registered here as they are split from delegate screens.
-});
-
 function route(group, title, layout, delegate) {
   return { group, title, layout, delegate, s1: false };
 }
@@ -236,6 +232,426 @@ const adjustmentGridColumns = [
   { key: "amount", label: "Amount", format: "money" },
   { key: "disposition", label: "Disposition" },
 ];
+
+export const leafScreenSpecs = Object.freeze({
+  "dashboard:overview": leafSpec("GET", "/api/tenants/{tenant}/dashboard", "dashboard", "READ"),
+  "dashboard:duesoon": leafSpec("GET", "/api/tenants/{tenant}/business-years?dueWithinDays=30", "dashboard", "READ"),
+  "dashboard:inbox": leafSpec("GET", "/api/tenants/{tenant}/workflow/queue?assignee=me", "workflow", "READ"),
+  "dashboard:recent": leafSpec("GET", "/api/tenants/{tenant}/audit-logs?limit=20", "audit", "READ"),
+  "dashboard:kpi-tax": leafSpec("GET", "/api/tenants/{tenant}/reports/tax-burden?range=5y", "reports", "READ"),
+  "ws/start:customer-pick": leafSpec("GET", "/api/tenants/{tenant}/customers", "customer", "READ"),
+  "ws/start:by-pick": leafSpec("GET", "/api/tenants/{tenant}/business-years", "customer", "READ"),
+  "ws/start:snapshot": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/snapshot", "customer", "READ", { requires: ["work-context"] }),
+  "ws/info:fs": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/tax-data/financial-statements", "tax-data", "READ", { requires: ["work-context"] }),
+  "ws/info:mapping": leafSpec("GET", "/api/tenants/{tenant}/customers/{customerId}/account-mappings", "tax-data", "UPDATE", { requires: ["work-context"] }),
+  "ws/info:assets": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/tax-data/assets", "tax-data", "READ", { requires: ["work-context"] }),
+  "ws/info:transactions": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/tax-data/transactions", "tax-data", "READ", { requires: ["work-context"] }),
+  "ws/info:vehicle": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/vehicle-usage-logs", "tax-data", "READ", { requires: ["work-context"] }),
+  "ws/info:consistency": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/tax-data/validation", "tax-data", "CALCULATE", { requires: ["work-context"] }),
+  "ws/adj:B1": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/adjustments/income", "adjustment", "CALCULATE", { requires: ["work-context"] }),
+  "ws/adj:B2": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/adjustments/transactions/B2", "adjustment", "CALCULATE", { requires: ["work-context"] }),
+  "ws/adj:B3": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/adjustments/transactions/B3", "adjustment", "CALCULATE", { requires: ["work-context"] }),
+  "ws/adj:B4": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/adjustments/assets/B4", "adjustment", "CALCULATE", { requires: ["work-context"] }),
+  "ws/adj:B5": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/adjustments/transactions/B5", "adjustment", "CALCULATE", { requires: ["work-context"] }),
+  "ws/adj:B6": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/adjustments/assets/B6", "adjustment", "CALCULATE", { requires: ["work-context"] }),
+  "ws/adj:B7": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/adjustments/assets/B7", "adjustment", "CALCULATE", { requires: ["work-context"] }),
+  "ws/adj:B8": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/adjustments/evaluation/B8", "adjustment", "CALCULATE", { requires: ["work-context"] }),
+  "ws/adj:B9": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/adjustments/transactions/B9", "adjustment", "CALCULATE", { requires: ["work-context"] }),
+  "ws/adj:B10": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/adjustments/assets/B10", "adjustment", "CALCULATE", { requires: ["work-context"] }),
+  "ws/adj:B11": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/adjustments/evaluation/B11", "adjustment", "CALCULATE", { requires: ["work-context"] }),
+  "ws/adj:B12": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/adjustments/tax/B12", "adjustment", "CALCULATE", { requires: ["work-context"] }),
+  "ws/adj:B13": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/adjustments/tax/B13", "adjustment", "CALCULATE", { requires: ["work-context"] }),
+  "ws/adj:B14": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/adjustments/tax/B14", "adjustment", "CALCULATE", { requires: ["work-context"] }),
+  "ws/adj:B15": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/adjustments/evaluation/B15", "adjustment", "CALCULATE", { requires: ["work-context"] }),
+  "ws/adj:B16": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/adjustments/special/B16", "adjustment", "CALCULATE", { requires: ["work-context"] }),
+  "ws/adj:B17": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/adjustments/special/B17", "adjustment", "CALCULATE", { requires: ["work-context"] }),
+  "ws/form:form3": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/forms/FORM3/preview", "forms", "CREATE", { requires: ["work-context"] }),
+  "ws/form:attachments": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/forms/attachments", "forms", "CREATE", { requires: ["work-context"] }),
+  "ws/form:preview": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/forms/FORM3/preview", "forms", "READ", { requires: ["work-context"] }),
+  "ws/form:linkage": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/forms/linkage-check", "forms", "READ", { requires: ["work-context"] }),
+  "ws/val:run": leafSpec("POST", "/api/tenants/{tenant}/business-years/{byId}/validation/run", "validation", "CALCULATE", { requires: ["work-context"] }),
+  "ws/val:issues": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/validation/issues", "validation", "READ", { requires: ["work-context"] }),
+  "ws/val:rules": leafSpec("GET", "/api/tenants/{tenant}/validation/rules", "validation", "READ", { requires: ["work-context"] }),
+  "ws/appr:request": leafSpec("POST", "/api/tenants/{tenant}/business-years/{byId}/workflow/request", "workflow", "APPROVE", { requires: ["work-context"] }),
+  "ws/appr:inbox": leafSpec("GET", "/api/tenants/{tenant}/workflow/queue?assignee=me", "workflow", "READ", { requires: ["work-context"] }),
+  "ws/appr:rejected": leafSpec("GET", "/api/tenants/{tenant}/workflow/events?status=REJECTED", "workflow", "READ", { requires: ["work-context"] }),
+  "ws/print:preview": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/forms/FORM3/preview", "forms", "READ", { requires: ["work-context"] }),
+  "ws/print:bulk": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/forms/attachments", "forms", "PRINT", { requires: ["work-context"] }),
+  "ws/print:history": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/print/history", "forms", "READ", { requires: ["work-context"] }),
+  "ws/file:precheck": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/efilings/precheck", "efiling", "READ", { requires: ["work-context"] }),
+  "ws/file:generate": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/efilings/format-spec", "efiling", "EFILE", { requires: ["work-context"] }),
+  "ws/file:submit": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/efilings", "efiling", "EFILE", { requires: ["work-context"] }),
+  "ws/file:done": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/efilings/latest", "efiling", "READ", { requires: ["work-context"] }),
+  "post/hist:list": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/efilings", "efiling", "READ"),
+  "post/amend:unlock": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/amendment-preview", "post", "UPDATE", { requires: ["work-context"] }),
+  "post/amend:version": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/amendment-version-mode", "post", "CREATE", { requires: ["work-context"] }),
+  "post/amend:diff": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/amendment-preview", "post", "READ", { requires: ["work-context"] }),
+  "post/amend:resubmit": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/amendment-preview", "post", "EFILE", { requires: ["work-context"] }),
+  "post/correction": leafSpec("GET", "/api/tenants/{tenant}/correction-claims", "post", "CREATE"),
+  "report:year-compare": leafSpec("GET", "/api/tenants/{tenant}/reports/year-comparison", "reports", "READ"),
+  "report:tax-burden": leafSpec("GET", "/api/tenants/{tenant}/reports/tax-burden", "reports", "READ"),
+  "report:reserve-trend": leafSpec("GET", "/api/tenants/{tenant}/reports/reserve-trend", "reports", "READ"),
+  "report:loss-expiry": leafSpec("GET", "/api/tenants/{tenant}/reports/loss-expiry", "reports", "READ"),
+  "report:industry-stats": leafSpec("GET", "/api/tenants/{tenant}/reports/industry-stats", "reports", "READ"),
+  "report:custom": leafSpec("GET", "/api/tenants/{tenant}/reports/custom", "reports", "READ"),
+  "admin/cust:list": leafSpec("GET", "/api/tenants/{tenant}/customers", "customer", "READ"),
+  "admin/cust:by-master": leafSpec("GET", "/api/tenants/{tenant}/business-years?bare=true", "customer", "UPDATE"),
+  "admin/cust:agent": leafSpec("GET", "/api/tenants/{tenant}/tax-agents", "customer", "UPDATE"),
+  "admin/sec:users": leafSpec("GET", "/api/admin/tenants/{tenant}/users", "admin", "READ"),
+  "admin/sec:roles": leafSpec("GET", "/api/admin/roles", "admin", "READ"),
+  "admin/sec:matrix": leafSpec("GET", "/api/admin/role-permissions", "admin", "READ"),
+  "admin/sec:menus": leafSpec("GET", "/api/admin/menus", "admin", "UPDATE"),
+  "admin/sec:functions": leafSpec("GET", "/api/admin/functions", "admin", "UPDATE"),
+  "admin/sec:mask": leafSpec("GET", "/api/admin/field-masking", "admin", "MASK_OFF"),
+  "admin/sec:scope": leafSpec("GET", "/api/admin/data-scope", "admin", "UPDATE"),
+  "admin/cacc:assign": leafSpec("GET", "/api/tenants/{tenant}/access-delegations", "permissions", "UPDATE"),
+  "admin/cacc:groups": leafSpec("GET", "/api/admin/customer-groups", "permissions", "UPDATE"),
+  "admin/cacc:rules": leafSpec("GET", "/api/admin/customer-rules", "permissions", "UPDATE"),
+  "admin/cacc:delegate": leafSpec("GET", "/api/admin/access-delegations", "permissions", "DELEGATE"),
+  "admin/cacc:override": leafSpec("GET", "/api/admin/customer-access/override", "permissions", "UPDATE"),
+  "admin/law:master": leafSpec("GET", "/api/tax-laws", "law", "READ"),
+  "admin/law:rates": leafSpec("GET", "/api/tax-rates", "law", "UPDATE"),
+  "admin/law:limits": leafSpec("GET", "/api/tax-limits?category=LIMIT", "law", "UPDATE"),
+  "admin/law:credits": leafSpec("GET", "/api/tax-limits?category=CREDIT", "law", "UPDATE"),
+  "admin/law:depr-lives": leafSpec("GET", "/api/tax-limits?category=DEPRECIATION_LIFE", "law", "UPDATE"),
+  "admin/law:sme": leafSpec("GET", "/api/tax-limits?category=SME_CRITERIA", "law", "UPDATE"),
+  "admin/law:loss-rule": leafSpec("GET", "/api/tax-limits?category=LOSS_RULE", "law", "UPDATE"),
+  "admin/law:snapshots": leafSpec("GET", "/api/law-versioning/summary", "law", "READ"),
+  "admin/law:impact": leafSpec("GET", "/api/law-versioning/summary", "law", "CALCULATE"),
+  "admin/law:history": leafSpec("GET", "/api/law-amendments", "law", "READ"),
+  "admin/form:master": leafSpec("GET", "/api/form-versioning/forms", "forms", "READ"),
+  "admin/form:versions": leafSpec("GET", "/api/form-versioning/versions", "forms", "READ"),
+  "admin/form:fields": leafSpec("GET", "/api/form-versioning/versions/{formVersionId}/fields", "forms", "UPDATE"),
+  "admin/form:validations": leafSpec("GET", "/api/form-versioning/versions/{formVersionId}/validations", "forms", "UPDATE"),
+  "admin/form:linkage-rule": leafSpec("GET", "/api/form-versioning/relationships", "forms", "UPDATE"),
+  "admin/form:migration": leafSpec("GET", "/api/form-versioning/versions", "forms", "CREATE"),
+  "admin/form:efile-map": leafSpec("GET", "/api/form-versioning/efile-map", "forms", "UPDATE"),
+  "admin/form:by-set": leafSpec("GET", "/api/form-versioning/by-set", "forms", "UPDATE"),
+  "admin/form:impact": leafSpec("POST", "/api/form-versioning/impact", "forms", "CALCULATE"),
+  "admin/code:manage": leafSpec("GET", "/api/tenants/{tenant}/codes?group=ALL", "admin", "UPDATE"),
+  "admin/audit:events": leafSpec("GET", "/api/tenants/{tenant}/audit-logs", "audit", "READ"),
+  "admin/audit:login": leafSpec("GET", "/api/login-history", "audit", "READ"),
+  "admin/audit:perm": leafSpec("GET", "/api/permission-change-history", "audit", "READ"),
+  "admin/audit:settings": leafSpec("GET", "/api/system-settings", "audit", "READ"),
+});
+
+export const screenByLeaf = Object.freeze({
+  "dashboard:overview": (env) => renderLeafScreen(env, "dashboard:overview"),
+  "dashboard:duesoon": (env) => renderLeafScreen(env, "dashboard:duesoon"),
+  "dashboard:inbox": (env) => renderLeafScreen(env, "dashboard:inbox"),
+  "dashboard:recent": (env) => renderLeafScreen(env, "dashboard:recent"),
+  "dashboard:kpi-tax": (env) => renderLeafScreen(env, "dashboard:kpi-tax"),
+  "ws/start:customer-pick": (env) => renderLeafScreen(env, "ws/start:customer-pick"),
+  "ws/start:by-pick": (env) => renderLeafScreen(env, "ws/start:by-pick"),
+  "ws/start:snapshot": (env) => renderLeafScreen(env, "ws/start:snapshot"),
+  "ws/info:fs": (env) => renderLeafScreen(env, "ws/info:fs"),
+  "ws/info:mapping": (env) => renderLeafScreen(env, "ws/info:mapping"),
+  "ws/info:assets": (env) => renderLeafScreen(env, "ws/info:assets"),
+  "ws/info:transactions": (env) => renderLeafScreen(env, "ws/info:transactions"),
+  "ws/info:vehicle": (env) => renderLeafScreen(env, "ws/info:vehicle"),
+  "ws/info:consistency": (env) => renderLeafScreen(env, "ws/info:consistency"),
+  "ws/adj:B1": (env) => renderLeafScreen(env, "ws/adj:B1"),
+  "ws/adj:B2": (env) => renderLeafScreen(env, "ws/adj:B2"),
+  "ws/adj:B3": (env) => renderLeafScreen(env, "ws/adj:B3"),
+  "ws/adj:B4": (env) => renderLeafScreen(env, "ws/adj:B4"),
+  "ws/adj:B5": (env) => renderLeafScreen(env, "ws/adj:B5"),
+  "ws/adj:B6": (env) => renderLeafScreen(env, "ws/adj:B6"),
+  "ws/adj:B7": (env) => renderLeafScreen(env, "ws/adj:B7"),
+  "ws/adj:B8": (env) => renderLeafScreen(env, "ws/adj:B8"),
+  "ws/adj:B9": (env) => renderLeafScreen(env, "ws/adj:B9"),
+  "ws/adj:B10": (env) => renderLeafScreen(env, "ws/adj:B10"),
+  "ws/adj:B11": (env) => renderLeafScreen(env, "ws/adj:B11"),
+  "ws/adj:B12": (env) => renderLeafScreen(env, "ws/adj:B12"),
+  "ws/adj:B13": (env) => renderLeafScreen(env, "ws/adj:B13"),
+  "ws/adj:B14": (env) => renderLeafScreen(env, "ws/adj:B14"),
+  "ws/adj:B15": (env) => renderLeafScreen(env, "ws/adj:B15"),
+  "ws/adj:B16": (env) => renderLeafScreen(env, "ws/adj:B16"),
+  "ws/adj:B17": (env) => renderLeafScreen(env, "ws/adj:B17"),
+  "ws/form:form3": (env) => renderLeafScreen(env, "ws/form:form3"),
+  "ws/form:attachments": (env) => renderLeafScreen(env, "ws/form:attachments"),
+  "ws/form:preview": (env) => renderLeafScreen(env, "ws/form:preview"),
+  "ws/form:linkage": (env) => renderLeafScreen(env, "ws/form:linkage"),
+  "ws/val:run": (env) => renderLeafScreen(env, "ws/val:run"),
+  "ws/val:issues": (env) => renderLeafScreen(env, "ws/val:issues"),
+  "ws/val:rules": (env) => renderLeafScreen(env, "ws/val:rules"),
+  "ws/appr:request": (env) => renderLeafScreen(env, "ws/appr:request"),
+  "ws/appr:inbox": (env) => renderLeafScreen(env, "ws/appr:inbox"),
+  "ws/appr:rejected": (env) => renderLeafScreen(env, "ws/appr:rejected"),
+  "ws/print:preview": (env) => renderLeafScreen(env, "ws/print:preview"),
+  "ws/print:bulk": (env) => renderLeafScreen(env, "ws/print:bulk"),
+  "ws/print:history": (env) => renderLeafScreen(env, "ws/print:history"),
+  "ws/file:precheck": (env) => renderLeafScreen(env, "ws/file:precheck"),
+  "ws/file:generate": (env) => renderLeafScreen(env, "ws/file:generate"),
+  "ws/file:submit": (env) => renderLeafScreen(env, "ws/file:submit"),
+  "ws/file:done": (env) => renderLeafScreen(env, "ws/file:done"),
+  "post/hist:list": (env) => renderLeafScreen(env, "post/hist:list"),
+  "post/amend:unlock": (env) => renderLeafScreen(env, "post/amend:unlock"),
+  "post/amend:version": (env) => renderLeafScreen(env, "post/amend:version"),
+  "post/amend:diff": (env) => renderLeafScreen(env, "post/amend:diff"),
+  "post/amend:resubmit": (env) => renderLeafScreen(env, "post/amend:resubmit"),
+  "post/correction": (env) => renderLeafScreen(env, "post/correction"),
+  "report:year-compare": (env) => renderLeafScreen(env, "report:year-compare"),
+  "report:tax-burden": (env) => renderLeafScreen(env, "report:tax-burden"),
+  "report:reserve-trend": (env) => renderLeafScreen(env, "report:reserve-trend"),
+  "report:loss-expiry": (env) => renderLeafScreen(env, "report:loss-expiry"),
+  "report:industry-stats": (env) => renderLeafScreen(env, "report:industry-stats"),
+  "report:custom": (env) => renderLeafScreen(env, "report:custom"),
+  "admin/cust:list": (env) => renderLeafScreen(env, "admin/cust:list"),
+  "admin/cust:by-master": (env) => renderLeafScreen(env, "admin/cust:by-master"),
+  "admin/cust:agent": (env) => renderLeafScreen(env, "admin/cust:agent"),
+  "admin/sec:users": (env) => renderLeafScreen(env, "admin/sec:users"),
+  "admin/sec:roles": (env) => renderLeafScreen(env, "admin/sec:roles"),
+  "admin/sec:matrix": (env) => renderLeafScreen(env, "admin/sec:matrix"),
+  "admin/sec:menus": (env) => renderLeafScreen(env, "admin/sec:menus"),
+  "admin/sec:functions": (env) => renderLeafScreen(env, "admin/sec:functions"),
+  "admin/sec:mask": (env) => renderLeafScreen(env, "admin/sec:mask"),
+  "admin/sec:scope": (env) => renderLeafScreen(env, "admin/sec:scope"),
+  "admin/cacc:assign": (env) => renderLeafScreen(env, "admin/cacc:assign"),
+  "admin/cacc:groups": (env) => renderLeafScreen(env, "admin/cacc:groups"),
+  "admin/cacc:rules": (env) => renderLeafScreen(env, "admin/cacc:rules"),
+  "admin/cacc:delegate": (env) => renderLeafScreen(env, "admin/cacc:delegate"),
+  "admin/cacc:override": (env) => renderLeafScreen(env, "admin/cacc:override"),
+  "admin/law:master": (env) => renderLeafScreen(env, "admin/law:master"),
+  "admin/law:rates": (env) => renderLeafScreen(env, "admin/law:rates"),
+  "admin/law:limits": (env) => renderLeafScreen(env, "admin/law:limits"),
+  "admin/law:credits": (env) => renderLeafScreen(env, "admin/law:credits"),
+  "admin/law:depr-lives": (env) => renderLeafScreen(env, "admin/law:depr-lives"),
+  "admin/law:sme": (env) => renderLeafScreen(env, "admin/law:sme"),
+  "admin/law:loss-rule": (env) => renderLeafScreen(env, "admin/law:loss-rule"),
+  "admin/law:snapshots": (env) => renderLeafScreen(env, "admin/law:snapshots"),
+  "admin/law:impact": (env) => renderLeafScreen(env, "admin/law:impact"),
+  "admin/law:history": (env) => renderLeafScreen(env, "admin/law:history"),
+  "admin/form:master": (env) => renderLeafScreen(env, "admin/form:master"),
+  "admin/form:versions": (env) => renderLeafScreen(env, "admin/form:versions"),
+  "admin/form:fields": (env) => renderLeafScreen(env, "admin/form:fields"),
+  "admin/form:validations": (env) => renderLeafScreen(env, "admin/form:validations"),
+  "admin/form:linkage-rule": (env) => renderLeafScreen(env, "admin/form:linkage-rule"),
+  "admin/form:migration": (env) => renderLeafScreen(env, "admin/form:migration"),
+  "admin/form:efile-map": (env) => renderLeafScreen(env, "admin/form:efile-map"),
+  "admin/form:by-set": (env) => renderLeafScreen(env, "admin/form:by-set"),
+  "admin/form:impact": (env) => renderLeafScreen(env, "admin/form:impact"),
+  "admin/code:manage": (env) => renderLeafScreen(env, "admin/code:manage"),
+  "admin/audit:events": (env) => renderLeafScreen(env, "admin/audit:events"),
+  "admin/audit:login": (env) => renderLeafScreen(env, "admin/audit:login"),
+  "admin/audit:perm": (env) => renderLeafScreen(env, "admin/audit:perm"),
+  "admin/audit:settings": (env) => renderLeafScreen(env, "admin/audit:settings"),
+});
+
+function leafSpec(method, path, module, fn, options = {}) {
+  return {
+    primary: { method, path },
+    action: { method: "POST", path: "/api/tenants/{tenant}/leaf-actions" },
+    perm: { module, function: fn },
+    requires: options.requires || [],
+    featureFlag: options.featureFlag || null,
+  };
+}
+
+async function renderLeafScreen(env, key) {
+  const spec = leafScreenSpecs[key];
+  const meta = { ...(env.routeMeta || routeMeta(key)), leafKey: key };
+  const gate = leafGate(env, key, spec);
+  if (gate) {
+    env.outlet.innerHTML = renderEmptyState(key, gate, meta, spec);
+    bindEmptyStateActions(env, gate);
+    return;
+  }
+
+  const primaryApi = resolveApiPath(spec.primary.path, env);
+  const actionApi = resolveApiPath(spec.action.path, env);
+  let payload;
+  try {
+    payload = await request(primaryApi, apiOptions(spec.primary, key, primaryApi, env));
+  } catch (error) {
+    env.outlet.innerHTML = renderEmptyState(key, {
+      kind: "error",
+      title: "데이터를 불러오지 못했습니다",
+      message: error.message,
+      action: "retry",
+    }, meta, spec, primaryApi, actionApi);
+    bindEmptyStateActions(env, { action: "retry" });
+    return;
+  }
+
+  env.outlet.innerHTML = `
+    <section class="panel leaf-screen" data-leaf-key="${escapeHtml(key)}" data-primary-api="${escapeHtml(primaryApi)}" data-action-api="${escapeHtml(actionApi)}">
+      <div class="panel-head">
+        <div>
+          <span class="badge info">Leaf screen</span>
+          <h2>${escapeHtml(meta.title || key)}</h2>
+          <p>${escapeHtml(key)} · ${escapeHtml(spec.perm.module)}:${escapeHtml(spec.perm.function)}</p>
+        </div>
+        <button class="primary-btn" type="button" data-leaf-action="${escapeHtml(key)}">기능 실행</button>
+      </div>
+      <div class="leaf-api-summary">
+        <span>1차 API</span><strong>${escapeHtml(spec.primary.method)} ${escapeHtml(primaryApi)}</strong>
+        <span>액션 API</span><strong>${escapeHtml(spec.action.method)} ${escapeHtml(actionApi)}</strong>
+      </div>
+      ${renderPayload(payload)}
+      <div class="leaf-action-result" aria-live="polite"></div>
+    </section>`;
+  bindLeafAction(env, key, spec, primaryApi, actionApi);
+}
+
+function leafGate(env, key, spec) {
+  if (spec.requires.includes("work-context") && !hasWorkContext(env.context)) {
+    return {
+      kind: "ctx",
+      title: "작업 컨텍스트가 필요합니다",
+      message: "이 메뉴를 열려면 먼저 고객사와 사업연도를 선택해야 합니다.",
+      action: "work-start",
+    };
+  }
+  if (!canAccessLeaf(env, spec.perm)) {
+    return {
+      kind: "perm",
+      title: "권한이 없습니다",
+      message: `${spec.perm.module}:${spec.perm.function} 권한이 필요합니다.`,
+    };
+  }
+  const flag = spec.featureFlag || env.routeMeta?.feature_flag || null;
+  if (flag && !isFeatureEnabled(env, flag)) {
+    return {
+      kind: "flag",
+      title: "기능 플래그가 꺼져 있습니다",
+      message: `${flag} 기능이 활성화되어야 사용할 수 있습니다.`,
+    };
+  }
+  return null;
+}
+
+function canAccessLeaf(env, perm) {
+  const permissions = env.auth?.permissions;
+  if (!Array.isArray(permissions)) return true;
+  return permissions.some((item) => {
+    if (item === "*") return true;
+    if (typeof item === "string") return item === `${perm.module}:${perm.function}` || item === `${perm.module}:*`;
+    return item.module === perm.module && (item.function === perm.function || item.function === "*");
+  });
+}
+
+function isFeatureEnabled(env, flag) {
+  const flags = env.auth?.featureFlags || env.auth?.feature_flags || {};
+  if (Array.isArray(flags)) return flags.includes(flag);
+  return flags[flag] !== false;
+}
+
+function renderEmptyState(key, gate, meta, spec, primaryApi = "", actionApi = "") {
+  return `
+    <section class="panel empty-state" data-leaf-key="${escapeHtml(key)}" data-empty-kind="${escapeHtml(gate.kind)}" data-primary-api="${escapeHtml(primaryApi)}" data-action-api="${escapeHtml(actionApi)}">
+      <div class="panel-head">
+        <div>
+          <span class="badge warn">Empty state</span>
+          <h2>${escapeHtml(meta.title || key)}</h2>
+          <p>${escapeHtml(key)} · ${escapeHtml(spec.perm.module)}:${escapeHtml(spec.perm.function)}</p>
+        </div>
+      </div>
+      <p class="empty">${escapeHtml(gate.message)}</p>
+      ${gate.action === "work-start" ? '<button id="goStart" class="primary-btn" type="button">고객사·연도 선택하기</button>' : ""}
+      ${gate.action === "retry" ? '<button id="retryLeaf" class="primary-btn" type="button">다시 시도</button>' : ""}
+    </section>`;
+}
+
+function bindEmptyStateActions(env, gate) {
+  if (gate.action === "work-start") {
+    document.getElementById("goStart")?.addEventListener("click", () => env.navigate("ws/start:customer-pick"));
+  }
+  if (gate.action === "retry") {
+    document.getElementById("retryLeaf")?.addEventListener("click", () => env.navigate(env.routeKey || env.leafKey || env.key));
+  }
+}
+
+function bindLeafAction(env, key, spec, primaryApi, actionApi) {
+  document.querySelector(`[data-leaf-action="${cssEscape(key)}"]`)?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    const resultEl = document.querySelector(".leaf-action-result");
+    button.disabled = true;
+    try {
+      const result = await request(actionApi, apiOptions(spec.action, key, primaryApi, env));
+      resultEl.innerHTML = `<strong>액션 완료</strong>${jsonBlock(result)}`;
+    } catch (error) {
+      resultEl.innerHTML = `<strong>액션 실패</strong><p class="empty">${escapeHtml(error.message)}</p>`;
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
+function apiOptions(api, key, primaryApi, env) {
+  if (api.method === "GET") return {};
+  return {
+    method: api.method,
+    body: JSON.stringify({
+      leaf_key: key,
+      primary_api: primaryApi,
+      tenant_code: tenantCode(env),
+      business_year_id: env.context?.byId || 1,
+      by_id: env.context?.byId || 1,
+      customer_id: env.context?.customerId || 1,
+      form_code: "FORM3",
+      to_version_id: 1,
+      law_version_id: 1,
+      include_locked: false,
+      actor: env.auth?.user?.login_id || "ui",
+    }),
+  };
+}
+
+function resolveApiPath(template, env) {
+  const replacements = {
+    tenant: tenantCode(env),
+    byId: env.context?.byId || 1,
+    customerId: env.context?.customerId || 1,
+    formVersionId: env.context?.formVersionId || 1,
+    efilingId: env.context?.efilingId || 1,
+  };
+  return template.replace(/\{(\w+)\}/g, (_, key) => encodeURIComponent(replacements[key] ?? ""));
+}
+
+function renderPayload(payload) {
+  const rows = payloadRows(payload);
+  return `
+    <div class="leaf-response">
+      ${metrics(payloadMetrics(payload))}
+      ${rows.length ? table(payloadHeaders(rows), rows.slice(0, 8).map((item) => row(payloadHeaders(rows).map((key) => escapeHtml(item[key])))), "응답 행이 없습니다.") : ""}
+      <details open>
+        <summary>1차 API 응답</summary>
+        ${jsonBlock(payload)}
+      </details>
+    </div>`;
+}
+
+function payloadRows(payload) {
+  if (Array.isArray(payload)) return payload.filter((item) => item && typeof item === "object");
+  if (!payload || typeof payload !== "object") return [];
+  for (const key of ["rows", "items", "fields", "events", "differences", "issues", "validations", "history"]) {
+    if (Array.isArray(payload[key])) return payload[key].filter((item) => item && typeof item === "object");
+  }
+  return [payload];
+}
+
+function payloadHeaders(rows) {
+  const keys = new Set();
+  rows.slice(0, 5).forEach((item) => Object.keys(item).slice(0, 6).forEach((key) => keys.add(key)));
+  return [...keys].slice(0, 6);
+}
+
+function payloadMetrics(payload) {
+  const rows = payloadRows(payload);
+  const type = Array.isArray(payload) ? "array" : typeof payload;
+  const keys = payload && typeof payload === "object" && !Array.isArray(payload) ? Object.keys(payload).length : rows.length;
+  return [
+    ["응답 타입", type],
+    ["행 수", String(rows.length)],
+    ["필드 수", String(keys)],
+    ["반영 상태", "OK"],
+  ];
+}
+
+function cssEscape(value) {
+  if (window.CSS?.escape) return CSS.escape(value);
+  return String(value).replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+}
 
 export function routeMeta(key) {
   const meta = routes[key] || routes.dashboard;
