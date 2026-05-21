@@ -1,4 +1,4 @@
-import { request, downloadBinary, escapeHtml, money, statusClass, today, asArray, jsonBlock } from "/app/api.js";
+import { request, downloadBinary, escapeHtml, money, statusClass, today, asArray } from "/app/api.js";
 import { bindDataGridActions, renderDataGrid } from "/app/components/grid.js";
 import { hasWorkContext, progressForStatus } from "/app/context.js";
 import { leafFocusText, t } from "/app/i18n.js";
@@ -119,6 +119,7 @@ export const leafRoutes = Object.freeze({
     ["report:custom", "Custom report", "rp-reserve"],
   ].map(([key, title, delegate]) => leafRoute(key, "Analytics/reports", title, "plain", delegate))),
   ...Object.fromEntries([
+    ["admin/tenant:list", "Tenant management", "ad-tenant"],
     ["admin/cust:list", "Customer list", "ad-cust"],
     ["admin/cust:by-master", "Business year master", "ad-cust"],
     ["admin/cust:agent", "Tax agent", "ad-cust"],
@@ -233,6 +234,8 @@ const adjustmentGridColumns = [
   { key: "disposition", label: "Disposition" },
 ];
 
+const leafViewState = new Map();
+
 export const leafScreenSpecs = Object.freeze({
   "dashboard:overview": leafSpec("GET", "/api/tenants/{tenant}/dashboard", "dashboard", "READ"),
   "dashboard:duesoon": leafSpec("GET", "/api/tenants/{tenant}/business-years?dueWithinDays=30", "dashboard", "READ"),
@@ -294,6 +297,7 @@ export const leafScreenSpecs = Object.freeze({
   "report:loss-expiry": leafSpec("GET", "/api/tenants/{tenant}/reports/loss-expiry", "reports", "READ"),
   "report:industry-stats": leafSpec("GET", "/api/tenants/{tenant}/reports/industry-stats", "reports", "READ"),
   "report:custom": leafSpec("GET", "/api/tenants/{tenant}/reports/custom", "reports", "READ"),
+  "admin/tenant:list": leafSpec("GET", "/api/tenants", "admin", "READ"),
   "admin/cust:list": leafSpec("GET", "/api/tenants/{tenant}/customers", "customer", "READ"),
   "admin/cust:by-master": leafSpec("GET", "/api/tenants/{tenant}/business-years?bare=true", "customer", "UPDATE"),
   "admin/cust:agent": leafSpec("GET", "/api/tenants/{tenant}/tax-agents", "customer", "UPDATE"),
@@ -396,6 +400,7 @@ export const screenByLeaf = Object.freeze({
   "report:loss-expiry": (env) => renderLeafScreen(env, "report:loss-expiry"),
   "report:industry-stats": (env) => renderLeafScreen(env, "report:industry-stats"),
   "report:custom": (env) => renderLeafScreen(env, "report:custom"),
+  "admin/tenant:list": (env) => renderAdminTenantLeaf(env),
   "admin/cust:list": (env) => renderLeafScreen(env, "admin/cust:list"),
   "admin/cust:by-master": (env) => renderLeafScreen(env, "admin/cust:by-master"),
   "admin/cust:agent": (env) => renderLeafScreen(env, "admin/cust:agent"),
@@ -444,11 +449,35 @@ function leafSpec(method, path, module, fn, options = {}) {
     perm: { module, function: fn },
     requires: options.requires || [],
     featureFlag: options.featureFlag || null,
+    typology: options.typology || null,
+    columns: options.columns || null,
+    rowKey: options.rowKey || null,
+    update: options.update || null,
+    form: options.form || null,
+    title: options.title || null,
+    description: options.description || null,
+    kpis: options.kpis || null,
   };
 }
 
+async function renderAdminTenantLeaf(env) {
+  const key = "admin/tenant:list";
+  const spec = enrichLeafSpec(key, leafScreenSpecs[key]);
+  const meta = { ...(env.routeMeta || routeMeta(key)), leafKey: key };
+  const roles = env.auth?.user?.roles || [];
+  if (!roles.includes("SUPER_ADMIN") && !roles.includes("TENANT_ADMIN")) {
+    env.outlet.innerHTML = renderEmptyState(key, {
+      kind: "perm",
+      title: "권한이 없습니다",
+      message: "테넌트 관리는 SUPER_ADMIN 또는 TENANT_ADMIN 권한이 필요합니다.",
+    }, meta, spec);
+    return;
+  }
+  await renderAdminTenants(env);
+}
+
 async function renderLeafScreen(env, key) {
-  const spec = leafScreenSpecs[key];
+  const spec = enrichLeafSpec(key, leafScreenSpecs[key]);
   const meta = { ...(env.routeMeta || routeMeta(key)), leafKey: key };
   const gate = leafGate(env, key, spec);
   if (gate) {
@@ -459,9 +488,9 @@ async function renderLeafScreen(env, key) {
 
   const primaryApi = resolveApiPath(spec.primary.path, env);
   const actionApi = resolveApiPath(spec.action.path, env);
-  let payload;
+  let primaryPayload;
   try {
-    payload = await request(primaryApi, apiOptions(spec.primary, key, primaryApi, env));
+    primaryPayload = await request(primaryApi, apiOptions(spec.primary, key, primaryApi, env));
   } catch (error) {
     env.outlet.innerHTML = renderEmptyState(key, {
       kind: "error",
@@ -473,24 +502,975 @@ async function renderLeafScreen(env, key) {
     return;
   }
 
-  env.outlet.innerHTML = `
-    <section class="panel leaf-screen" data-leaf-key="${escapeHtml(key)}" data-primary-api="${escapeHtml(primaryApi)}" data-action-api="${escapeHtml(actionApi)}">
+  const customPayload = await loadLeafRecords(env, key).catch(() => ({ rows: [] }));
+  const primaryRows = normalizeLeafRows(primaryPayload, key, "api");
+  const customRows = normalizeLeafRows(customPayload, key, "leaf_records");
+  const rows = leafRowsForContext(key, env, [...customRows, ...primaryRows]);
+  const state = {
+    env,
+    key,
+    spec,
+    meta,
+    primaryApi,
+    actionApi,
+    rows,
+    query: "",
+    status: "ALL",
+  };
+  leafViewState.set(key, state);
+  env.outlet.innerHTML = renderLeafTemplate(state);
+  bindLeafTemplate(env, state);
+}
+
+async function loadLeafRecords(env, key) {
+  return request(`/api/tenants/${encodeURIComponent(tenantCode(env))}/leaf-records?leaf_key=${encodeURIComponent(key)}`);
+}
+
+function leafRowsForContext(key, env, rows) {
+  const customerId = env.context?.customerId;
+  if (key !== "ws/start:by-pick" || !customerId) return rows;
+  return rows.filter((row) => String(row.customer_id || "") === String(customerId));
+}
+
+const TYPOLOGY_RENDERERS = Object.freeze({
+  grid: renderTypologyGrid,
+  "grid-tree": renderTypologyGridTree,
+  dashboard: renderTypologyDashboard,
+  wizard: renderTypologyWizard,
+  form: renderTypologyForm,
+  chart: renderTypologyChart,
+  detail: renderTypologyDetail,
+});
+
+const TYPOLOGY_GRID_TREE = new Set(["admin/sec:menus", "admin/form:fields", "admin/code:manage"]);
+const TYPOLOGY_DASHBOARD = new Set(["dashboard:overview", "dashboard:duesoon", "dashboard:inbox", "dashboard:recent"]);
+const TYPOLOGY_CHART = new Set(["dashboard:kpi-tax", "report:year-compare", "report:tax-burden", "report:reserve-trend", "report:loss-expiry", "report:industry-stats"]);
+const TYPOLOGY_WIZARD = new Set(["ws/val:run", "ws/file:precheck", "ws/file:generate", "ws/file:submit", "ws/file:done", "post/amend:resubmit", "admin/law:impact", "admin/form:migration", "admin/form:impact"]);
+const TYPOLOGY_FORM = new Set(["ws/appr:request", "post/amend:unlock", "post/amend:version", "post/correction", "report:custom", "admin/cacc:delegate"]);
+const TYPOLOGY_DETAIL = new Set(["ws/start:snapshot", "ws/info:fs", "ws/info:consistency", "ws/form:form3", "ws/form:preview", "ws/print:preview", "post/amend:diff", "admin/law:snapshots", "admin/form:by-set"]);
+const LEAF_FORMATS = ["money", "bps", "date", "datetime", "biz", "corp", "tags", "status", "severity", "link", "boolean", "progress", "code", "email", "phone", "actions"];
+
+function enrichLeafSpec(key, spec) {
+  return {
+    ...spec,
+    typology: spec.typology || leafTypology(key),
+    rowKey: spec.rowKey || inferRowKey(key),
+    update: spec.update || { method: "PATCH", path: "/api/tenants/{tenant}/leaf-records/{recordId}", fallback: "leaf-action" },
+    description: spec.description || leafDescription(key),
+  };
+}
+
+function leafTypology(key) {
+  if (TYPOLOGY_GRID_TREE.has(key)) return "grid-tree";
+  if (TYPOLOGY_DASHBOARD.has(key)) return "dashboard";
+  if (TYPOLOGY_CHART.has(key)) return "chart";
+  if (TYPOLOGY_WIZARD.has(key)) return "wizard";
+  if (TYPOLOGY_FORM.has(key)) return "form";
+  if (TYPOLOGY_DETAIL.has(key)) return "detail";
+  return "grid";
+}
+
+function inferRowKey(key) {
+  if (key.includes("customer") || key === "admin/cust:list") return "customer_id";
+  if (key.includes("by-pick") || key.includes("by-master") || key.includes("business-year")) return "by_id";
+  if (key.includes("users")) return "login_id";
+  if (key.includes("roles")) return "role_code";
+  if (key.includes("menus")) return "menu_key";
+  if (key.includes("law")) return "law_version_id";
+  if (key.includes("form")) return "form_code";
+  return "row_id";
+}
+
+function leafDescription(key) {
+  const typology = leafTypology(key);
+  if (typology === "grid") return "검색, 필터, 추가, 수정, 삭제를 표 안에서 처리합니다.";
+  if (typology === "grid-tree") return "좌측 트리로 범주를 좁히고 우측 표에서 데이터를 관리합니다.";
+  if (typology === "dashboard") return "주요 지표와 보조 업무 카드를 한 화면에 표시합니다.";
+  if (typology === "wizard") return "단계별 확인과 실행 흐름을 제공합니다.";
+  if (typology === "form") return "입력 폼과 미리보기를 나란히 표시합니다.";
+  if (typology === "chart") return "지표를 차트와 보조 표로 요약합니다.";
+  return "선택한 객체의 상세 정보와 관련 데이터를 표시합니다.";
+}
+
+function renderLeafTemplate(state) {
+  const renderer = TYPOLOGY_RENDERERS[state.spec.typology] || renderTypologyGrid;
+  return renderer(state);
+}
+
+function renderTypologyGrid(state) {
+  const rows = filterLeafRows(state);
+  const columns = leafColumns(state.rows, state);
+  return `
+    <section class="leaf-workbench leaf-typology" data-typology="grid" data-leaf-key="${escapeHtml(state.key)}" data-primary-api="${escapeHtml(state.primaryApi)}" data-action-api="${escapeHtml(state.actionApi)}">
+      ${renderLeafSummaryBlock(state, rows)}
+      ${renderLeafTableBlock(state, rows, columns)}
+      ${renderLeafActionResult()}
+    </section>`;
+}
+
+function renderTypologyGridTree(state) {
+  const rows = filterLeafRows(state);
+  const columns = leafColumns(state.rows, state);
+  return `
+    <section class="leaf-workbench leaf-typology layout-tree-and-grid" data-typology="grid-tree" data-leaf-key="${escapeHtml(state.key)}" data-primary-api="${escapeHtml(state.primaryApi)}" data-action-api="${escapeHtml(state.actionApi)}">
+      <aside class="panel tree-panel">
+        <div class="panel-head"><div><h2>분류</h2><p>${escapeHtml(state.spec.description)}</p></div></div>
+        ${renderLeafTree(state, rows)}
+      </aside>
+      <div class="grid-tree-main">
+        ${renderLeafTableBlock(state, rows, columns)}
+        ${renderLeafActionResult()}
+      </div>
+    </section>`;
+}
+
+function renderTypologyDashboard(state) {
+  const rows = filterLeafRows(state);
+  return `
+    <section class="leaf-workbench leaf-typology" data-typology="dashboard" data-leaf-key="${escapeHtml(state.key)}" data-primary-api="${escapeHtml(state.primaryApi)}" data-action-api="${escapeHtml(state.actionApi)}">
+      <section class="dashboard-grid">
+        ${dashboardMetrics(state, rows).map(([label, value, tone]) => `
+          <article class="metric dashboard-metric ${escapeHtml(tone || "")}">
+            <span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong>
+          </article>`).join("")}
+      </section>
+      <section class="dashboard-secondary">
+        ${dashboardCards(state, rows).map((card) => `
+          <article class="panel">
+            <div class="panel-head"><div><h2>${escapeHtml(card.title)}</h2><p>${escapeHtml(card.caption)}</p></div></div>
+            ${card.body}
+          </article>`).join("")}
+      </section>
+      ${renderLeafActionResult()}
+    </section>`;
+}
+
+function renderTypologyWizard(state) {
+  const steps = ["대상 확인", "검증", "실행", "결과"];
+  const active = wizardActiveStep(state.key);
+  return `
+    <section class="leaf-workbench leaf-typology" data-typology="wizard" data-leaf-key="${escapeHtml(state.key)}" data-primary-api="${escapeHtml(state.primaryApi)}" data-action-api="${escapeHtml(state.actionApi)}">
+      <ol class="wizard-stepper">
+        ${steps.map((step, index) => `<li class="${index + 1 < active ? "done" : index + 1 === active ? "active" : ""}"><span>${index + 1}</span>${escapeHtml(step)}</li>`).join("")}
+      </ol>
+      <section class="panel wizard-panel">
+        <div class="panel-head">
+          <div><h2>${escapeHtml(state.meta.title || state.key)}</h2><p>${escapeHtml(state.spec.description)}</p></div>
+          <button class="secondary-btn compact" type="button" data-step-edit data-row-id="${escapeHtml(firstRowId(state))}">단계 수정</button>
+        </div>
+        ${renderWizardBody(state, active)}
+        <div class="wizard-nav">
+          <button class="secondary-btn" type="button" data-wizard-prev ${active === 1 ? "disabled" : ""}>이전</button>
+          <button class="primary-btn" type="button" data-wizard-next>${active === steps.length ? "완료" : "다음"}</button>
+        </div>
+      </section>
+      ${renderLeafActionResult()}
+    </section>`;
+}
+
+function renderTypologyForm(state) {
+  const row = state.rows[0] || newLeafRecordData(state);
+  const columns = editableLeafColumns(state, row);
+  return `
+    <section class="leaf-workbench leaf-typology" data-typology="form" data-leaf-key="${escapeHtml(state.key)}" data-primary-api="${escapeHtml(state.primaryApi)}" data-action-api="${escapeHtml(state.actionApi)}">
+      <section class="grid two form-typology-body">
+        <article class="panel">
+          <div class="panel-head"><div><h2>${escapeHtml(state.meta.title || state.key)}</h2><p>${escapeHtml(state.spec.description)}</p></div></div>
+          <form class="stack" data-leaf-form data-row-id="${escapeHtml(row.__rowId || "")}">
+            ${columns.map((column) => renderEditField(column, row[column.key])).join("")}
+            <button class="primary-btn" type="submit">저장</button>
+          </form>
+        </article>
+        <article class="panel form-preview">
+          <div class="panel-head"><h2>미리보기</h2></div>
+          ${renderObjectTable(row, leafColumns([row], state).slice(0, 6), state)}
+        </article>
+      </section>
+      ${renderLeafActionResult()}
+    </section>`;
+}
+
+function renderTypologyChart(state) {
+  const rows = filterLeafRows(state);
+  const columns = leafColumns(state.rows, state);
+  return `
+    <section class="leaf-workbench leaf-typology" data-typology="chart" data-leaf-key="${escapeHtml(state.key)}" data-primary-api="${escapeHtml(state.primaryApi)}" data-action-api="${escapeHtml(state.actionApi)}">
+      ${renderLeafSummaryBlock(state, rows)}
+      <section class="panel chart-panel">
+        <div class="panel-head">
+          <div><h2>${escapeHtml(state.meta.title || state.key)}</h2><p>${escapeHtml(state.spec.description)}</p></div>
+          <div class="panel-head-actions">
+            <select data-chart-range aria-label="차트 범위"><option>3y</option><option selected>5y</option><option>10y</option></select>
+            <button class="secondary-btn compact" type="button" data-chart-config-edit data-row-id="${escapeHtml(firstRowId(state))}">설정 수정</button>
+          </div>
+        </div>
+        <div class="chart-area" data-chart-target>
+          ${renderChartBars(rows)}
+        </div>
+        ${renderLeafTableShell(state, rows.slice(0, 8), columns)}
+      </section>
+      ${renderLeafActionResult()}
+    </section>`;
+}
+
+function renderTypologyDetail(state) {
+  const row = state.rows[0] || newLeafRecordData(state);
+  const columns = leafColumns([row], state);
+  return `
+    <section class="leaf-workbench leaf-typology" data-typology="detail" data-leaf-key="${escapeHtml(state.key)}" data-primary-api="${escapeHtml(state.primaryApi)}" data-action-api="${escapeHtml(state.actionApi)}">
+      <section class="panel detail-header">
+        <div class="panel-head">
+          <div>
+            <span class="badge info">Detail</span>
+            <h2>${escapeHtml(detailTitle(state, row))}</h2>
+            <p>${escapeHtml(state.spec.description)}</p>
+          </div>
+          <button class="secondary-btn compact" type="button" data-row-edit data-leaf-row-action="edit" data-row-id="${escapeHtml(row.__rowId || "")}">수정</button>
+        </div>
+      </section>
+      <section class="grid two detail-body">
+        <article class="panel">
+          <div class="panel-head"><h2>기본 정보</h2></div>
+          ${renderObjectTable(row, columns.slice(0, 8), state)}
+        </article>
+        <article class="panel">
+          <div class="panel-head"><h2>관련 데이터</h2></div>
+          ${renderObjectTable(row, columns.slice(8, 16).length ? columns.slice(8, 16) : columns.slice(0, 4), state)}
+        </article>
+      </section>
+      ${renderLeafActionResult()}
+    </section>`;
+}
+
+function renderLeafSummaryBlock(state, rows) {
+  const active = rows.filter((row) => String(row.status || row.state || "").toUpperCase() === "ACTIVE").length;
+  const custom = rows.filter((row) => row.__source === "leaf_records").length;
+  return `
+    <section class="panel leaf-summary" data-leaf-block="summary">
       <div class="panel-head">
         <div>
-          <span class="badge info">Leaf screen</span>
-          <h2>${escapeHtml(meta.title || key)}</h2>
-          <p>${escapeHtml(key)} · ${escapeHtml(spec.perm.module)}:${escapeHtml(spec.perm.function)}</p>
+          <span class="badge info">${escapeHtml(state.spec.typology)}</span>
+          <h2>${escapeHtml(state.meta.title || state.key)}</h2>
+          <p>${escapeHtml(state.key)} · ${escapeHtml(state.spec.perm.module)}:${escapeHtml(state.spec.perm.function)}</p>
         </div>
-        <button class="primary-btn" type="button" data-leaf-action="${escapeHtml(key)}">기능 실행</button>
       </div>
-      <div class="leaf-api-summary">
-        <span>1차 API</span><strong>${escapeHtml(spec.primary.method)} ${escapeHtml(primaryApi)}</strong>
-        <span>액션 API</span><strong>${escapeHtml(spec.action.method)} ${escapeHtml(actionApi)}</strong>
-      </div>
-      ${renderPayload(payload)}
-      <div class="leaf-action-result" aria-live="polite"></div>
+      ${metrics([
+        ["전체", money.format(rows.length)],
+        ["활성", money.format(active)],
+        ["사용자 추가", money.format(custom)],
+        ["권한", `${state.spec.perm.module}:${state.spec.perm.function}`],
+      ])}
     </section>`;
-  bindLeafAction(env, key, spec, primaryApi, actionApi);
+}
+
+function renderLeafTableBlock(state, rows, columns = leafColumns(rows, state)) {
+  return `
+    <section class="panel leaf-table" data-leaf-block="table">
+      <div class="panel-head">
+        <div><h2>${escapeHtml(state.meta.title || "목록")}</h2><p>${escapeHtml(rows.length)}건 표시 · ${escapeHtml(state.spec.description)}</p></div>
+        <div class="panel-head-actions" data-leaf-block="filters">
+          ${renderLeafFilterControls(state)}
+          <button class="primary-btn compact" type="button" data-leaf-create="${escapeHtml(state.key)}">+ 추가</button>
+        </div>
+      </div>
+      ${renderLeafTableShell(state, rows, columns)}
+    </section>`;
+}
+
+function renderLeafTableShell(state, rows, columns = leafColumns(rows, state)) {
+  return `
+    <div class="table-wrap">
+      <table>
+        <thead><tr>${columns.map((column) => `<th class="${escapeHtml(leafHeadClass(column))}">${escapeHtml(column.label)}</th>`).join("")}<th class="row-actions-th">관리</th></tr></thead>
+        <tbody data-leaf-table-body>${renderLeafTableRows(state, rows, columns)}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderLeafFilterControls(state) {
+  return `
+    <label class="inline-control">검색 <input type="search" data-leaf-filter="q" value="${escapeHtml(state.query)}" placeholder="키워드" /></label>
+    <label class="inline-control">상태
+      <select data-leaf-filter="status">
+        ${["ALL", "ACTIVE", "DRAFT", "IN_REVIEW", "APPROVED", "FILED", "SUSPENDED"].map((status) => `<option value="${status}" ${state.status === status ? "selected" : ""}>${status}</option>`).join("")}
+      </select>
+    </label>
+    <button class="secondary-btn compact" type="button" data-leaf-filter-reset>초기화</button>`;
+}
+
+function renderLeafTableRows(state, rows, columns = leafColumns(rows, state)) {
+  if (!rows.length) {
+    return `<tr><td colspan="${columns.length + 1}"><div class="empty-state compact"><strong>데이터가 없습니다</strong><p class="empty">+ 추가 버튼으로 새 행을 만들 수 있습니다.</p></div></td></tr>`;
+  }
+  return rows.map((item) => `
+    <tr data-leaf-row="${escapeHtml(item.__rowId)}">
+      ${columns.map((column) => `<td class="${escapeHtml(leafCellClass(column))}" data-format="${escapeHtml(column.format)}">${formatLeafValue(item[column.key], column, item, state)}</td>`).join("")}
+      <td class="row-actions" data-format="actions">${renderLeafRowActions(state, item)}</td>
+    </tr>`).join("");
+}
+
+function renderLeafRowActions(state, item) {
+  return `
+    ${renderLeafPrimaryRowAction(state, item)}
+    <button class="secondary-btn compact" type="button" data-row-edit data-leaf-row-action="edit" data-row-id="${escapeHtml(item.__rowId)}" title="선택 행 수정">수정</button>
+    <button class="danger-btn compact" type="button" data-row-delete data-leaf-row-action="delete" data-row-id="${escapeHtml(item.__rowId)}" title="선택 행 삭제">삭제</button>`;
+}
+
+function renderLeafPrimaryRowAction(state, item) {
+  if (state.key === "ws/start:customer-pick") {
+    return `<button class="primary-btn compact" type="button" data-leaf-row-action="select-customer" data-row-id="${escapeHtml(item.__rowId)}">고객사 선택</button>`;
+  }
+  if (state.key === "ws/start:by-pick") {
+    return `<button class="primary-btn compact" type="button" data-leaf-row-action="select-by" data-row-id="${escapeHtml(item.__rowId)}">사업연도 선택</button>`;
+  }
+  return "";
+}
+
+function renderLeafActionResult() {
+  return `<div class="leaf-action-result" aria-live="polite"></div>`;
+}
+
+function bindLeafTemplate(env, state) {
+  state.env = env;
+  if (env.outlet.__leafClickHandler) env.outlet.removeEventListener("click", env.outlet.__leafClickHandler);
+  if (env.outlet.__leafInputHandler) env.outlet.removeEventListener("input", env.outlet.__leafInputHandler);
+  if (env.outlet.__leafSubmitHandler) env.outlet.removeEventListener("submit", env.outlet.__leafSubmitHandler);
+  env.outlet.__leafClickHandler = (event) => handleLeafClick(event, env, state);
+  env.outlet.__leafInputHandler = (event) => handleLeafInput(event, env, state);
+  env.outlet.__leafSubmitHandler = (event) => handleLeafSubmit(event, env, state);
+  env.outlet.addEventListener("click", env.outlet.__leafClickHandler);
+  env.outlet.addEventListener("input", env.outlet.__leafInputHandler);
+  env.outlet.addEventListener("submit", env.outlet.__leafSubmitHandler);
+}
+
+async function handleLeafClick(event, env, state) {
+  const reset = event.target.closest("[data-leaf-filter-reset]");
+  if (reset) {
+    state.query = "";
+    state.status = "ALL";
+    rerenderLeaf(env, state);
+    return;
+  }
+
+  const create = event.target.closest("[data-leaf-create]");
+  if (create) {
+    await createLeafRow(env, state, create);
+    return;
+  }
+
+  const close = event.target.closest("[data-edit-close]");
+  if (close) {
+    closeLeafModal(env);
+    return;
+  }
+
+  const actionButton = event.target.closest("[data-leaf-row-action], [data-step-edit], [data-card-edit], [data-chart-config-edit]");
+  if (!actionButton) return;
+  const row = findLeafRow(state, actionButton.dataset.rowId) || state.rows[0] || newLeafRecordData(state);
+  const action = actionButton.dataset.leafRowAction || (actionButton.dataset.stepEdit !== undefined ? "edit" : "edit");
+  actionButton.disabled = true;
+  try {
+    if (action === "select-customer") {
+      selectLeafCustomer(env, state, row);
+      return;
+    }
+    if (action === "select-by") {
+      await selectLeafBusinessYear(env, state, row);
+      return;
+    }
+    if (action === "edit") {
+      openEditModal(env, state, row);
+      return;
+    }
+    if (action === "delete") {
+      await deleteLeafRow(env, state, row);
+      state.rows = state.rows.filter((item) => item.__rowId !== row.__rowId);
+      setLeafActionMessage("삭제되었습니다.");
+      rerenderLeaf(env, state);
+    }
+  } catch (error) {
+    setLeafActionMessage(error.message, true);
+  } finally {
+    actionButton.disabled = false;
+  }
+}
+
+function handleLeafInput(event, env, state) {
+  if (!event.target.matches("[data-leaf-filter]")) return;
+  state.query = env.outlet.querySelector('[data-leaf-filter="q"]')?.value || "";
+  state.status = env.outlet.querySelector('[data-leaf-filter="status"]')?.value || "ALL";
+  refreshLeafRows(env, state);
+}
+
+async function handleLeafSubmit(event, env, state) {
+  const editForm = event.target.closest("[data-leaf-edit-form]");
+  const leafForm = event.target.closest("[data-leaf-form]");
+  if (!editForm && !leafForm) return;
+  event.preventDefault();
+  const form = editForm || leafForm;
+  const row = findLeafRow(state, form.dataset.rowId) || state.rows[0] || normalizeLeafRow(newLeafRecordData(state), state.key, "leaf_records", 0);
+  const message = form.querySelector("[data-edit-error]");
+  const submit = form.querySelector('button[type="submit"]');
+  if (submit) submit.disabled = true;
+  if (message) message.textContent = "";
+  try {
+    const values = readLeafFormValues(form, row);
+    const updated = await updateLeafRow(env, state, row, values);
+    upsertLeafRow(state, updated);
+    closeLeafModal(env);
+    setLeafActionMessage("저장되었습니다.");
+    rerenderLeaf(env, state);
+  } catch (error) {
+    if (message) message.textContent = error.message;
+    setLeafActionMessage(error.message, true);
+  } finally {
+    if (submit) submit.disabled = false;
+  }
+}
+
+async function createLeafRow(env, state, button) {
+  button.disabled = true;
+  try {
+    const created = await request(`/api/tenants/${encodeURIComponent(tenantCode(env))}/leaf-records`, {
+      method: "POST",
+      body: JSON.stringify({
+        leaf_key: state.key,
+        data: newLeafRecordData(state),
+      }),
+    });
+    state.rows.unshift(normalizeLeafRow(created.row, state.key, "leaf_records", state.rows.length));
+    setLeafActionMessage("추가되었습니다.");
+    rerenderLeaf(env, state);
+  } catch (error) {
+    setLeafActionMessage(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function openEditModal(env, state, row) {
+  closeLeafModal(env);
+  const columns = editableLeafColumns(state, row);
+  env.outlet.insertAdjacentHTML("beforeend", `
+    <section class="leaf-modal-backdrop" data-leaf-modal>
+      <form class="leaf-edit-modal" data-leaf-edit-form data-row-id="${escapeHtml(row.__rowId || "")}">
+        <div class="panel-head">
+          <div><h2>${escapeHtml(state.meta.title || state.key)} 수정</h2><p>${escapeHtml(row.__rowId || state.spec.rowKey || "-")}</p></div>
+          <button class="secondary-btn compact" type="button" data-edit-close>취소</button>
+        </div>
+        <div class="form-grid">
+          ${columns.map((column) => renderEditField(column, row[column.key])).join("")}
+        </div>
+        <p class="edit-error" data-edit-error></p>
+        <div class="button-row">
+          <button class="primary-btn" type="submit">저장</button>
+          <button class="secondary-btn" type="button" data-edit-close>취소</button>
+        </div>
+      </form>
+    </section>`);
+}
+
+function closeLeafModal(env) {
+  env.outlet.querySelector("[data-leaf-modal]")?.remove();
+}
+
+async function updateLeafRow(env, state, row, values = {}) {
+  const updated = {
+    ...row,
+    ...values,
+    status: values.status || row.status || nextLeafStatus(row.status),
+    updated_at: today(),
+  };
+  if (row.__recordId) {
+    const response = await request(`/api/tenants/${encodeURIComponent(tenantCode(env))}/leaf-records/${encodeURIComponent(row.__recordId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ data: stripLeafInternalFields(updated) }),
+    });
+    return normalizeLeafRow(response.row, state.key, "leaf_records", 0);
+  }
+  await request(state.actionApi, {
+    method: "POST",
+    body: JSON.stringify({
+      leaf_key: state.key,
+      action: "update",
+      row_id: row.__rowId,
+      data: stripLeafInternalFields(updated),
+    }),
+  });
+  return normalizeLeafRow(updated, state.key, row.__source || "api", 0);
+}
+
+async function deleteLeafRow(env, state, row) {
+  if (row.__recordId) {
+    await request(`/api/tenants/${encodeURIComponent(tenantCode(env))}/leaf-records/${encodeURIComponent(row.__recordId)}`, { method: "DELETE" });
+    return;
+  }
+  await request(state.actionApi, {
+    method: "POST",
+    body: JSON.stringify({
+      leaf_key: state.key,
+      action: "delete",
+      row_id: row.__rowId,
+    }),
+  });
+}
+
+function refreshLeafRows(env, state) {
+  const rows = filterLeafRows(state);
+  const columns = leafColumns(state.rows, state);
+  const tbody = env.outlet.querySelector("[data-leaf-table-body]");
+  if (tbody) tbody.innerHTML = renderLeafTableRows(state, rows, columns);
+  const tableHead = env.outlet.querySelector('[data-leaf-block="table"] .panel-head p');
+  if (tableHead) tableHead.textContent = `${rows.length}건 표시 · ${state.spec.description}`;
+}
+
+function rerenderLeaf(env, state) {
+  env.outlet.innerHTML = renderLeafTemplate(state);
+  bindLeafTemplate(env, state);
+}
+
+function selectLeafCustomer(env, state, row) {
+  const customerId = row.customer_id || row.id;
+  if (!customerId) {
+    throw new Error("고객사 ID가 없어 선택할 수 없습니다.");
+  }
+  env.setContext({
+    customerId,
+    customerName: row.customer_name || row.name || row.customer_code || env.context.customerName,
+  });
+  setLeafActionMessage("고객사를 선택했습니다. 사업연도를 선택하세요.");
+  env.navigate("ws/start:by-pick", { customerId });
+}
+
+async function selectLeafBusinessYear(env, state, row) {
+  const byId = row.by_id || row.business_year_id || row.id;
+  if (!byId || !row.customer_id) {
+    throw new Error("사업연도 ID 또는 고객사 ID가 없어 선택할 수 없습니다.");
+  }
+  const by = { ...row, by_id: byId };
+  const customer = await customerForBusinessYear(env, by);
+  await refreshContextFromBy(env, by, customer);
+  setLeafActionMessage("사업연도를 선택했습니다.");
+  env.navigate("ws/info:fs", { byId: by.by_id, customerId: by.customer_id });
+}
+
+async function customerForBusinessYear(env, by) {
+  if (String(env.context?.customerId || "") === String(by.customer_id || "")) {
+    return {
+      customer_id: by.customer_id,
+      customer_name: env.context.customerName,
+    };
+  }
+  const customers = await request(`${routeRoot(env)}/customers`).catch(() => []);
+  return asArray(customers).find((item) => String(item.customer_id) === String(by.customer_id)) || {
+    customer_id: by.customer_id,
+    customer_name: by.customer_name || String(by.customer_id),
+  };
+}
+
+function normalizeLeafRows(payload, key, source) {
+  return extractLeafRows(payload).map((row, index) => normalizeLeafRow(row, key, source, index));
+}
+
+function normalizeLeafRow(row, key, source, index) {
+  const object = row && typeof row === "object" && !Array.isArray(row) ? { ...row } : { value: row };
+  const recordId = object.record_id || null;
+  const rowId = recordId ? `record-${recordId}` : String(object.row_id || object.id || object[`${key.split(":")[0].split("/").pop()}_id`] || object.customer_id || object.by_id || object.login_id || object.menu_key || `api-${index + 1}`);
+  return {
+    ...object,
+    __recordId: recordId,
+    __rowId: rowId,
+    __source: source,
+  };
+}
+
+function extractLeafRows(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== "object") return payload === null || payload === undefined ? [] : [{ value: payload }];
+  if (Array.isArray(payload.rows)) return payload.rows;
+  const preferred = ["items", "customers", "business_years", "users", "roles", "permissions", "events", "issues", "rules", "attachments", "forms", "versions", "fields", "relationships", "rates", "limits", "logs", "histories", "reports", "notifications", "data"];
+  for (const key of preferred) {
+    if (Array.isArray(payload[key])) return payload[key];
+  }
+  const firstArray = Object.values(payload).find((value) => Array.isArray(value));
+  if (firstArray) return firstArray;
+  return [payload];
+}
+
+function leafColumns(rows, state = null) {
+  if (state?.spec?.columns?.length) {
+    return state.spec.columns.map((column) => ({ ...column, format: column.format || inferColumnFormat(column.key) }));
+  }
+  const keys = [];
+  rows.forEach((row) => {
+    Object.keys(row || {}).forEach((key) => {
+      if (!key.startsWith("__") && !["_source", "metadata", "snapshot_data", "payload"].includes(key) && !keys.includes(key)) keys.push(key);
+    });
+  });
+  const selected = prioritizeLeafKeys(keys).slice(0, 7);
+  return (selected.length ? selected : ["row_id", "title", "status"]).map((key) => ({
+    key,
+    label: leafColumnLabel(key),
+    format: inferColumnFormat(key),
+  }));
+}
+
+function prioritizeLeafKeys(keys) {
+  const preferred = ["row_id", "record_id", "tenant_code", "customer_code", "customer_name", "login_id", "role_code", "menu_key", "title", "name", "status", "severity", "year_label", "amount", "tax_due", "progress", "biz_reg_no", "corp_reg_no", "email", "phone", "created_at"];
+  return [...preferred.filter((key) => keys.includes(key)), ...keys.filter((key) => !preferred.includes(key))];
+}
+
+function leafColumnLabel(key) {
+  const labels = {
+    row_id: "ID",
+    record_id: "ID",
+    tenant_code: "테넌트",
+    customer_code: "고객사 코드",
+    customer_name: "고객사",
+    login_id: "사용자",
+    role_code: "역할",
+    menu_key: "메뉴",
+    title: "제목",
+    name: "이름",
+    status: "상태",
+    severity: "등급",
+    year_label: "사업연도",
+    amount: "금액",
+    tax_due: "세액",
+    progress: "진행률",
+    biz_reg_no: "사업자번호",
+    corp_reg_no: "법인등록번호",
+    email: "이메일",
+    phone: "전화",
+    created_at: "생성일",
+    updated_at: "수정일",
+  };
+  return labels[key] || key.replaceAll("_", " ");
+}
+
+function inferColumnFormat(key) {
+  const normalized = key.toLowerCase();
+  if (normalized === "actions") return "actions";
+  if (normalized.includes("email")) return "email";
+  if (normalized.includes("phone") || normalized.includes("mobile")) return "phone";
+  if (normalized.includes("biz_reg")) return "biz";
+  if (normalized.includes("corp_reg")) return "corp";
+  if (normalized.includes("code") || normalized.endsWith("_id") || normalized === "id" || normalized.includes("key")) return "code";
+  if (normalized.includes("bps") || normalized.includes("rate")) return "bps";
+  if (normalized.includes("amount") || normalized.includes("tax") || normalized.includes("income") || normalized.includes("revenue") || normalized.includes("balance") || normalized.includes("refund")) return "money";
+  if (normalized.includes("created_at") || normalized.includes("updated_at") || normalized.includes("acted_at") || normalized.includes("timestamp")) return "datetime";
+  if (normalized.endsWith("_date") || normalized.includes("valid_from") || normalized.includes("valid_to") || normalized.includes("contract_")) return "date";
+  if (normalized.includes("scopes") || normalized.includes("roles") || normalized.includes("tags")) return "tags";
+  if (normalized === "status" || normalized === "state") return "status";
+  if (normalized === "severity") return "severity";
+  if (normalized.includes("url") || normalized.includes("link")) return "link";
+  if (normalized.startsWith("is_") || normalized.includes("locked") || normalized.includes("active") || normalized.includes("valid") || normalized.includes("balanced")) return "boolean";
+  if (normalized.includes("progress") || normalized.includes("percent")) return "progress";
+  return "text";
+}
+
+function filterLeafRows(state) {
+  const query = state.query.trim().toLowerCase();
+  return state.rows.filter((row) => {
+    const status = String(row.status || row.state || "").toUpperCase();
+    const matchesStatus = state.status === "ALL" || status === state.status;
+    const matchesQuery = !query || Object.values(row).some((value) => String(value ?? "").toLowerCase().includes(query));
+    return matchesStatus && matchesQuery;
+  });
+}
+
+function formatLeafValue(value, column = {}, row = {}, state = null) {
+  if (value === null || value === undefined || value === "") return "-";
+  const format = column.format || inferColumnFormat(column.key || "");
+  if (format === "money") return `<span class="num">${escapeHtml(`${money.format(Number(value) || 0)}원`)}</span>`;
+  if (format === "bps") return `${((Number(value) || 0) / 100).toFixed(2)}%`;
+  if (format === "date") return escapeHtml(formatDate(value));
+  if (format === "datetime") return escapeHtml(formatDateTime(value));
+  if (format === "biz") return `<span class="code-cell">${escapeHtml(formatBizNo(value))}</span>`;
+  if (format === "corp") return `<span class="code-cell">${escapeHtml(formatCorpNo(value))}</span>`;
+  if (format === "tags") return renderTags(value);
+  if (format === "status") return pill(value);
+  if (format === "severity") return `<span class="badge ${escapeHtml(severityClass(value))}">${escapeHtml(value)}</span>`;
+  if (format === "link") return renderLeafLink(value, row, state);
+  if (format === "boolean") return `<span class="boolean-mark ${value ? "yes" : "no"}">${value ? "Y" : "N"}</span>`;
+  if (format === "progress") return renderProgress(value);
+  if (format === "code") return `<span class="code-cell">${escapeHtml(value)}</span>`;
+  if (format === "email") return escapeHtml(maskEmail(value));
+  if (format === "phone") return escapeHtml(maskPhone(value));
+  if (Array.isArray(value)) return renderTags(value);
+  if (typeof value === "object") return escapeHtml(compactObjectLabel(value));
+  return escapeHtml(value);
+}
+
+function compactObjectLabel(value) {
+  const keys = Object.keys(value || {});
+  if (!keys.length) return "{}";
+  return keys.slice(0, 3).map((key) => `${key}:${value[key]}`).join(" · ");
+}
+
+function newLeafRecordData(state) {
+  return {
+    title: `${state.meta.title || state.key} 항목`,
+    status: "DRAFT",
+    leaf_key: state.key,
+    created_at: today(),
+    owner: "UI",
+  };
+}
+
+function stripLeafInternalFields(row) {
+  return Object.fromEntries(Object.entries(row).filter(([key]) => !key.startsWith("__")));
+}
+
+function nextLeafStatus(status) {
+  const value = String(status || "DRAFT").toUpperCase();
+  if (value === "DRAFT") return "ACTIVE";
+  if (value === "ACTIVE") return "IN_REVIEW";
+  if (value === "IN_REVIEW") return "APPROVED";
+  return "DRAFT";
+}
+
+function setLeafActionMessage(message, error = false) {
+  const result = document.querySelector(".leaf-action-result");
+  if (result) result.innerHTML = `<strong>${error ? "액션 실패" : "액션 완료"}</strong><p class="empty">${escapeHtml(message)}</p>`;
+}
+
+function leafHeadClass(column) {
+  return ["money", "bps", "progress"].includes(column.format) ? "align-right" : "";
+}
+
+function leafCellClass(column) {
+  return ["money", "bps", "progress"].includes(column.format) ? "align-right" : "";
+}
+
+function editableLeafColumns(state, row = {}) {
+  const blocked = new Set(["record_id", "row_id", "tenant_code", "leaf_key", "_source", state.spec.rowKey]);
+  const columns = leafColumns([row], state).filter((column) => {
+    const value = row[column.key];
+    return !blocked.has(column.key)
+      && column.format !== "actions"
+      && value !== undefined
+      && (value === null || typeof value !== "object" || Array.isArray(value));
+  });
+  if (columns.length) return columns.slice(0, 8);
+  return [
+    { key: "title", label: "제목", format: "text" },
+    { key: "status", label: "상태", format: "status" },
+  ];
+}
+
+function renderEditField(column, value) {
+  const inputType = editInputType(column.format);
+  if (column.format === "boolean") {
+    return `<label class="checkbox-field"><span>${escapeHtml(column.label)}</span><input name="${escapeHtml(column.key)}" type="checkbox" ${value ? "checked" : ""} /></label>`;
+  }
+  if (column.format === "tags") {
+    return `<label>${escapeHtml(column.label)}<input name="${escapeHtml(column.key)}" value="${escapeHtml(asArray(value).join(", "))}" placeholder="쉼표로 구분" /></label>`;
+  }
+  if (String(value || "").length > 80) {
+    return `<label>${escapeHtml(column.label)}<textarea name="${escapeHtml(column.key)}">${escapeHtml(value || "")}</textarea></label>`;
+  }
+  return `<label>${escapeHtml(column.label)}<input name="${escapeHtml(column.key)}" type="${inputType}" value="${escapeHtml(value ?? "")}" /></label>`;
+}
+
+function editInputType(format) {
+  if (format === "date") return "date";
+  if (format === "datetime") return "datetime-local";
+  if (format === "money" || format === "bps" || format === "progress") return "number";
+  if (format === "email") return "email";
+  if (format === "phone") return "tel";
+  return "text";
+}
+
+function readLeafFormValues(form, row) {
+  const values = {};
+  form.querySelectorAll("[name]").forEach((control) => {
+    const key = control.name;
+    const current = row[key];
+    if (control.type === "checkbox") {
+      values[key] = control.checked;
+    } else if (Array.isArray(current)) {
+      values[key] = control.value.split(",").map((item) => item.trim()).filter(Boolean);
+    } else if (typeof current === "number") {
+      values[key] = Number(control.value || 0);
+    } else {
+      values[key] = control.value;
+    }
+  });
+  return values;
+}
+
+function findLeafRow(state, rowId) {
+  if (!rowId) return null;
+  return state.rows.find((row) => String(row.__rowId) === String(rowId)) || null;
+}
+
+function upsertLeafRow(state, row) {
+  const index = state.rows.findIndex((item) => item.__rowId === row.__rowId);
+  if (index >= 0) {
+    state.rows[index] = row;
+  } else {
+    state.rows.unshift(row);
+  }
+}
+
+function firstRowId(state) {
+  return state.rows[0]?.__rowId || "";
+}
+
+function renderLeafTree(state, rows) {
+  const groups = new Map();
+  rows.forEach((row) => {
+    const raw = row.parent_key || row.menu_key || row.group_code || row.category || row.status || "전체";
+    const label = String(raw).split(/[/:.]/)[0] || "전체";
+    groups.set(label, (groups.get(label) || 0) + 1);
+  });
+  if (!groups.size) return `<p class="empty">표시할 분류가 없습니다.</p>`;
+  return `<ul class="leaf-tree">${[...groups.entries()].map(([label, count]) => `<li><button type="button" class="secondary-btn compact" data-tree-node="${escapeHtml(label)}">${escapeHtml(label)} <span>${money.format(count)}</span></button></li>`).join("")}</ul>`;
+}
+
+function dashboardMetrics(state, rows) {
+  const active = rows.filter((row) => String(row.status || row.state || "").toUpperCase() === "ACTIVE").length;
+  const warnings = rows.filter((row) => ["WARN", "ERROR"].includes(String(row.severity || "").toUpperCase())).length;
+  return [
+    ["전체", money.format(rows.length), "info"],
+    ["활성", money.format(active), "ok"],
+    ["대기", money.format(rows.filter((row) => String(row.status || "").includes("PENDING")).length), "warn"],
+    ["주의", money.format(warnings), "warn"],
+    ["사용자 추가", money.format(rows.filter((row) => row.__source === "leaf_records").length), "info"],
+  ];
+}
+
+function dashboardCards(state, rows) {
+  const sample = rows.slice(0, 5);
+  const list = sample.length
+    ? `<ul class="compact-list">${sample.map((row) => `<li><strong>${escapeHtml(detailTitle(state, row))}</strong><span>${escapeHtml(row.status || row.severity || row.created_at || "-")}</span></li>`).join("")}</ul>`
+    : `<p class="empty">표시할 항목이 없습니다.</p>`;
+  return [
+    { title: "업무 현황", caption: state.key, body: list },
+    { title: "최근 항목", caption: `${sample.length}건`, body: list },
+    { title: "가이드", caption: state.spec.typology, body: `<p class="empty">${escapeHtml(state.spec.description)}</p>` },
+  ];
+}
+
+function wizardActiveStep(key) {
+  if (key.endsWith(":generate")) return 2;
+  if (key.endsWith(":submit") || key.endsWith(":resubmit")) return 3;
+  if (key.endsWith(":done")) return 4;
+  return 1;
+}
+
+function renderWizardBody(state, active) {
+  const rows = state.rows.slice(0, 4);
+  return `
+    <div class="wizard-body" data-wizard-step="${active}">
+      ${metrics([
+        ["단계", `${active}/4`],
+        ["대상", money.format(state.rows.length)],
+        ["상태", state.rows[0]?.status || "READY"],
+        ["유형", state.spec.typology],
+      ])}
+      <div class="wizard-checklist">
+        ${(rows.length ? rows : [newLeafRecordData(state)]).map((row, index) => `
+          <article class="card">
+            <span class="badge ${index + 1 <= active ? "ok" : "info"}">${index + 1}</span>
+            <strong>${escapeHtml(detailTitle(state, row))}</strong>
+            <p>${escapeHtml(row.status || row.state || state.spec.description)}</p>
+          </article>`).join("")}
+      </div>
+    </div>`;
+}
+
+function renderChartBars(rows) {
+  const points = rows.slice(0, 8).map((row) => ({ label: chartLabel(row), value: chartValue(row) }));
+  const max = Math.max(...points.map((point) => point.value), 1);
+  if (!points.length) return `<p class="empty">차트로 표시할 데이터가 없습니다.</p>`;
+  return `<div class="chart-bars">${points.map((point) => `
+    <div class="chart-bar-row">
+      <span>${escapeHtml(point.label)}</span>
+      <div class="chart-bar-track"><i style="width:${Math.max(4, Math.round(point.value / max * 100))}%"></i></div>
+      <strong>${escapeHtml(money.format(point.value))}</strong>
+    </div>`).join("")}</div>`;
+}
+
+function chartLabel(row) {
+  return String(row.customer_name || row.report_name || row.year_label || row.item_name || row.title || row.row_id || row.__rowId || "-");
+}
+
+function chartValue(row) {
+  const entry = Object.entries(row).find(([key, value]) => typeof value === "number" && !key.endsWith("_id"));
+  return Math.max(0, Number(entry?.[1] || 0));
+}
+
+function detailTitle(state, row) {
+  return row.customer_name || row.report_name || row.form_name || row.title || row.name || row.menu_key || row.login_id || row.role_code || row.__rowId || state.meta.title || state.key;
+}
+
+function renderObjectTable(object, columns, state) {
+  if (!columns.length) return `<p class="empty">표시할 필드가 없습니다.</p>`;
+  return table(["항목", "값"], columns.map((column) => row([
+    escapeHtml(column.label),
+    formatLeafValue(object[column.key], column, object, state),
+  ])));
+}
+
+function formatDate(value) {
+  const text = String(value || "");
+  return text.includes("T") ? text.slice(0, 10) : text.slice(0, 10) || "-";
+}
+
+function formatDateTime(value) {
+  const text = String(value || "");
+  if (!text) return "-";
+  return text.replace("T", " ").slice(0, 16);
+}
+
+function formatBizNo(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (digits.length !== 10) return String(value || "-");
+  return `${digits.slice(0, 3)}-${digits.slice(3, 5)}-${digits.slice(5)}`;
+}
+
+function formatCorpNo(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (digits.length !== 13) return String(value || "-");
+  return `${digits.slice(0, 6)}-${digits.slice(6)}`;
+}
+
+function renderTags(value) {
+  const tags = Array.isArray(value) ? value : String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+  if (!tags.length) return "-";
+  return `<span class="tag-list">${tags.map((tag) => `<span class="tag-chip">${escapeHtml(typeof tag === "object" ? compactObjectLabel(tag) : tag)}</span>`).join("")}</span>`;
+}
+
+function severityClass(value) {
+  const severity = String(value || "").toUpperCase();
+  if (severity === "ERROR" || severity === "CRITICAL") return "danger";
+  if (severity === "WARN" || severity === "WARNING") return "warn";
+  return "info";
+}
+
+function renderLeafLink(value, row, state) {
+  const href = String(value || "").startsWith("http") || String(value || "").startsWith("#") ? String(value) : keyToHash(String(value || state?.key || "dashboard:overview"));
+  return `<a class="leaf-link" href="${escapeHtml(href)}">${escapeHtml(row.title || row.name || value)}</a>`;
+}
+
+function renderProgress(value) {
+  const progress = Math.max(0, Math.min(100, Number(value) || 0));
+  return `<div class="bar-track progress-cell"><span style="width:${progress}%"></span></div><span class="progress-label">${progress}%</span>`;
+}
+
+function maskEmail(value) {
+  const text = String(value || "");
+  const [name, domain] = text.split("@");
+  if (!domain) return text;
+  return `${name.slice(0, 2)}***@${domain}`;
+}
+
+function maskPhone(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (digits.length < 7) return String(value || "");
+  return `${digits.slice(0, 3)}-****-${digits.slice(-4)}`;
 }
 
 function leafGate(env, key, spec) {
@@ -561,22 +1541,6 @@ function bindEmptyStateActions(env, gate) {
   }
 }
 
-function bindLeafAction(env, key, spec, primaryApi, actionApi) {
-  document.querySelector(`[data-leaf-action="${cssEscape(key)}"]`)?.addEventListener("click", async (event) => {
-    const button = event.currentTarget;
-    const resultEl = document.querySelector(".leaf-action-result");
-    button.disabled = true;
-    try {
-      const result = await request(actionApi, apiOptions(spec.action, key, primaryApi, env));
-      resultEl.innerHTML = `<strong>액션 완료</strong>${jsonBlock(result)}`;
-    } catch (error) {
-      resultEl.innerHTML = `<strong>액션 실패</strong><p class="empty">${escapeHtml(error.message)}</p>`;
-    } finally {
-      button.disabled = false;
-    }
-  });
-}
-
 function apiOptions(api, key, primaryApi, env) {
   if (api.method === "GET") return {};
   return {
@@ -608,46 +1572,6 @@ function resolveApiPath(template, env) {
   return template.replace(/\{(\w+)\}/g, (_, key) => encodeURIComponent(replacements[key] ?? ""));
 }
 
-function renderPayload(payload) {
-  const rows = payloadRows(payload);
-  return `
-    <div class="leaf-response">
-      ${metrics(payloadMetrics(payload))}
-      ${rows.length ? table(payloadHeaders(rows), rows.slice(0, 8).map((item) => row(payloadHeaders(rows).map((key) => escapeHtml(item[key])))), "응답 행이 없습니다.") : ""}
-      <details open>
-        <summary>1차 API 응답</summary>
-        ${jsonBlock(payload)}
-      </details>
-    </div>`;
-}
-
-function payloadRows(payload) {
-  if (Array.isArray(payload)) return payload.filter((item) => item && typeof item === "object");
-  if (!payload || typeof payload !== "object") return [];
-  for (const key of ["rows", "items", "fields", "events", "differences", "issues", "validations", "history"]) {
-    if (Array.isArray(payload[key])) return payload[key].filter((item) => item && typeof item === "object");
-  }
-  return [payload];
-}
-
-function payloadHeaders(rows) {
-  const keys = new Set();
-  rows.slice(0, 5).forEach((item) => Object.keys(item).slice(0, 6).forEach((key) => keys.add(key)));
-  return [...keys].slice(0, 6);
-}
-
-function payloadMetrics(payload) {
-  const rows = payloadRows(payload);
-  const type = Array.isArray(payload) ? "array" : typeof payload;
-  const keys = payload && typeof payload === "object" && !Array.isArray(payload) ? Object.keys(payload).length : rows.length;
-  return [
-    ["응답 타입", type],
-    ["행 수", String(rows.length)],
-    ["필드 수", String(keys)],
-    ["반영 상태", "OK"],
-  ];
-}
-
 function cssEscape(value) {
   if (window.CSS?.escape) return CSS.escape(value);
   return String(value).replaceAll("\\", "\\\\").replaceAll('"', '\\"');
@@ -674,7 +1598,8 @@ export async function refreshHealth(badge, text, locale = "ko") {
 export async function renderScreen(env) {
   const meta = routes[env.key] || routes.dashboard;
   const displayMeta = { ...meta, ...(env.routeMeta || {}) };
-  if (meta.layout === "workspace") {
+  const showFlowChrome = shouldShowFlowChrome(env.key, meta);
+  if (showFlowChrome) {
     renderLawBanner(env.lawBanner, env.context);
   } else {
     hideLawBanner(env.lawBanner);
@@ -693,6 +1618,16 @@ export async function renderScreen(env) {
   if (meta.s1) {
     prependLeafFocus(env.outlet, env.key, displayMeta, env.locale);
   }
+  if (showFlowChrome) {
+    await appendNextStepCard(env.outlet, leafEnv);
+  }
+}
+
+function shouldShowFlowChrome(key, meta) {
+  return meta.layout === "workspace"
+    || key.startsWith("post/amend:")
+    || key.startsWith("admin/law:")
+    || key.startsWith("admin/form:");
 }
 
 function hideLawBanner(container) {
@@ -766,7 +1701,7 @@ function workRoot(env) {
 function requireWorkContext(env) {
   if (hasWorkContext(env.context)) return true;
   env.outlet.innerHTML = `
-    <section class="panel work-context-empty" data-leaf-key="${escapeHtml(env.routeKey || env.leafKey || env.key)}">
+    <section class="panel empty-state work-context-empty" data-leaf-key="${escapeHtml(env.routeKey || env.leafKey || env.key)}">
       <div class="panel-head"><h2>작업 컨텍스트가 필요합니다</h2></div>
       <p class="empty">이 신고 작업 메뉴를 열려면 먼저 고객사와 사업연도를 선택해야 합니다. 아래 버튼을 누르면 작업 시작 화면으로 이동합니다.</p>
       <button id="goStart" class="primary-btn" type="button">고객사·연도 선택하기</button>
@@ -777,19 +1712,74 @@ function requireWorkContext(env) {
 
 function renderLawBanner(container, context) {
   if (!hasWorkContext(context)) {
-    container.classList.add("hidden");
-    container.innerHTML = "";
+    container.classList.remove("hidden");
+    container.classList.add("empty");
+    container.innerHTML = `
+      <div>
+        <span>업무 흐름</span>
+        <strong>고객사와 사업연도를 선택하면 적용 법령과 서식 버전을 표시합니다.</strong>
+      </div>
+      <button class="secondary-btn compact" type="button" data-flow-start>작업 시작</button>`;
+    container.querySelector("[data-flow-start]")?.addEventListener("click", () => {
+      window.location.hash = "#/workspace/ws/start/customer-pick";
+    });
     return;
   }
   const snapshot = context.snapshot || {};
   const data = snapshot.snapshot_data || {};
   container.classList.remove("hidden");
+  container.classList.remove("empty");
   container.innerHTML = `
     <div><span>고객사</span><strong>${escapeHtml(context.customerName || "-")}</strong></div>
     <div><span>사업연도</span><strong>${escapeHtml(context.fy || "-")}</strong></div>
-    <div><span>상태</span><strong>${escapeHtml(context.status || "-")}</strong></div>
-    <div><span>적용 법령</span><strong>${escapeHtml(data.law_version?.version_code || snapshot.law_version_id || "-")}</strong></div>
+    <div><span>적용 법령</span><strong>${escapeHtml(lawLabel(data.law_version?.version_code || snapshot.law_version_id || "-"))}</strong></div>
+    <div><span>서식 버전</span><strong>${escapeHtml(lawLabel(data.form?.version_no || data.form_version || snapshot.form_version_id || "-"))}</strong></div>
   `;
+}
+
+async function appendNextStepCard(outlet, env) {
+  const key = env.routeKey || env.leafKey || env.key;
+  if (!hasWorkContext(env.context)) {
+    outlet.insertAdjacentHTML("beforeend", `
+      <section class="flow-next-card" data-flow-card="${escapeHtml(key)}">
+        <div class="panel-head">
+          <div><h2>다음 단계 추천</h2><p class="empty">고객사와 사업연도를 선택하면 다음 업무 단계가 표시됩니다.</p></div>
+          <button class="primary-btn" type="button" data-next-leaf="ws/start:customer-pick">작업 시작</button>
+        </div>
+      </section>`);
+    bindNextStepNavigation(outlet, env);
+    return;
+  }
+  let progress;
+  try {
+    progress = await request(`${workRoot(env)}/progress`);
+  } catch {
+    progress = { status: env.context.status || "DRAFT", next_leaf: "ws/info:fs", progress: env.context.progress || 0, recommendations: [] };
+  }
+  const next = progress.recommendations?.[0] || { leaf_key: progress.next_leaf || "ws/info:fs", label: "Next step", enabled: true };
+  outlet.insertAdjacentHTML("beforeend", `
+    <section class="flow-next-card" data-flow-card="${escapeHtml(key)}" data-progress-api="${escapeHtml(`${workRoot(env)}/progress`)}">
+      <div class="panel-head">
+        <div>
+          <span class="badge ok">Workflow</span>
+          <h2>다음 단계 추천</h2>
+          <p>${escapeHtml(progress.status || env.context.status || "DRAFT")} · 진행률 ${escapeHtml(progress.progress ?? env.context.progress ?? 0)}%</p>
+        </div>
+        <button class="primary-btn" type="button" data-next-leaf="${escapeHtml(next.leaf_key)}" ${next.enabled === false ? "disabled" : ""}>${escapeHtml(next.label || "다음 단계")}</button>
+      </div>
+    </section>`);
+  bindNextStepNavigation(outlet, env);
+}
+
+function bindNextStepNavigation(outlet, env) {
+  outlet.querySelectorAll("[data-next-leaf]").forEach((button) => {
+    button.addEventListener("click", () => env.navigate(button.dataset.nextLeaf));
+  });
+}
+
+function lawLabel(value) {
+  if (!value || value === "-") return "-";
+  return String(value).replaceAll("_", " ");
 }
 
 function metrics(items) {
@@ -814,9 +1804,42 @@ function pill(status) {
   return `<span class="status-pill ${statusClass(status)}">${escapeHtml(status || "-")}</span>`;
 }
 
-function bindJsonDump(id, value) {
-  const el = document.getElementById(id);
-  if (el) el.textContent = JSON.stringify(value, null, 2);
+function renderSnapshotSummary(snapshot) {
+  const data = snapshot?.snapshot_data || {};
+  const law = data.law || data.law_version || {};
+  const form = data.form || {};
+  return table(["항목", "값"], [
+    row(["스냅샷 ID", escapeHtml(snapshot?.snapshot_id || "-")]),
+    row(["법령 버전", escapeHtml(law.version_code || snapshot?.law_version_id || "-")]),
+    row(["서식 버전", escapeHtml(form.version_no || form.form_version || snapshot?.form_version_ids || "-")]),
+    row(["잠금", snapshot?.locked ? "Y" : "N"]),
+  ]);
+}
+
+function renderTaxDataValidationSummary(validation) {
+  return table(["항목", "값"], [
+    row(["차변 합계", money.format(validation.debit_total || 0)]),
+    row(["대변 합계", money.format(validation.credit_total || 0)]),
+    row(["차대 일치", validation.balanced ? "Y" : "N"]),
+    row(["미매핑 계정", money.format(validation.unresolved_mapping_count || 0)]),
+    row(["배치 오류", money.format(validation.batch_error_count || 0)]),
+  ]);
+}
+
+function renderValidationOverview(taxData, efile) {
+  return `
+    ${metrics([
+      ["차대 일치", taxData.balanced ? "Y" : "N"],
+      ["미매핑", money.format(taxData.unresolved_mapping_count || 0)],
+      ["배치 오류", money.format(taxData.batch_error_count || 0)],
+      ["전자신고", efile?.valid ? "가능" : "확인 필요"],
+    ])}
+    ${table(["검증 항목", "현재 값"], [
+      row(["재무제표 라인", money.format(taxData.fs_line_count || 0)]),
+      row(["자산", money.format(taxData.asset_count || 0)]),
+      row(["업무용 차량", money.format(taxData.business_vehicle_count || 0)]),
+      row(["거래", money.format(taxData.transaction_count || 0)]),
+    ])}`;
 }
 
 async function refreshContextFromBy(env, by, customer) {
@@ -928,7 +1951,7 @@ async function renderWorkStart(env) {
       const by = years.find((item) => String(item.by_id) === button.dataset.selectBy);
       const customer = customers.find((item) => item.customer_id === by.customer_id);
       await refreshContextFromBy(env, by, customer);
-      document.getElementById("snapshotPreview").innerHTML = jsonBlock(env.context.snapshot || {});
+      document.getElementById("snapshotPreview").innerHTML = renderSnapshotSummary(env.context.snapshot || {});
       env.navigate("ws-info", { byId: by.by_id, customerId: by.customer_id });
     });
   });
@@ -992,7 +2015,7 @@ async function renderWorkInfo(env) {
         </article>
         <article class="panel">
           <div class="panel-head"><h2>일관성 검증</h2><button id="taxDataValidate" class="secondary-btn compact" type="button">실행</button></div>
-          ${jsonBlock(validation)}
+          ${renderTaxDataValidationSummary(validation)}
         </article>
       </section>
       <section class="grid three">
@@ -1281,7 +2304,7 @@ async function renderValidation(env) {
       ${metrics([["규칙", rules.length], ["차변/대변", taxData.balanced ? "일치" : "불일치"], ["전자신고", efile?.valid ? "가능" : "확인 필요"], ["오류", "-"]])}
       <article class="panel">
         <div class="panel-head"><h2>통합 검증</h2><button id="runValidation" class="primary-btn" type="button">실행</button></div>
-        <div id="validationResult">${jsonBlock({ tax_data: taxData, efiling: efile })}</div>
+        <div id="validationResult">${renderValidationOverview(taxData, efile)}</div>
       </article>
     </section>`;
   document.getElementById("runValidation").addEventListener("click", async () => {
@@ -1300,7 +2323,7 @@ function renderValidationResult(root, result) {
       escapeHtml(issue.message),
       `<button class="secondary-btn compact" data-dismiss-issue="${issue.issue_id}" type="button">무시</button>`,
     ])), "검증 이슈가 없습니다.")}
-    <pre>${escapeHtml(JSON.stringify({ pass: result.pass }, null, 2))}</pre>`;
+    <p class="empty">검증 결과: ${result.pass ? "통과" : "확인 필요"}</p>`;
 }
 
 function bindDismissButtons(root) {
@@ -1583,29 +2606,88 @@ function chartRow(label, value, max) {
 
 async function renderAdminTenants(env) {
   const tenants = await request("/api/tenants");
+  const canManage = env.auth?.user?.roles?.includes("SUPER_ADMIN");
+  const planCounts = tenants.reduce((acc, item) => {
+    acc[item.plan || "STANDARD"] = (acc[item.plan || "STANDARD"] || 0) + 1;
+    return acc;
+  }, {});
   env.outlet.innerHTML = `
-    <section class="grid two">
-      <article class="panel">
-        <div class="panel-head"><h2>테넌트</h2></div>
-        ${table(["코드", "이름", "상태", "최대 사용자"], tenants.map((item) => row([escapeHtml(item.tenant_code), escapeHtml(item.tenant_name), escapeHtml(item.status), escapeHtml(item.max_users)])))}
+    <section class="leaf-workbench leaf-typology" data-typology="grid" data-leaf-key="admin/tenant:list">
+      <section class="panel leaf-summary" data-leaf-block="summary">
+      <div class="panel-head">
+        <div><span class="badge info">Leaf workbench</span><h2>테넌트 관리</h2><p>admin/tenant:list · admin:READ</p></div>
+      </div>
+      ${metrics([
+        ["전체 테넌트", tenants.length],
+        ["ACTIVE", tenants.filter((item) => item.status === "ACTIVE").length],
+        ["SUSPENDED", tenants.filter((item) => item.status === "SUSPENDED").length],
+        ["ENTERPRISE", planCounts.ENTERPRISE || 0],
+      ])}
+      </section>
+      <article class="panel leaf-table" data-leaf-block="table">
+        <div class="panel-head">
+          <div><h2>테넌트</h2><p>${tenants.length}건 표시 · 상태와 요금제를 표 안에서 관리합니다.</p></div>
+          <div class="panel-head-actions" data-leaf-block="filters">
+          <label>검색 <input type="search" data-tenant-filter="q" placeholder="테넌트 코드/이름" /></label>
+          <label>상태 <select data-tenant-filter="status"><option>ALL</option><option>ACTIVE</option><option>SUSPENDED</option><option>CLOSED</option></select></label>
+          <button class="secondary-btn compact" type="button" data-tenant-filter-reset>초기화</button>
+            <button class="primary-btn compact" type="submit" form="tenantForm" ${canManage ? "" : "disabled"}>+ 추가</button>
+          </div>
+        </div>
+        ${table(["코드", "이름", "상태", "요금제", "최대 사용자", "관리"], tenants.map((item) => row([
+          escapeHtml(item.tenant_code),
+          escapeHtml(item.tenant_name),
+          canManage ? `<select data-tenant-status="${escapeHtml(item.tenant_code)}"><option ${item.status === "ACTIVE" ? "selected" : ""}>ACTIVE</option><option ${item.status === "SUSPENDED" ? "selected" : ""}>SUSPENDED</option><option ${item.status === "CLOSED" ? "selected" : ""}>CLOSED</option></select>` : pill(item.status),
+          canManage ? `<select data-tenant-plan="${escapeHtml(item.tenant_code)}"><option ${item.plan === "FREE" ? "selected" : ""}>FREE</option><option ${item.plan === "STANDARD" ? "selected" : ""}>STANDARD</option><option ${item.plan === "PRO" ? "selected" : ""}>PRO</option><option ${item.plan === "ENTERPRISE" ? "selected" : ""}>ENTERPRISE</option></select>` : escapeHtml(item.plan || "STANDARD"),
+          escapeHtml(item.max_users),
+          canManage ? `<button class="secondary-btn compact" type="button" data-save-tenant="${escapeHtml(item.tenant_code)}">저장</button>` : "",
+        ])))}
       </article>
-      <article class="panel">
-        <div class="panel-head"><h2>등록</h2></div>
+      <article class="panel tenant-create-panel">
+        <div class="panel-head"><h2>신규 테넌트</h2><span class="badge info">표 상단 + 추가로 저장</span></div>
         <form id="tenantForm" class="stack">
           <label>코드 <input id="tenantCodeInput" value="tenant${Date.now().toString(36).slice(-4)}" /></label>
           <label>이름 <input id="tenantNameInput" value="신규 테넌트" /></label>
           <label>사업자번호 <input id="tenantBizInput" value="1234567890" /></label>
+          <label>요금제 <select id="tenantPlanInput"><option>STANDARD</option><option>PRO</option><option>ENTERPRISE</option><option>FREE</option></select></label>
           <label>Allowed IPs <input id="tenantAllowedIpsInput" placeholder="203.0.113.10/32" /></label>
           <label>계약 시작 <input id="tenantStartInput" type="date" value="${today()}" /></label>
-          <button class="primary-btn" type="submit">등록</button>
         </form>
       </article>
     </section>`;
+  const applyTenantFilters = () => {
+    const query = document.querySelector('[data-tenant-filter="q"]')?.value.toLowerCase() || "";
+    const status = document.querySelector('[data-tenant-filter="status"]')?.value || "ALL";
+    document.querySelectorAll('[data-leaf-block="table"] tbody tr').forEach((tr) => {
+      const text = tr.textContent.toLowerCase();
+      const rowStatus = tr.querySelector("[data-tenant-status]")?.value || tr.children[2]?.textContent.trim() || "";
+      tr.style.display = (!query || text.includes(query)) && (status === "ALL" || rowStatus === status) ? "" : "none";
+    });
+  };
+  document.querySelectorAll("[data-tenant-filter]").forEach((control) => control.addEventListener("input", applyTenantFilters));
+  document.querySelector("[data-tenant-filter-reset]")?.addEventListener("click", () => {
+    const q = document.querySelector('[data-tenant-filter="q"]');
+    const status = document.querySelector('[data-tenant-filter="status"]');
+    if (q) q.value = "";
+    if (status) status.value = "ALL";
+    applyTenantFilters();
+  });
+  document.querySelectorAll("[data-save-tenant]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const code = button.dataset.saveTenant;
+      const status = document.querySelector(`[data-tenant-status="${CSS.escape(code)}"]`)?.value;
+      const plan = document.querySelector(`[data-tenant-plan="${CSS.escape(code)}"]`)?.value;
+      await request(`/api/tenants/${code}/status`, { method: "PATCH", body: JSON.stringify({ status }) });
+      await request(`/api/tenants/${code}/plan`, { method: "PATCH", body: JSON.stringify({ plan }) });
+      await renderAdminTenants(env);
+    });
+  });
   document.getElementById("tenantForm").addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (!canManage) return;
     await request("/api/tenants", {
       method: "POST",
-      body: JSON.stringify({ tenant_code: document.getElementById("tenantCodeInput").value, tenant_name: document.getElementById("tenantNameInput").value, biz_reg_no: document.getElementById("tenantBizInput").value, contract_start: document.getElementById("tenantStartInput").value, contract_end: null, allowed_ips: document.getElementById("tenantAllowedIpsInput").value || null, max_users: 10 }),
+      body: JSON.stringify({ tenant_code: document.getElementById("tenantCodeInput").value, tenant_name: document.getElementById("tenantNameInput").value, biz_reg_no: document.getElementById("tenantBizInput").value, contract_start: document.getElementById("tenantStartInput").value, contract_end: null, allowed_ips: document.getElementById("tenantAllowedIpsInput").value || null, max_users: 10, plan: document.getElementById("tenantPlanInput").value }),
     });
     await renderAdminTenants(env);
   });
@@ -1777,7 +2859,10 @@ async function renderAdminCustomerAccess(env) {
         const customer = customers.find((item) => item.customer_id === access.customer_id);
         return row([escapeHtml(user.login_id), escapeHtml(customer?.customer_name || access.customer_id), escapeHtml(access.access_level), escapeHtml(asArray(access.work_scopes).join(", "))]);
       })))}</article>
-      <article class="panel">${jsonBlock({ customers: customers.map((item) => ({ customer_id: item.customer_id, work_scopes: item.work_scopes })) })}</article>
+      <article class="panel">${table(["고객사", "업무범위"], customers.map((item) => row([
+        escapeHtml(item.customer_name || item.customer_id),
+        escapeHtml(asArray(item.work_scopes).join(", ") || "-"),
+      ])))}</article>
       </section>
       <section class="grid two">
         <article class="panel">

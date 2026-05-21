@@ -10,7 +10,8 @@ use crate::{
         CreateTenantRequest, CreateUserReportDefinitionRequest, Customer, DashboardSummary,
         Notification, ReserveTrendReportRow, TaxBurdenReportRow, Tenant, TenantRef,
         UnlockBusinessYearRequest, UpdateBusinessYearStatusRequest, UpdateNotificationRequest,
-        WorkflowEvent, WorkflowEventRequest, WorkflowQueueItem, YearComparisonReportRow,
+        UpdateTenantPlanRequest, UpdateTenantStatusRequest, WorkflowEvent, WorkflowEventRequest,
+        WorkflowQueueItem, YearComparisonReportRow,
     },
 };
 
@@ -36,9 +37,31 @@ pub fn normalize_tenant_code(code: &str) -> Result<String> {
     Ok(normalized)
 }
 
+fn normalize_tenant_status(status: &str) -> Result<String> {
+    let normalized = status.trim().to_ascii_uppercase();
+    if matches!(normalized.as_str(), "ACTIVE" | "SUSPENDED" | "CLOSED") {
+        Ok(normalized)
+    } else {
+        anyhow::bail!("invalid tenant status");
+    }
+}
+
+fn normalize_tenant_plan(plan: &str) -> Result<String> {
+    let normalized = plan.trim().to_ascii_uppercase();
+    if matches!(
+        normalized.as_str(),
+        "FREE" | "STANDARD" | "PRO" | "ENTERPRISE"
+    ) {
+        Ok(normalized)
+    } else {
+        anyhow::bail!("invalid tenant plan");
+    }
+}
+
 pub async fn create_tenant(pool: &PgPool, request: CreateTenantRequest) -> Result<Tenant> {
     let tenant_code = normalize_tenant_code(&request.tenant_code)?;
     let schema_name = format!("tenant_{tenant_code}");
+    let plan = normalize_tenant_plan(request.plan.as_deref().unwrap_or("STANDARD"))?;
 
     let tenant = sqlx::query_as::<_, Tenant>(
         r#"
@@ -50,12 +73,13 @@ pub async fn create_tenant(pool: &PgPool, request: CreateTenantRequest) -> Resul
             contract_end,
             schema_name,
             allowed_ips,
-            max_users
+            max_users,
+            plan
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, 10))
+        VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, 10), $9)
         RETURNING
             tenant_id, tenant_code, tenant_name, biz_reg_no, contract_start,
-            contract_end, schema_name, status, allowed_ips, max_users,
+            contract_end, schema_name, status, plan, suspended_at, allowed_ips, max_users,
             created_at, updated_at
         "#,
     )
@@ -67,6 +91,7 @@ pub async fn create_tenant(pool: &PgPool, request: CreateTenantRequest) -> Resul
     .bind(&schema_name)
     .bind(request.allowed_ips)
     .bind(request.max_users)
+    .bind(plan)
     .fetch_one(pool)
     .await
     .context("failed to insert tenant")?;
@@ -93,7 +118,7 @@ pub async fn list_tenants(pool: &PgPool) -> Result<Vec<Tenant>> {
     sqlx::query_as::<_, Tenant>(
         r#"
         SELECT tenant_id, tenant_code, tenant_name, biz_reg_no, contract_start,
-               contract_end, schema_name, status, allowed_ips, max_users,
+               contract_end, schema_name, status, plan, suspended_at, allowed_ips, max_users,
                created_at, updated_at
         FROM tenants
         ORDER BY tenant_code
@@ -102,6 +127,96 @@ pub async fn list_tenants(pool: &PgPool) -> Result<Vec<Tenant>> {
     .fetch_all(pool)
     .await
     .context("failed to list tenants")
+}
+
+pub async fn suggest_tenants(pool: &PgPool, q: Option<&str>) -> Result<Vec<Value>> {
+    let pattern = format!("%{}%", q.unwrap_or("").trim().to_ascii_lowercase());
+    let rows = sqlx::query(
+        r#"
+        SELECT tenant_code, tenant_name, status, plan
+        FROM tenants
+        WHERE status = 'ACTIVE'
+          AND (
+              $1 = '%%'
+              OR tenant_code ILIKE $1
+              OR tenant_name ILIKE $1
+          )
+        ORDER BY
+          CASE WHEN tenant_code = TRIM(BOTH '%' FROM $1) THEN 0 ELSE 1 END,
+          tenant_code
+        LIMIT 10
+        "#,
+    )
+    .bind(pattern)
+    .fetch_all(pool)
+    .await
+    .context("failed to suggest tenants")?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            json!({
+                "tenant_code": row.get::<String, _>("tenant_code"),
+                "tenant_name": row.get::<String, _>("tenant_name"),
+                "status": row.get::<String, _>("status"),
+                "plan": row.get::<String, _>("plan"),
+            })
+        })
+        .collect())
+}
+
+pub async fn update_tenant_status(
+    pool: &PgPool,
+    tenant_code: &str,
+    request: UpdateTenantStatusRequest,
+) -> Result<Tenant> {
+    let tenant_code = normalize_tenant_code(tenant_code)?;
+    let status = normalize_tenant_status(&request.status)?;
+    sqlx::query_as::<_, Tenant>(
+        r#"
+        UPDATE tenants
+        SET status = $2,
+            suspended_at = CASE
+                WHEN $2 = 'SUSPENDED' THEN COALESCE(suspended_at, NOW())
+                WHEN $2 = 'ACTIVE' THEN NULL
+                ELSE suspended_at
+            END,
+            updated_at = NOW()
+        WHERE tenant_code = $1
+        RETURNING tenant_id, tenant_code, tenant_name, biz_reg_no, contract_start,
+                  contract_end, schema_name, status, plan, suspended_at, allowed_ips,
+                  max_users, created_at, updated_at
+        "#,
+    )
+    .bind(tenant_code)
+    .bind(status)
+    .fetch_one(pool)
+    .await
+    .context("failed to update tenant status")
+}
+
+pub async fn update_tenant_plan(
+    pool: &PgPool,
+    tenant_code: &str,
+    request: UpdateTenantPlanRequest,
+) -> Result<Tenant> {
+    let tenant_code = normalize_tenant_code(tenant_code)?;
+    let plan = normalize_tenant_plan(&request.plan)?;
+    sqlx::query_as::<_, Tenant>(
+        r#"
+        UPDATE tenants
+        SET plan = $2,
+            updated_at = NOW()
+        WHERE tenant_code = $1
+        RETURNING tenant_id, tenant_code, tenant_name, biz_reg_no, contract_start,
+                  contract_end, schema_name, status, plan, suspended_at, allowed_ips,
+                  max_users, created_at, updated_at
+        "#,
+    )
+    .bind(tenant_code)
+    .bind(plan)
+    .fetch_one(pool)
+    .await
+    .context("failed to update tenant plan")
 }
 
 pub async fn resolve_tenant(pool: &PgPool, tenant_code: &str) -> Result<TenantRef> {
@@ -1854,6 +1969,70 @@ pub async fn get_business_year_workflow(
     })
 }
 
+pub async fn business_year_progress(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+) -> Result<Value> {
+    let by = get_business_year(pool, tenant, by_id).await?;
+    let events = list_workflow_events(pool, tenant, by_id)
+        .await
+        .unwrap_or_default();
+    let progress = progress_for_status(&by.status);
+    let active_index = active_step_index(&by.status);
+    let steps = [
+        ("ws-start", "0. Start", "ws/start:customer-pick", 0),
+        ("ws-info", "1. Input", "ws/info:fs", 20),
+        ("ws-adj", "2. Adjust", "ws/adj:B1", 45),
+        ("ws-form", "3. Forms", "ws/form:form3", 60),
+        ("ws-val", "4. Validate", "ws/val:run", 70),
+        ("ws-appr", "5. Approve", "ws/appr:request", 85),
+        ("ws-print", "6. Print", "ws/print:preview", 92),
+        ("ws-file", "7. E-file", "ws/file:precheck", 100),
+    ];
+    let step_values = steps
+        .iter()
+        .enumerate()
+        .map(|(index, (code, label, leaf, threshold))| {
+            json!({
+                "code": code,
+                "label": label,
+                "leaf_key": leaf,
+                "required": index > 0,
+                "done": by.status == "FILED" || progress >= *threshold && index < active_index,
+                "active": index == active_index,
+                "pending": by.status != "FILED" && index > active_index
+            })
+        })
+        .collect::<Vec<_>>();
+    let next_leaf = match by.status.as_str() {
+        "FILED" => "ws/file:done",
+        "APPROVED" => "ws/print:preview",
+        "IN_REVIEW" => "ws/appr:inbox",
+        "AMENDED" => "ws/info:fs",
+        _ => "ws/info:fs",
+    };
+    Ok(json!({
+        "tenant_code": tenant.tenant_code,
+        "by_id": by.by_id,
+        "status": by.status,
+        "lock_mode": by.lock_mode,
+        "locked": by.locked_at.is_some(),
+        "progress": progress,
+        "steps": step_values,
+        "next_leaf": next_leaf,
+        "recommendations": [
+            {
+                "leaf_key": next_leaf,
+                "label": "Next step",
+                "enabled": by.status != "FILED",
+                "reason": if by.status == "FILED" { "Filed work is complete" } else { "Continue the filing workflow" }
+            }
+        ],
+        "workflow_event_count": events.len()
+    }))
+}
+
 pub async fn list_workflow_events(
     pool: &PgPool,
     tenant: &TenantRef,
@@ -2123,5 +2302,27 @@ fn validate_business_year_status_transition(current: &str, next: &str) -> Result
         Ok(())
     } else {
         anyhow::bail!("invalid business year status transition: {current} -> {next}");
+    }
+}
+
+fn progress_for_status(status: &str) -> i32 {
+    match status {
+        "DRAFT" => 20,
+        "IN_REVIEW" => 85,
+        "APPROVED" => 92,
+        "FILED" => 100,
+        "AMENDED" => 35,
+        _ => 0,
+    }
+}
+
+fn active_step_index(status: &str) -> usize {
+    match status {
+        "DRAFT" => 1,
+        "IN_REVIEW" => 5,
+        "APPROVED" => 6,
+        "FILED" => 7,
+        "AMENDED" => 1,
+        _ => 0,
     }
 }

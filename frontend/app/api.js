@@ -65,10 +65,6 @@ export function today() {
   return new Date().toISOString().slice(0, 10);
 }
 
-export function jsonBlock(value) {
-  return `<pre>${escapeHtml(JSON.stringify(value, null, 2))}</pre>`;
-}
-
 export function asArray(value) {
   return Array.isArray(value) ? value : [];
 }

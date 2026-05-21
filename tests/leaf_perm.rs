@@ -5,7 +5,7 @@ use serde_json::Value;
 fn v13_leaf_permissions_context_and_empty_state_contract_are_consistent() {
     let tree = modules::module_tree();
     let leaves = collect_leaves(&tree);
-    assert_eq!(leaves.len(), 99);
+    assert_eq!(leaves.len(), 100);
 
     for leaf in &leaves {
         let code = leaf["code"].as_str().unwrap();

@@ -1858,7 +1858,7 @@ fn assert_module_tree_matches_design(tree: &Value) {
 
     let modules = tree["children"].as_array().expect("module children");
     assert_eq!(modules.len(), 5);
-    assert_eq!(leaf_count(tree), 99, "v1.2 active leaf menu count");
+    assert_eq!(leaf_count(tree), 100, "v1.4 active leaf menu count");
 
     assert_eq!(
         module_by_code(modules, "dashboard")["path"],
@@ -1905,7 +1905,7 @@ fn assert_module_tree_matches_design(tree: &Value) {
             .as_array()
             .unwrap()
             .len(),
-        7
+        8
     );
 
     assert_children(

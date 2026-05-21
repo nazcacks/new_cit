@@ -23,7 +23,7 @@ async fn v13_leaf_routes_and_new_backend_routes_are_reachable() {
 
     let tree = get_json(&client, &format!("{base_url}/api/modules/tree")).await;
     let leaves = collect_leaves(&tree);
-    assert_eq!(leaves.len(), 99, "v1.3 must keep the active 99 leaf IA");
+    assert_eq!(leaves.len(), 100, "v1.4 must expose the active 100 leaf IA");
 
     let routes = v13_routes(&base_url, tenant, by_id);
     assert!(
@@ -40,6 +40,16 @@ async fn v13_leaf_routes_and_new_backend_routes_are_reachable() {
                 .await
                 .unwrap(),
             Method::PUT => client.put(&case.url).json(&json!({})).send().await.unwrap(),
+            Method::PATCH => {
+                let payload = if case.url.ends_with("/status") {
+                    json!({"status": "ACTIVE"})
+                } else if case.url.ends_with("/plan") {
+                    json!({"plan": "STANDARD"})
+                } else {
+                    json!({})
+                };
+                client.patch(&case.url).json(&payload).send().await.unwrap()
+            }
             _ => unreachable!("unsupported method"),
         };
         let status = response.status();
@@ -80,7 +90,17 @@ fn v13_routes(base_url: &str, tenant: &str, by_id: i64) -> Vec<RouteCase> {
         method: Method::PUT,
         url: path,
     };
+    let patch = |path: String| RouteCase {
+        method: Method::PATCH,
+        url: path,
+    };
     vec![
+        get(format!("{base_url}/api/tenants")),
+        patch(format!("{base_url}/api/tenants/{tenant}/status")),
+        patch(format!("{base_url}/api/tenants/{tenant}/plan")),
+        get(format!(
+            "{base_url}/api/tenants/{tenant}/business-years/{by_id}/progress"
+        )),
         get(format!(
             "{base_url}/api/tenants/{tenant}/reports/industry-stats"
         )),

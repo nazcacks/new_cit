@@ -42,7 +42,7 @@ pub fn prototype_menu_tree() -> Value {
         "description": "Corporate income tax workspace menu",
         "path": "#/dashboard/overview",
         "implemented": true,
-        "version": "v1.2",
+            "version": "v1.4",
         "children": children_for(&defs, None),
     })
 }
@@ -229,6 +229,15 @@ fn prototype_menu_defs() -> Vec<MenuDef> {
             320,
         ),
         group(
+            "admin/tenant",
+            Some("admin"),
+            "5-0. Tenant",
+            "#/admin/tenant/list",
+            "building-2",
+            "admin",
+            500,
+        ),
+        group(
             "admin/cust",
             Some("admin"),
             "5-A. Customer",
@@ -304,6 +313,7 @@ fn prototype_menu_defs() -> Vec<MenuDef> {
     defs.extend(workspace_efile_defs());
     defs.extend(post_defs());
     defs.extend(report_defs());
+    defs.extend(admin_tenant_defs());
     defs.extend(admin_customer_defs());
     defs.extend(admin_security_defs());
     defs.extend(admin_customer_access_defs());
@@ -652,6 +662,23 @@ fn report_defs() -> Vec<MenuDef> {
     .collect()
 }
 
+fn admin_tenant_defs() -> Vec<MenuDef> {
+    [("list", "Tenant management", "READ")]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (suffix, label, function))| {
+            admin_leaf(
+                "tenant",
+                suffix,
+                label,
+                "admin",
+                function,
+                501 + index as i32,
+            )
+        })
+        .collect()
+}
+
 fn admin_customer_defs() -> Vec<MenuDef> {
     [
         ("list", "Customer list", "READ"),
@@ -958,6 +985,7 @@ fn korean_label<'a>(key: &str, fallback: &'a str) -> &'a str {
         "ws/file" => "7. 전자신고",
         "post/hist" => "1. 신고 이력",
         "post/amend" => "2. 수정신고/경정청구",
+        "admin/tenant" => "5-0. 테넌트",
         "admin/cust" => "5-A. 고객사 관리",
         "admin/sec" => "5-B. 사용자/권한 관리",
         "admin/cacc" => "5-C. 담당 법인 권한",
@@ -1019,6 +1047,7 @@ fn korean_label<'a>(key: &str, fallback: &'a str) -> &'a str {
         "post/amend:diff" => "수정신고 차이 보고서",
         "post/amend:resubmit" => "수정신고 재제출",
         "post/correction" => "경정청구",
+        "admin/tenant:list" => "테넌트 관리",
         "report:year-compare" => "사업연도별 비교",
         "report:tax-burden" => "세부담 분석",
         "report:reserve-trend" => "유보 금액 추이",
@@ -1082,7 +1111,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["dashboard", "workspace", "post", "reports", "admin"]
         );
-        assert_eq!(leaf_count(&tree), 99);
+        assert_eq!(leaf_count(&tree), 100);
         let workspace = top.iter().find(|node| node["code"] == "workspace").unwrap();
         assert_eq!(workspace["children"].as_array().unwrap().len(), 8);
         let info = workspace["children"]
@@ -1097,10 +1126,22 @@ mod tests {
             json!(["customer_id", "business_year_id"])
         );
         let admin = top.iter().find(|node| node["code"] == "admin").unwrap();
-        assert_eq!(admin["children"].as_array().unwrap().len(), 7);
+        assert_eq!(admin["children"].as_array().unwrap().len(), 8);
+        assert!(find_node(&tree, "admin/tenant:list").is_some());
         assert!(prototype_menu_seeds()
             .iter()
             .any(|node| node.key == "admin/sec:menus" && node.layout == "admin"));
+    }
+
+    fn find_node<'a>(node: &'a Value, key: &str) -> Option<&'a Value> {
+        if node["code"] == key || node["key"] == key {
+            return Some(node);
+        }
+        node["children"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find_map(|child| find_node(child, key))
     }
 
     fn leaf_count(node: &Value) -> usize {

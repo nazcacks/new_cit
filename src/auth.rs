@@ -2,12 +2,12 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::{
-    domain::{AuthUser, LoginRequest, LoginResponse},
-    modules,
+    domain::{AccessibleTenant, AuthUser, LoginRequest, LoginResponse},
+    modules, tenant,
 };
 
 const TOTP_STEP_SECONDS: i64 = 30;
@@ -101,6 +101,7 @@ pub async fn login(
         token,
         token_type: "Bearer",
         expires_at,
+        accessible_tenants: accessible_tenants(pool, &user).await?,
         user,
         modules: modules::module_tree(),
     })
@@ -176,9 +177,132 @@ pub async fn me(pool: &PgPool, token: Uuid) -> Result<LoginResponse> {
         token,
         token_type: "Bearer",
         expires_at,
+        accessible_tenants: accessible_tenants(pool, &user).await?,
         user,
         modules: modules::module_tree(),
     })
+}
+
+pub async fn switch_tenant(
+    pool: &PgPool,
+    current_token: Uuid,
+    user: &AuthUser,
+    target_tenant_code: &str,
+) -> Result<LoginResponse> {
+    let target_tenant_code = tenant::normalize_tenant_code(target_tenant_code)?;
+    let tenants = accessible_tenants(pool, user).await?;
+    let target = tenants
+        .iter()
+        .find(|item| item.tenant_code == target_tenant_code)
+        .ok_or_else(|| anyhow!("tenant switch denied"))?;
+    if target.current {
+        return me(pool, current_token).await;
+    }
+    let token = create_session(pool, user.user_id, target.tenant_id).await?;
+    sqlx::query(
+        r#"
+        UPDATE auth_sessions
+        SET revoked_at = NOW()
+        WHERE session_token = $1 AND revoked_at IS NULL
+        "#,
+    )
+    .bind(current_token)
+    .execute(pool)
+    .await
+    .context("failed to revoke previous tenant session")?;
+    me(pool, token).await
+}
+
+async fn create_session(pool: &PgPool, user_id: i64, tenant_id: i64) -> Result<Uuid> {
+    sqlx::query_scalar::<_, Uuid>(
+        r#"
+        INSERT INTO auth_sessions (user_id, tenant_id)
+        VALUES ($1, $2)
+        RETURNING session_token
+        "#,
+    )
+    .bind(user_id)
+    .bind(tenant_id)
+    .fetch_one(pool)
+    .await
+    .context("failed to create tenant switch session")
+}
+
+pub async fn accessible_tenants(pool: &PgPool, user: &AuthUser) -> Result<Vec<AccessibleTenant>> {
+    if user.roles.iter().any(|role| role == "SUPER_ADMIN") {
+        let rows = sqlx::query(
+            r#"
+            SELECT tenant_id, tenant_code, tenant_name, 'SUPER_ADMIN'::TEXT AS role,
+                   tenant_id = $1 AS current
+            FROM tenants
+            WHERE status = 'ACTIVE'
+            ORDER BY tenant_code
+            "#,
+        )
+        .bind(user.tenant_id)
+        .fetch_all(pool)
+        .await
+        .context("failed to load super-admin accessible tenants")?;
+        return Ok(rows.into_iter().map(accessible_tenant_from_row).collect());
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            t.tenant_id,
+            t.tenant_code,
+            t.tenant_name,
+            COALESCE(
+                (ARRAY_AGG(ur.role_code ORDER BY ur.role_code)
+                    FILTER (WHERE ur.role_code IS NOT NULL))[1],
+                'USER'
+            ) AS role,
+            t.tenant_id = $1 AS current
+        FROM tenants t
+        JOIN users u ON u.tenant_id = t.tenant_id
+        LEFT JOIN user_roles ur ON ur.user_id = u.user_id
+        WHERE t.status = 'ACTIVE'
+          AND u.status = 'ACTIVE'
+          AND u.locked = FALSE
+          AND u.login_id = $2
+        GROUP BY t.tenant_id, t.tenant_code, t.tenant_name
+        ORDER BY t.tenant_code
+        "#,
+    )
+    .bind(user.tenant_id)
+    .bind(&user.login_id)
+    .fetch_all(pool)
+    .await
+    .context("failed to load accessible tenants")?;
+    let tenants = rows
+        .into_iter()
+        .map(accessible_tenant_from_row)
+        .collect::<Vec<_>>();
+    if tenants.is_empty() {
+        Ok(vec![AccessibleTenant {
+            tenant_id: user.tenant_id,
+            tenant_code: user.tenant_code.clone(),
+            tenant_name: user.tenant_name.clone(),
+            role: user
+                .roles
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "USER".to_string()),
+            current: true,
+        }])
+    } else {
+        Ok(tenants)
+    }
+}
+
+fn accessible_tenant_from_row(row: sqlx::postgres::PgRow) -> AccessibleTenant {
+    AccessibleTenant {
+        tenant_id: row.get("tenant_id"),
+        tenant_code: row.get("tenant_code"),
+        tenant_name: row.get("tenant_name"),
+        role: row.get("role"),
+        current: row.get("current"),
+    }
 }
 
 pub async fn record_failed_login(pool: &PgPool, tenant_code: &str, login_id: &str) -> Result<()> {

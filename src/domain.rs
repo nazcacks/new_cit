@@ -178,6 +178,16 @@ pub struct LoginResponse {
     pub expires_at: DateTime<Utc>,
     pub user: AuthUser,
     pub modules: Value,
+    pub accessible_tenants: Vec<AccessibleTenant>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct AccessibleTenant {
+    pub tenant_id: i64,
+    pub tenant_code: String,
+    pub tenant_name: String,
+    pub role: String,
+    pub current: bool,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -190,6 +200,8 @@ pub struct Tenant {
     pub contract_end: Option<NaiveDate>,
     pub schema_name: String,
     pub status: String,
+    pub plan: String,
+    pub suspended_at: Option<DateTime<Utc>>,
     pub allowed_ips: Option<String>,
     pub max_users: i32,
     pub created_at: DateTime<Utc>,
@@ -212,6 +224,22 @@ pub struct CreateTenantRequest {
     pub contract_end: Option<NaiveDate>,
     pub allowed_ips: Option<String>,
     pub max_users: Option<i32>,
+    pub plan: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SwitchTenantRequest {
+    pub tenant_code: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateTenantStatusRequest {
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateTenantPlanRequest {
+    pub plan: String,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]

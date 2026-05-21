@@ -13,10 +13,10 @@ const workspaceSteps = [
   "ws-file",
 ];
 
-export function renderMenu(container, tree, context, activeKey, navigate, locale = "ko") {
+export function renderMenu(container, tree, context, activeKey, navigate, locale = "ko", auth = null) {
   const roots = Array.isArray(tree?.children) ? tree.children : [];
   container.innerHTML = roots
-    .map((root, rootIndex) => renderNode(root, rootIndex + 1, context, activeKey, 0, locale))
+    .map((root, rootIndex) => renderNode(root, rootIndex + 1, context, activeKey, 0, locale, auth))
     .join("");
 
   container.querySelectorAll("[data-menu-key]").forEach((link) => {
@@ -24,6 +24,34 @@ export function renderMenu(container, tree, context, activeKey, navigate, locale
       event.preventDefault();
       navigate(link.dataset.menuKey);
     });
+  });
+}
+
+export function renderTenantSwitcher(container, auth, onSwitch, locale = "ko") {
+  const tenants = Array.isArray(auth?.accessible_tenants) ? auth.accessible_tenants : [];
+  const current = tenants.find((tenant) => tenant.current) || {
+    tenant_code: auth?.user?.tenant_code,
+    tenant_name: auth?.user?.tenant_name,
+    role: auth?.user?.roles?.[0] || "USER",
+  };
+  const canSwitch = tenants.length >= 2 || auth?.user?.roles?.includes("SUPER_ADMIN");
+  if (!container) return;
+  if (!canSwitch) {
+    container.innerHTML = `<span class="tenant-label">${escapeHtml(current.tenant_name || "-")} · ${escapeHtml(current.tenant_code || "-")}</span>`;
+    return;
+  }
+  container.innerHTML = `
+    <label class="tenant-switch-label">
+      <span>${t(locale, "tenant.working")}</span>
+      <select id="tenantSwitchSelect" aria-label="${escapeHtml(t(locale, "tenant.switch"))}">
+        ${tenants.map((tenant) => `
+          <option value="${escapeHtml(tenant.tenant_code)}" ${tenant.current ? "selected" : ""}>
+            ${escapeHtml(tenant.tenant_name)} · ${escapeHtml(tenant.tenant_code)} · ${escapeHtml(tenant.role)}
+          </option>`).join("")}
+      </select>
+    </label>`;
+  container.querySelector("#tenantSwitchSelect")?.addEventListener("change", (event) => {
+    onSwitch(event.target.value);
   });
 }
 
@@ -37,6 +65,15 @@ export function renderContextBadge(container, context, locale = "ko") {
       <span>${context.lockMode === "LOCKED" ? t(locale, "context.locked") : t(locale, "context.editable")}</span>
     `
     : `<strong>${t(locale, "context.none")}</strong><span>${t(locale, "context.select")}</span>`;
+}
+
+export function renderStateBadge(container, context, locale = "ko") {
+  if (!container) return;
+  const status = context?.status || "NO_CONTEXT";
+  const locked = context?.lockMode === "LOCKED" || context?.locked === true;
+  container.innerHTML = `
+    <span class="state-pill ${escapeHtml(status.toLowerCase().replaceAll("_", "-"))}">${escapeHtml(status)}</span>
+    <span class="lock-badge ${locked ? "locked" : "open"}" title="${escapeHtml(locked ? t(locale, "context.locked") : t(locale, "context.editable"))}">${locked ? "LOCKED" : "OPEN"}</span>`;
 }
 
 export function renderStepper(container, context, activeKey, locale = "ko") {
@@ -64,7 +101,8 @@ export function stepKeyFor(key) {
   return key;
 }
 
-function renderNode(node, index, context, activeKey, depth, locale) {
+function renderNode(node, index, context, activeKey, depth, locale, auth) {
+  if (!canShowNode(node, auth)) return "";
   const children = Array.isArray(node.children) ? node.children : [];
   if (!children.length) {
     return menuAnchor(node, indexLabel(node, index), context, activeKey, depth, locale);
@@ -75,12 +113,20 @@ function renderNode(node, index, context, activeKey, depth, locale) {
       <div class="menu-parent ${active ? "active" : ""}" data-depth="${depth}">
         <span class="menu-index">${escapeHtml(indexLabel(node, index))}</span>
         <span>${escapeHtml(labelForNode(node, locale))}</span>
+        <span class="menu-progress-dot ${active ? "active" : ""}" style="--menu-progress:${groupProgress(node, context, active)}%;" aria-hidden="true"></span>
       </div>
       <div class="submenu depth-${depth + 1}">
-        ${children.map((child, childIndex) => renderNode(child, childIndex + 1, context, activeKey, depth + 1, locale)).join("")}
+        ${children.map((child, childIndex) => renderNode(child, childIndex + 1, context, activeKey, depth + 1, locale, auth)).join("")}
       </div>
     </section>
   `;
+}
+
+function canShowNode(node, auth) {
+  if (node.code === "admin/tenant" || node.code === "admin/tenant:list") {
+    return auth?.user?.roles?.some((role) => role === "SUPER_ADMIN" || role === "TENANT_ADMIN");
+  }
+  return true;
 }
 
 function menuAnchor(node, index, context, activeKey, depth, locale) {
@@ -105,6 +151,14 @@ function indexLabel(node, index) {
   if (node.code?.startsWith("ws/adj:")) return node.code.split(":")[1];
   if (node.code?.startsWith("admin/")) return node.code.split(":").pop().slice(0, 3).toUpperCase();
   return String(index);
+}
+
+function groupProgress(node, context, active) {
+  if (!active) return 0;
+  if (node.code === "workspace" || node.code?.startsWith("ws-") || node.code?.startsWith("ws/")) {
+    return Math.max(0, Math.min(100, Number(context?.progress || 0)));
+  }
+  return 100;
 }
 
 function stepProgress(index) {

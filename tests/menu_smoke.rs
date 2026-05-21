@@ -320,7 +320,7 @@ async fn assert_admin_data(client: &Client, base_url: &str, tenant: &str) {
     );
     assert_min_len(
         &get_json(client, &format!("{base_url}/api/admin/menus")).await,
-        99,
+        100,
         "admin menu nodes",
     );
     assert_min_len(

@@ -11,6 +11,8 @@ pub enum AppError {
     #[error("{0}")]
     Unauthorized(String),
     #[error("{0}")]
+    Forbidden(String),
+    #[error("{0}")]
     BadRequest(String),
     #[error("{0}")]
     Conflict(String),
@@ -41,6 +43,10 @@ impl AppError {
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::NotFound(message.into())
     }
+
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self::Forbidden(message.into())
+    }
 }
 
 impl IntoResponse for AppError {
@@ -48,6 +54,7 @@ impl IntoResponse for AppError {
         let (status, code) = match self {
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, "BAD_REQUEST"),
             Self::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED"),
+            Self::Forbidden(_) => (StatusCode::FORBIDDEN, "FORBIDDEN"),
             Self::Conflict(_) => (StatusCode::CONFLICT, "CONFLICT"),
             Self::NotFound(_) => (StatusCode::NOT_FOUND, "NOT_FOUND"),
             Self::Sqlx(_) | Self::Internal(_) => {

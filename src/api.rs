@@ -12,6 +12,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sqlx::Row;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use uuid::Uuid;
 
@@ -28,11 +29,12 @@ use crate::{
         DismissValidationIssueRequest, EnqueueEfilingRequest, EnqueueJobRequest,
         EvaluationAdjustmentRequest, FormMigrationRequest, HealthResponse,
         LawVersioningImpactRequest, LoginRequest, ResolveFormVersionQuery,
-        SpecialTaxAdjustmentRequest, TaxAmountAdjustmentRequest, TransactionBasedAdjustmentRequest,
-        UnlockBusinessYearRequest, UpdateAdminUserRequest, UpdateAdminUserStatusRequest,
-        UpdateBusinessYearStatusRequest, UpdateFormDataRequest, UpdateFormVersionStatusRequest,
-        UpdateMenuFunctionsRequest, UpdateMenuNodeRequest, UpdateNotificationRequest,
-        UpdateRoleMenuFunctionsRequest, UpdateRolePermissionsRequest, UpdateTaxLawStatusRequest,
+        SpecialTaxAdjustmentRequest, SwitchTenantRequest, TaxAmountAdjustmentRequest,
+        TransactionBasedAdjustmentRequest, UnlockBusinessYearRequest, UpdateAdminUserRequest,
+        UpdateAdminUserStatusRequest, UpdateBusinessYearStatusRequest, UpdateFormDataRequest,
+        UpdateFormVersionStatusRequest, UpdateMenuFunctionsRequest, UpdateMenuNodeRequest,
+        UpdateNotificationRequest, UpdateRoleMenuFunctionsRequest, UpdateRolePermissionsRequest,
+        UpdateTaxLawStatusRequest, UpdateTenantPlanRequest, UpdateTenantStatusRequest,
         WorkflowEventRequest,
     },
     efiling,
@@ -57,8 +59,10 @@ pub fn router(state: AppState) -> Router {
         .route("/app/screens.js", get(web::app_screens_js))
         .route("/health", get(health))
         .route("/ready", get(ready))
+        .route("/api/public/tenant-suggest", get(tenant_suggest))
         .route("/api/auth/login", post(login))
         .route("/api/auth/me", get(me))
+        .route("/api/auth/switch-tenant", post(switch_tenant))
         .route("/api/auth/logout", post(logout))
         .route("/api/modules/tree", get(get_module_tree))
         .route("/api/modules/legacy-tree", get(get_legacy_module_tree))
@@ -71,6 +75,14 @@ pub fn router(state: AppState) -> Router {
             post(run_due_alert_scheduler),
         )
         .route("/api/tenants", get(list_tenants).post(create_tenant))
+        .route(
+            "/api/tenants/:tenant_code/status",
+            patch(update_tenant_status),
+        )
+        .route(
+            "/api/tenants/:tenant_code/plan",
+            patch(update_tenant_plan),
+        )
         .route(
             "/api/admin/tenants/:tenant_code/users",
             get(list_admin_users).post(create_admin_user),
@@ -241,6 +253,14 @@ pub fn router(state: AppState) -> Router {
             post(run_leaf_action),
         )
         .route(
+            "/api/tenants/:tenant_code/leaf-records",
+            get(list_leaf_records).post(create_leaf_record),
+        )
+        .route(
+            "/api/tenants/:tenant_code/leaf-records/:record_id",
+            patch(update_leaf_record).delete(delete_leaf_record),
+        )
+        .route(
             "/api/tenants/:tenant_code/notifications",
             get(list_notifications),
         )
@@ -311,6 +331,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/workflow",
             get(get_business_year_workflow),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/progress",
+            get(get_business_year_progress),
         )
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/workflow/events",
@@ -517,6 +541,7 @@ fn cors_layer(state: &AppState) -> CorsLayer {
             Method::POST,
             Method::PUT,
             Method::PATCH,
+            Method::DELETE,
             Method::OPTIONS,
         ])
         .allow_headers([
@@ -606,7 +631,13 @@ fn is_public_path(path: &str) -> bool {
     }
     matches!(
         path,
-        "/" | "/app.css" | "/app.js" | "/favicon.ico" | "/health" | "/ready" | "/api/auth/login"
+        "/" | "/app.css"
+            | "/app.js"
+            | "/favicon.ico"
+            | "/health"
+            | "/ready"
+            | "/api/auth/login"
+            | "/api/public/tenant-suggest"
     )
 }
 
@@ -645,6 +676,16 @@ async fn run_due_alert_scheduler(State(state): State<AppState>) -> AppResult<Jso
     Ok(Json(result))
 }
 
+async fn tenant_suggest(
+    State(state): State<AppState>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> AppResult<Json<Vec<Value>>> {
+    let suggestions = tenant::suggest_tenants(&state.pool, query.get("q").map(String::as_str))
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(suggestions))
+}
+
 async fn login(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -670,6 +711,31 @@ async fn login(
             }
         }
     }
+}
+
+async fn switch_tenant(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    headers: HeaderMap,
+    Json(request): Json<SwitchTenantRequest>,
+) -> AppResult<Json<crate::domain::LoginResponse>> {
+    let token = auth::parse_bearer_token(
+        headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+    )
+    .map_err(|error| AppError::Unauthorized(error.to_string()))?;
+    let response = auth::switch_tenant(&state.pool, token, &user, &request.tenant_code)
+        .await
+        .map_err(|error| {
+            let message = format!("{error:#}");
+            if message.contains("tenant switch denied") {
+                AppError::forbidden(message)
+            } else {
+                map_anyhow(error)
+            }
+        })?;
+    Ok(Json(response))
 }
 
 fn client_ip(headers: &HeaderMap) -> Option<String> {
@@ -898,8 +964,10 @@ async fn replace_role_permissions(
 
 async fn create_tenant(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Json(request): Json<CreateTenantRequest>,
 ) -> AppResult<(StatusCode, Json<crate::domain::Tenant>)> {
+    ensure_super_admin(&user)?;
     let tenant = tenant::create_tenant(&state.pool, request)
         .await
         .map_err(map_anyhow)?;
@@ -908,11 +976,42 @@ async fn create_tenant(
 
 async fn list_tenants(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
 ) -> AppResult<Json<Vec<crate::domain::Tenant>>> {
-    let tenants = tenant::list_tenants(&state.pool)
+    ensure_tenant_admin_or_super(&user)?;
+    let mut tenants = tenant::list_tenants(&state.pool)
         .await
         .map_err(map_anyhow)?;
+    if !is_super_admin(&user) {
+        tenants.retain(|tenant| tenant.tenant_code == user.tenant_code);
+    }
     Ok(Json(tenants))
+}
+
+async fn update_tenant_status(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(tenant_code): Path<String>,
+    Json(request): Json<UpdateTenantStatusRequest>,
+) -> AppResult<Json<crate::domain::Tenant>> {
+    ensure_super_admin(&user)?;
+    let tenant = tenant::update_tenant_status(&state.pool, &tenant_code, request)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(tenant))
+}
+
+async fn update_tenant_plan(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(tenant_code): Path<String>,
+    Json(request): Json<UpdateTenantPlanRequest>,
+) -> AppResult<Json<crate::domain::Tenant>> {
+    ensure_super_admin(&user)?;
+    let tenant = tenant::update_tenant_plan(&state.pool, &tenant_code, request)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(tenant))
 }
 
 async fn create_customer(
@@ -1238,6 +1337,23 @@ async fn get_business_year_workflow(
         .await
         .map_err(map_anyhow)?;
     Ok(Json(workflow))
+}
+
+async fn get_business_year_progress(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+) -> AppResult<Json<Value>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    if user.tenant_id != tenant_ref.tenant_id && !is_super_admin(&user) {
+        return Err(AppError::forbidden("tenant access denied"));
+    }
+    let progress = tenant::business_year_progress(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(progress))
 }
 
 async fn create_workflow_event(
@@ -2474,6 +2590,176 @@ async fn run_leaf_action(
     }))
 }
 
+#[derive(Debug, Deserialize)]
+struct LeafRecordQuery {
+    leaf_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LeafRecordPayload {
+    leaf_key: Option<String>,
+    data: Option<Value>,
+}
+
+async fn list_leaf_records(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(tenant_code): Path<String>,
+    Query(query): Query<LeafRecordQuery>,
+) -> AppResult<Json<Value>> {
+    ensure_leaf_tenant_access(&state, &user, &tenant_code).await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT record_id, data
+        FROM leaf_records
+        WHERE tenant_code = $1
+          AND leaf_key = $2
+          AND deleted_at IS NULL
+        ORDER BY record_id
+        "#,
+    )
+    .bind(&tenant_code)
+    .bind(&query.leaf_key)
+    .fetch_all(&state.pool)
+    .await?;
+    let records: Vec<Value> = rows
+        .into_iter()
+        .map(|row| {
+            leaf_record_value(
+                &tenant_code,
+                &query.leaf_key,
+                row.get("record_id"),
+                row.get("data"),
+            )
+        })
+        .collect();
+    let total = records.len();
+    Ok(Json(json!({"rows": records, "total": total})))
+}
+
+async fn create_leaf_record(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(tenant_code): Path<String>,
+    Json(payload): Json<LeafRecordPayload>,
+) -> AppResult<Json<Value>> {
+    ensure_leaf_tenant_access(&state, &user, &tenant_code).await?;
+    let leaf_key = payload
+        .leaf_key
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| AppError::bad_request("leaf_key is required"))?;
+    let data = payload.data.unwrap_or_else(|| json!({}));
+    let row = sqlx::query(
+        r#"
+        INSERT INTO leaf_records (tenant_code, leaf_key, data)
+        VALUES ($1, $2, $3)
+        RETURNING record_id, data
+        "#,
+    )
+    .bind(&tenant_code)
+    .bind(&leaf_key)
+    .bind(data)
+    .fetch_one(&state.pool)
+    .await?;
+    let record = leaf_record_value(
+        &tenant_code,
+        &leaf_key,
+        row.get("record_id"),
+        row.get("data"),
+    );
+    Ok(Json(json!({"row": record})))
+}
+
+async fn update_leaf_record(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path((tenant_code, record_id)): Path<(String, i64)>,
+    Json(payload): Json<LeafRecordPayload>,
+) -> AppResult<Json<Value>> {
+    ensure_leaf_tenant_access(&state, &user, &tenant_code).await?;
+    let data = payload.data.unwrap_or_else(|| json!({}));
+    let row = sqlx::query(
+        r#"
+        UPDATE leaf_records
+        SET data = $3,
+            updated_at = now()
+        WHERE tenant_code = $1
+          AND record_id = $2
+          AND deleted_at IS NULL
+        RETURNING leaf_key, record_id, data
+        "#,
+    )
+    .bind(&tenant_code)
+    .bind(record_id)
+    .bind(data)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| AppError::not_found("leaf record not found"))?;
+    let leaf_key: String = row.get("leaf_key");
+    let record = leaf_record_value(
+        &tenant_code,
+        &leaf_key,
+        row.get("record_id"),
+        row.get("data"),
+    );
+    Ok(Json(json!({"row": record})))
+}
+
+async fn delete_leaf_record(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path((tenant_code, record_id)): Path<(String, i64)>,
+) -> AppResult<Json<Value>> {
+    ensure_leaf_tenant_access(&state, &user, &tenant_code).await?;
+    let row = sqlx::query(
+        r#"
+        UPDATE leaf_records
+        SET deleted_at = now(),
+            updated_at = now()
+        WHERE tenant_code = $1
+          AND record_id = $2
+          AND deleted_at IS NULL
+        RETURNING record_id
+        "#,
+    )
+    .bind(&tenant_code)
+    .bind(record_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| AppError::not_found("leaf record not found"))?;
+    let row_id: i64 = row.get("record_id");
+    Ok(Json(json!({"row_id": row_id, "deleted": true})))
+}
+
+async fn ensure_leaf_tenant_access(
+    state: &AppState,
+    user: &AuthUser,
+    tenant_code: &str,
+) -> AppResult<()> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, tenant_code).await?;
+    if user.tenant_id != tenant_ref.tenant_id && !is_super_admin(user) {
+        return Err(AppError::forbidden("tenant access denied"));
+    }
+    Ok(())
+}
+
+fn leaf_record_value(tenant_code: &str, leaf_key: &str, record_id: i64, data: Value) -> Value {
+    let mut map = match data {
+        Value::Object(map) => map,
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("value".to_string(), other);
+            map
+        }
+    };
+    map.insert("record_id".to_string(), json!(record_id));
+    map.insert("row_id".to_string(), json!(record_id));
+    map.insert("tenant_code".to_string(), json!(tenant_code));
+    map.insert("leaf_key".to_string(), json!(leaf_key));
+    map.insert("_source".to_string(), json!("leaf_records"));
+    Value::Object(map)
+}
+
 async fn get_industry_stats_report(Path(tenant_code): Path<String>) -> Json<Value> {
     Json(json!([
         {"tenant_code": tenant_code, "industry_code": "62010", "company_count": 8, "effective_tax_rate_bps": 1425},
@@ -2655,6 +2941,32 @@ async fn retry_job(
         .await
         .map_err(map_anyhow)?;
     Ok(Json(job))
+}
+
+fn is_super_admin(user: &AuthUser) -> bool {
+    user.roles.iter().any(|role| role == "SUPER_ADMIN")
+}
+
+fn is_tenant_admin(user: &AuthUser) -> bool {
+    user.roles.iter().any(|role| role == "TENANT_ADMIN")
+}
+
+fn ensure_super_admin(user: &AuthUser) -> AppResult<()> {
+    if is_super_admin(user) {
+        Ok(())
+    } else {
+        Err(AppError::forbidden("SUPER_ADMIN role is required"))
+    }
+}
+
+fn ensure_tenant_admin_or_super(user: &AuthUser) -> AppResult<()> {
+    if is_super_admin(user) || is_tenant_admin(user) {
+        Ok(())
+    } else {
+        Err(AppError::forbidden(
+            "TENANT_ADMIN or SUPER_ADMIN role is required",
+        ))
+    }
 }
 
 fn map_anyhow(error: anyhow::Error) -> AppError {

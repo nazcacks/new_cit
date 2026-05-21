@@ -15,7 +15,7 @@ fn prototype_menu_tree_matches_phase2_information_architecture() {
 
     let workspace = top.iter().find(|node| node["code"] == "workspace").unwrap();
     assert_eq!(workspace["children"].as_array().unwrap().len(), 8);
-    assert_eq!(leaf_count(&tree), 99);
+    assert_eq!(leaf_count(&tree), 100);
     let info = workspace["children"]
         .as_array()
         .unwrap()
@@ -40,7 +40,12 @@ fn prototype_menu_tree_matches_phase2_information_architecture() {
     );
 
     let admin = top.iter().find(|node| node["code"] == "admin").unwrap();
-    assert_eq!(admin["children"].as_array().unwrap().len(), 7);
+    assert_eq!(admin["children"].as_array().unwrap().len(), 8);
+    assert!(prototype_menu_seeds()
+        .iter()
+        .any(|node| node.key == "admin/tenant:list"
+            && node.required_perm_module.as_deref() == Some("admin")
+            && node.layout == "admin"));
     assert!(prototype_menu_seeds()
         .iter()
         .any(|node| node.key == "admin/sec:menus"

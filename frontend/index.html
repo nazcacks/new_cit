@@ -16,7 +16,12 @@
             <span>Corporate Income Tax</span>
           </div>
         </div>
-        <label>테넌트 <input id="loginTenant" value="demo" autocomplete="organization" /></label>
+        <label>테넌트 <input id="loginTenant" value="demo" list="tenantSuggestions" autocomplete="organization" /></label>
+        <datalist id="tenantSuggestions"></datalist>
+        <div class="login-tools">
+          <button id="tenantSearchBtn" class="secondary-btn compact" type="button">테넌트 검색</button>
+          <div id="recentTenants" class="recent-tenants"></div>
+        </div>
         <label>로그인 ID <input id="loginId" value="admin" autocomplete="username" /></label>
         <label>비밀번호 <input id="loginPassword" type="password" autocomplete="current-password" /></label>
         <button id="loginBtn" class="primary-btn" type="button">로그인</button>
@@ -44,6 +49,8 @@
             <h1 id="routeTitle">대시보드</h1>
           </div>
           <div class="top-actions">
+            <div id="tenantSwitcher" class="tenant-switcher"></div>
+            <div id="stateBadge" class="state-badge"></div>
             <select id="languageSelect" class="language-select" aria-label="언어 선택">
               <option value="ko">한국어</option>
               <option value="en">English</option>

@@ -4,7 +4,7 @@ use cit_system::modules::prototype_menu_tree;
 use serde_json::Value;
 
 #[test]
-fn v12_full_menu_tree_exposes_all_active_leaves() {
+fn v14_full_menu_tree_exposes_all_active_leaves() {
     let tree = prototype_menu_tree();
     let roots = tree["children"].as_array().expect("root children");
     assert_eq!(
@@ -20,7 +20,7 @@ fn v12_full_menu_tree_exposes_all_active_leaves() {
         .iter()
         .map(|node| node["code"].as_str().unwrap().to_string())
         .collect::<BTreeSet<_>>();
-    assert_eq!(leaves.len(), 99, "v1.2 exposes 99 active leaf screens");
+    assert_eq!(leaves.len(), 100, "v1.4 exposes 100 active leaf screens");
     assert_eq!(leaf_keys, expected_leaf_keys());
 
     for leaf in leaves {
@@ -70,6 +70,7 @@ fn frontend_registry_and_router_cover_representative_deep_links() {
         "ws/file:generate",
         "post/amend:diff",
         "report:loss-expiry",
+        "admin/tenant:list",
         "admin/sec:menus",
         "admin/law:master",
         "admin/form:linkage-rule",
@@ -209,6 +210,7 @@ fn expected_leaf_keys() -> BTreeSet<String> {
             "report:loss-expiry",
             "report:industry-stats",
             "report:custom",
+            "admin/tenant:list",
             "admin/cust:list",
             "admin/cust:by-master",
             "admin/cust:agent",
