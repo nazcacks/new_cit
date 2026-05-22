@@ -20,9 +20,67 @@ function leafRouteKeys() {
 
 const routes = leafRouteKeys();
 const specKeys = [...objectBlock("leafScreenSpecs").matchAll(/^\s*"([^"]+)": leafSpec\(/gm)].map((match) => match[1]);
+const workflowRendererContract = Object.fromEntries(
+  [...objectBlock("workflowLeafRendererContract").matchAll(/^\s*"([^"]+)": "([^"]+)"/gm)]
+    .map((match) => [match[1], match[2]])
+);
+const adminRendererContract = {
+  "admin/tenant:list": "renderAdminTenantLeaf",
+  "admin/cust:list": "renderAdminCustomers",
+  "admin/cust:by-master": "renderAdminCustomers",
+  "admin/cust:agent": "renderAdminCustomers",
+  "admin/sec:users": "renderAdminRoles",
+  "admin/sec:roles": "renderAdminRoles",
+  "admin/sec:matrix": "renderAdminRoles",
+  "admin/sec:menus": "renderAdminMenus",
+  "admin/sec:functions": "renderAdminMenus",
+  "admin/sec:mask": "renderAdminRoles",
+  "admin/sec:scope": "renderAdminRoles",
+  "admin/cacc:assign": "renderAdminCustomerAccess",
+  "admin/cacc:groups": "renderAdminCustomerAccess",
+  "admin/cacc:rules": "renderAdminCustomerAccess",
+  "admin/cacc:delegate": "renderAdminCustomerAccess",
+  "admin/cacc:override": "renderAdminCustomerAccess",
+  "admin/law:master": "renderAdminLaw",
+  "admin/law:rates": "renderAdminLaw",
+  "admin/law:limits": "renderAdminLaw",
+  "admin/law:credits": "renderAdminLaw",
+  "admin/law:depr-lives": "renderAdminLaw",
+  "admin/law:sme": "renderAdminLaw",
+  "admin/law:loss-rule": "renderAdminLaw",
+  "admin/law:snapshots": "renderAdminLaw",
+  "admin/law:impact": "renderAdminLaw",
+  "admin/law:history": "renderAdminLaw",
+  "admin/form:master": "renderAdminForms",
+  "admin/form:versions": "renderAdminForms",
+  "admin/form:fields": "renderAdminForms",
+  "admin/form:validations": "renderAdminForms",
+  "admin/form:linkage-rule": "renderAdminForms",
+  "admin/form:migration": "renderAdminForms",
+  "admin/form:efile-map": "renderAdminForms",
+  "admin/form:by-set": "renderAdminForms",
+  "admin/form:impact": "renderAdminForms",
+  "admin/code:manage": "renderLeafScreen",
+  "admin/audit:events": "renderAdminAudit",
+  "admin/audit:login": "renderAdminAudit",
+  "admin/audit:perm": "renderAdminAudit",
+  "admin/audit:settings": "renderAdminAudit",
+};
 const screenKeys = [...objectBlock("screenByLeaf").matchAll(/^\s*"([^"]+)": \(env\) => (.+)$/gm)]
   .map((match) => {
-    if (match[1] !== "admin/tenant:list") {
+    if (workflowRendererContract[match[1]]) {
+      assert(
+        match[2].includes(`${workflowRendererContract[match[1]]}(env)`),
+        `workflow leaf ${match[1]} must use ${workflowRendererContract[match[1]]}`
+      );
+      assert(!match[2].includes("renderLeafScreen"), `workflow leaf ${match[1]} must not use generic renderer`);
+    } else if (adminRendererContract[match[1]] && adminRendererContract[match[1]] !== "renderLeafScreen") {
+      assert(
+        match[2].includes(`${adminRendererContract[match[1]]}(env)`),
+        `admin leaf ${match[1]} must use ${adminRendererContract[match[1]]}`
+      );
+      assert(!match[2].includes("renderLeafScreen"), `admin leaf ${match[1]} must not use generic renderer`);
+    } else if (match[1] !== "admin/tenant:list") {
       assert(match[2].includes(`renderLeafScreen(env, "${match[1]}")`), `screenByLeaf registration mismatch for ${match[1]}`);
     } else {
       assert(match[2].includes("renderAdminTenantLeaf(env)"), "admin/tenant:list must use tenant CRUD renderer");
@@ -35,6 +93,7 @@ assert.strictEqual(specKeys.length, 100, "leafScreenSpecs must expose 100 active
 assert.strictEqual(screenKeys.length, 100, "screenByLeaf must register 100 active leaves");
 assert.deepStrictEqual([...specKeys].sort(), [...routes].sort(), "leafScreenSpecs must match active leafRoutes");
 assert.deepStrictEqual([...screenKeys].sort(), [...routes].sort(), "screenByLeaf must match active leafRoutes");
+assert.strictEqual(Object.keys(workflowRendererContract).length, 49, "workflow renderer contract must cover 49 core workflow/post leaves");
 
 for (const key of routes) {
   const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

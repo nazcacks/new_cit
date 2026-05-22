@@ -1,7 +1,8 @@
 use std::env;
 
 use axum::serve;
-use cit_system::{db, router, AppState, Config};
+use chrono::Utc;
+use cit_system::{auth, db, router, AppState, Config};
 use reqwest::{
     header::{HeaderMap, HeaderValue, AUTHORIZATION},
     Client, StatusCode,
@@ -12,7 +13,7 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn filed_lock_login_ip_allowlist_and_lockout_are_enforced() {
-    let (base_url, _state) = spawn_app().await;
+    let (base_url, state) = spawn_app().await;
     let admin_token = login_demo_admin(&base_url).await;
     let admin_client = authed_client(&admin_token, None);
 
@@ -107,11 +108,28 @@ async fn filed_lock_login_ip_allowlist_and_lockout_are_enforced() {
     .await;
     assert_eq!(
         login_without_otp.0,
-        StatusCode::OK,
+        StatusCode::UNAUTHORIZED,
         "{}",
         login_without_otp.1
     );
-    let secure_token = login_without_otp.1["token"].as_str().unwrap();
+    assert!(
+        login_without_otp.1["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("2fa otp is required")
+    );
+    let otp = current_otp(&state, secret).await;
+    let login_with_otp = login_attempt_with_otp(
+        &base_url,
+        &tenant_code,
+        "secure_user",
+        "ChangeMe123!",
+        "203.0.113.10",
+        Some(&otp),
+    )
+    .await;
+    assert_eq!(login_with_otp.0, StatusCode::OK, "{}", login_with_otp.1);
+    let secure_token = login_with_otp.1["token"].as_str().unwrap();
     let secure_client = authed_client(secure_token, Some("203.0.113.10"));
 
     post_json(
@@ -148,6 +166,13 @@ async fn filed_lock_login_ip_allowlist_and_lockout_are_enforced() {
     )
     .await;
     assert_eq!(locked.0, StatusCode::UNAUTHORIZED);
+    assert!(
+        locked.1["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("locked")
+    );
+
     let unlocked = post_json(
         &admin_client,
         &format!("{base_url}/api/admin/tenants/{tenant_code}/users/lock_user/status"),
@@ -156,6 +181,42 @@ async fn filed_lock_login_ip_allowlist_and_lockout_are_enforced() {
     )
     .await;
     assert_eq!(unlocked["pwd_fail_count"], 0);
+    sqlx::query(
+        r#"
+        UPDATE users
+        SET pwd_changed_at = $1
+        WHERE login_id = 'lock_user'
+        "#,
+    )
+    .bind(Utc::now() - chrono::Duration::days(120))
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    let expired = login_attempt(
+        &base_url,
+        &tenant_code,
+        "lock_user",
+        "ChangeMe123!",
+        "203.0.113.10",
+    )
+    .await;
+    assert_eq!(expired.0, StatusCode::UNAUTHORIZED);
+    assert!(
+        expired.1["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("password expired")
+    );
+    sqlx::query(
+        r#"
+        UPDATE users
+        SET pwd_changed_at = NOW()
+        WHERE login_id = 'lock_user'
+        "#,
+    )
+    .execute(&state.pool)
+    .await
+    .unwrap();
     let relogin = login_attempt(
         &base_url,
         &tenant_code,
@@ -201,6 +262,93 @@ async fn filed_lock_login_ip_allowlist_and_lockout_are_enforced() {
     .await;
 }
 
+#[tokio::test]
+async fn business_year_carryforward_clones_snapshot() {
+    let (base_url, _state) = spawn_app().await;
+    let admin_token = login_demo_admin(&base_url).await;
+    let client = authed_client(&admin_token, None);
+
+    let tenant_code = format!("cf{}", &Uuid::new_v4().simple().to_string()[..10]);
+    post_json(
+        &client,
+        &format!("{base_url}/api/tenants"),
+        json!({
+            "tenant_code": tenant_code,
+            "tenant_name": "Carryforward Tenant",
+            "biz_reg_no": "1234567890",
+            "contract_start": "2026-01-01",
+            "contract_end": null,
+            "max_users": 10
+        }),
+        StatusCode::CREATED,
+    )
+    .await;
+
+    let customer = post_json(
+        &client,
+        &format!("{base_url}/api/tenants/{tenant_code}/customers"),
+        json!({
+            "customer_code": "CF001",
+            "customer_name": "Carryforward Customer",
+            "biz_reg_no": "2208112345",
+            "is_sme": true,
+            "work_scopes": ["INFO", "ADJUST", "FORM", "VALIDATE", "APPROVE", "PRINT", "EFILE", "POST"]
+        }),
+        StatusCode::CREATED,
+    )
+    .await;
+    let customer_id = customer["customer_id"].as_i64().unwrap();
+
+    let source_by = post_json(
+        &client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years"),
+        json!({
+            "customer_id": customer_id,
+            "year_label": 2025,
+            "start_date": "2025-01-01",
+            "end_date": "2025-12-31"
+        }),
+        StatusCode::CREATED,
+    )
+    .await;
+    let source_by_id = source_by["by_id"].as_i64().unwrap();
+    let source_snapshot = get_json(
+        &client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{source_by_id}/snapshot"),
+    )
+    .await;
+
+    let target_by = post_json(
+        &client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years"),
+        json!({
+            "customer_id": customer_id,
+            "year_label": 2026,
+            "start_date": "2026-01-01",
+            "end_date": "2026-12-31",
+            "carry_forward_from_by_id": source_by_id
+        }),
+        StatusCode::CREATED,
+    )
+    .await;
+    let target_by_id = target_by["by_id"].as_i64().unwrap();
+    let target_snapshot = get_json(
+        &client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{target_by_id}/snapshot"),
+    )
+    .await;
+
+    assert_eq!(target_snapshot["law_version_id"], source_snapshot["law_version_id"]);
+    assert_eq!(
+        target_snapshot["snapshot_data"]["business_year"]["carry_forward_from_by_id"],
+        source_by_id
+    );
+    assert_eq!(
+        target_snapshot["snapshot_data"]["carry_forward"]["source_by_id"],
+        source_by_id
+    );
+}
+
 async fn spawn_app() -> (String, AppState) {
     dotenvy::dotenv().ok();
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL is required");
@@ -229,6 +377,17 @@ async fn login_attempt(
     password: &str,
     ip: &str,
 ) -> (StatusCode, Value) {
+    login_attempt_with_otp(base_url, tenant_code, login_id, password, ip, None).await
+}
+
+async fn login_attempt_with_otp(
+    base_url: &str,
+    tenant_code: &str,
+    login_id: &str,
+    password: &str,
+    ip: &str,
+    otp: Option<&str>,
+) -> (StatusCode, Value) {
     let mut headers = HeaderMap::new();
     headers.insert("x-forwarded-for", HeaderValue::from_str(ip).unwrap());
     let client = Client::builder().default_headers(headers).build().unwrap();
@@ -237,7 +396,8 @@ async fn login_attempt(
         .json(&json!({
             "tenant_code": tenant_code,
             "login_id": login_id,
-            "password": password
+            "password": password,
+            "otp": otp
         }))
         .send()
         .await
@@ -260,10 +420,25 @@ fn authed_client(token: &str, ip: Option<&str>) -> Client {
     Client::builder().default_headers(headers).build().unwrap()
 }
 
+async fn current_otp(state: &AppState, secret: &str) -> String {
+    let counter = Utc::now().timestamp() / 30;
+    auth::hotp(&state.pool, secret.as_bytes(), counter)
+        .await
+        .unwrap()
+}
+
 async fn post_json(client: &Client, url: &str, body: Value, expected: StatusCode) -> Value {
     let response = client.post(url).json(&body).send().await.unwrap();
     let status = response.status();
     let text = response.text().await.unwrap();
     assert_eq!(status, expected, "{text}");
+    serde_json::from_str(&text).unwrap()
+}
+
+async fn get_json(client: &Client, url: &str) -> Value {
+    let response = client.get(url).send().await.unwrap();
+    let status = response.status();
+    let text = response.text().await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{text}");
     serde_json::from_str(&text).unwrap()
 }

@@ -132,8 +132,8 @@ fn menu_labels_default_to_korean_with_english_alternate_labels() {
     assert_eq!(dashboard["labels"]["en"], "Dashboard");
 
     let b12 = find_node(&tree, "ws/adj:B12").expect("B12 node");
-    assert_eq!(b12["label"], "B12 세액공제/감면");
-    assert_eq!(b12["labels"]["en"], "B12 Tax credits");
+    assert_eq!(b12["label"], "B12 세액공제·감면");
+    assert_eq!(b12["labels"]["en"], "B12 Tax credits/reductions");
 
     let menu = include_str!("../frontend/app/menu.js");
     let i18n = include_str!("../frontend/app/i18n.js");
@@ -141,6 +141,26 @@ fn menu_labels_default_to_korean_with_english_alternate_labels() {
         menu.contains("labelForNode(node, locale)") && i18n.contains("normalizeLocale(locale)"),
         "frontend menu renders labels by selected locale"
     );
+}
+
+#[test]
+fn every_menu_node_exposes_ko_and_en_labels() {
+    fn assert_labels(node: &Value) {
+        let code = node["code"].as_str().unwrap_or("<unknown>");
+        assert!(
+            node["labels"]["ko"].as_str().is_some_and(|value| !value.is_empty()),
+            "{code} must expose labels.ko"
+        );
+        assert!(
+            node["labels"]["en"].as_str().is_some_and(|value| !value.is_empty()),
+            "{code} must expose labels.en"
+        );
+        for child in node["children"].as_array().into_iter().flatten() {
+            assert_labels(child);
+        }
+    }
+
+    assert_labels(&prototype_menu_tree());
 }
 
 fn collect_leaves(node: &Value) -> Vec<&Value> {

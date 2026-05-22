@@ -38,7 +38,14 @@ pub fn prototype_menu_tree() -> Value {
     json!({
         "code": "cit-system",
         "name": "CIT System",
+        "label": "법인세 세무조정계산서 시스템",
         "display_name": "CIT System",
+        "label_ko": "법인세 세무조정계산서 시스템",
+        "label_en": "CIT System",
+        "labels": {
+            "ko": "법인세 세무조정계산서 시스템",
+            "en": "CIT System",
+        },
         "description": "Corporate income tax workspace menu",
         "path": "#/dashboard/overview",
         "implemented": true,
@@ -51,7 +58,14 @@ pub fn legacy_module_tree() -> Value {
     json!({
         "code": "cit-system-legacy",
         "name": "CIT System Legacy Module Tree",
+        "label": "CIT System Legacy Module Tree",
         "display_name": "CIT System Legacy Module Tree",
+        "label_ko": "CIT System Legacy Module Tree",
+        "label_en": "CIT System Legacy Module Tree",
+        "labels": {
+            "ko": "CIT System Legacy Module Tree",
+            "en": "CIT System Legacy Module Tree",
+        },
         "description": "Phase 1 module-number menu retained for audit and development",
         "path": "/modules",
         "implemented": true,
@@ -402,32 +416,14 @@ fn workspace_info_defs() -> Vec<MenuDef> {
 }
 
 fn workspace_adjustment_defs() -> Vec<MenuDef> {
-    [
-        ("B1", "B1 Income add/deduct"),
-        ("B2", "B2 Donations"),
-        ("B3", "B3 Entertainment expense"),
-        ("B4", "B4 Depreciation"),
-        ("B5", "B5 Deemed interest"),
-        ("B6", "B6 Retirement allowance reserve"),
-        ("B7", "B7 Bad debt reserve"),
-        ("B8", "B8 Currency valuation"),
-        ("B9", "B9 Inventory/securities valuation"),
-        ("B10", "B10 Business transfer difference"),
-        ("B11", "B11 Loss carryforward"),
-        ("B12", "B12 Tax credits"),
-        ("B13", "B13 Minimum tax"),
-        ("B14", "B14 Additional tax"),
-        ("B15", "B15 Capital/equity"),
-        ("B16", "B16 Foreign corporation"),
-        ("B17", "B17 Consolidated tax"),
-    ]
+    adjustment_taxonomy()
     .into_iter()
     .enumerate()
-    .map(|(index, (code, label))| {
+    .map(|(index, (code, _label_ko, label_en))| {
         leaf(
             &format!("ws/adj:{code}"),
             Some("ws/adj"),
-            label,
+            label_en,
             "calculator",
             "workspace",
             work_context(),
@@ -437,6 +433,52 @@ fn workspace_adjustment_defs() -> Vec<MenuDef> {
         )
     })
     .collect()
+}
+
+fn adjustment_taxonomy() -> [(&'static str, &'static str, &'static str); 17] {
+    [
+        ("B1", "B1 소득금액조정명세서", "B1 Income adjustment statement"),
+        ("B2", "B2 기부금", "B2 Donations"),
+        ("B3", "B3 접대비", "B3 Entertainment expense"),
+        ("B4", "B4 감가상각비", "B4 Depreciation expense"),
+        (
+            "B5",
+            "B5 퇴직급여충당금/퇴직연금",
+            "B5 Retirement allowance reserve/pension",
+        ),
+        (
+            "B6",
+            "B6 대손충당금 및 대손금",
+            "B6 Bad debt reserve and bad debts",
+        ),
+        (
+            "B7",
+            "B7 외화자산·부채 평가",
+            "B7 Foreign currency asset/liability valuation",
+        ),
+        (
+            "B8",
+            "B8 재고자산·유가증권 평가",
+            "B8 Inventory/securities valuation",
+        ),
+        (
+            "B9",
+            "B9 지급이자 손금불산입",
+            "B9 Non-deductible interest expense",
+        ),
+        ("B10", "B10 업무용승용차 관련비용", "B10 Business vehicle expenses"),
+        ("B11", "B11 이월결손금", "B11 Loss carryforward"),
+        ("B12", "B12 세액공제·감면", "B12 Tax credits/reductions"),
+        ("B13", "B13 최저한세", "B13 Minimum tax"),
+        ("B14", "B14 가산세", "B14 Additional tax"),
+        ("B15", "B15 자본금과 적립금", "B15 Capital and reserves"),
+        (
+            "B16",
+            "B16 외국법인 세무조정",
+            "B16 Foreign corporation adjustment",
+        ),
+        ("B17", "B17 연결납세", "B17 Consolidated tax"),
+    ]
 }
 
 fn workspace_form_defs() -> Vec<MenuDef> {
@@ -881,6 +923,12 @@ fn legacy_node(code: &str, number: &str, label: &str, path: &str) -> Value {
         "number": number,
         "name": label,
         "label": label,
+        "label_ko": label,
+        "label_en": label,
+        "labels": {
+            "ko": label,
+            "en": label,
+        },
         "display_name": format!("{number}. {label}"),
         "path": path,
         "implemented": true,
@@ -1007,22 +1055,22 @@ fn korean_label<'a>(key: &str, fallback: &'a str) -> &'a str {
         "ws/info:transactions" => "거래명세",
         "ws/info:vehicle" => "업무용 차량 운행기록",
         "ws/info:consistency" => "입력 데이터 일관성 검증",
-        "ws/adj:B1" => "B1 소득금액조정명세",
-        "ws/adj:B2" => "B2 기부금 조정",
-        "ws/adj:B3" => "B3 접대비 조정",
-        "ws/adj:B4" => "B4 감가상각비 조정",
-        "ws/adj:B5" => "B5 인정이자 조정",
-        "ws/adj:B6" => "B6 퇴직급여충당금 조정",
-        "ws/adj:B7" => "B7 대손충당금 조정",
-        "ws/adj:B8" => "B8 외화평가 조정",
-        "ws/adj:B9" => "B9 재고/유가증권 평가",
-        "ws/adj:B10" => "B10 업무승용차 조정",
+        "ws/adj:B1" => "B1 소득금액조정명세서",
+        "ws/adj:B2" => "B2 기부금",
+        "ws/adj:B3" => "B3 접대비",
+        "ws/adj:B4" => "B4 감가상각비",
+        "ws/adj:B5" => "B5 퇴직급여충당금/퇴직연금",
+        "ws/adj:B6" => "B6 대손충당금 및 대손금",
+        "ws/adj:B7" => "B7 외화자산·부채 평가",
+        "ws/adj:B8" => "B8 재고자산·유가증권 평가",
+        "ws/adj:B9" => "B9 지급이자 손금불산입",
+        "ws/adj:B10" => "B10 업무용승용차 관련비용",
         "ws/adj:B11" => "B11 이월결손금",
-        "ws/adj:B12" => "B12 세액공제/감면",
+        "ws/adj:B12" => "B12 세액공제·감면",
         "ws/adj:B13" => "B13 최저한세",
         "ws/adj:B14" => "B14 가산세",
         "ws/adj:B15" => "B15 자본금과 적립금",
-        "ws/adj:B16" => "B16 외국법인",
+        "ws/adj:B16" => "B16 외국법인 세무조정",
         "ws/adj:B17" => "B17 연결납세",
         "ws/form:form3" => "별지 3호",
         "ws/form:attachments" => "부속서류 일람",

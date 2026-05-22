@@ -704,6 +704,8 @@ async fn login(
             } else if message.contains("2fa")
                 || message.contains("client IP")
                 || message.contains("allowlist")
+                || message.contains("locked")
+                || message.contains("expired")
             {
                 Err(AppError::Unauthorized(message))
             } else {
@@ -1047,15 +1049,22 @@ async fn create_business_year(
     Path(tenant_code): Path<String>,
     Json(request): Json<CreateBusinessYearRequest>,
 ) -> AppResult<(StatusCode, Json<crate::domain::BusinessYear>)> {
+    let carry_forward_from_by_id = request.carry_forward_from_by_id;
     let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
         .await
         .map_err(map_anyhow)?;
     let by = tenant::create_business_year(&state.pool, &tenant_ref, request)
         .await
         .map_err(map_anyhow)?;
-    tax::ensure_law_snapshot(&state.pool, &tenant_ref, by.by_id)
-        .await
-        .map_err(map_anyhow)?;
+    if let Some(source_by_id) = carry_forward_from_by_id {
+        tax::clone_law_snapshot(&state.pool, &tenant_ref, source_by_id, by.by_id)
+            .await
+            .map_err(map_anyhow)?;
+    } else {
+        tax::ensure_law_snapshot(&state.pool, &tenant_ref, by.by_id)
+            .await
+            .map_err(map_anyhow)?;
+    }
     Ok((StatusCode::CREATED, Json(by)))
 }
 

@@ -1,0 +1,27 @@
+[
+  {
+    "name": "admin_security",
+    "selector": "[data-admin-stage=\"security\"]",
+    "file": "docs\\phase9_10\\admin_security.png"
+  },
+  {
+    "name": "admin_law",
+    "selector": "[data-admin-stage=\"law\"]",
+    "file": "docs\\phase9_10\\admin_law.png"
+  },
+  {
+    "name": "admin_forms",
+    "selector": "[data-admin-stage=\"forms-admin\"]",
+    "file": "docs\\phase9_10\\admin_forms.png"
+  },
+  {
+    "name": "workflow_validation",
+    "selector": "[data-stage=\"validation\"]",
+    "file": "docs\\phase9_10\\workflow_validation.png"
+  },
+  {
+    "name": "workflow_post_amend",
+    "selector": "[data-stage=\"post-amend\"]",
+    "file": "docs\\phase9_10\\workflow_post_amend.png"
+  }
+]

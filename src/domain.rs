@@ -289,6 +289,7 @@ pub struct CreateBusinessYearRequest {
     pub year_label: i32,
     pub start_date: NaiveDate,
     pub end_date: NaiveDate,
+    pub carry_forward_from_by_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]

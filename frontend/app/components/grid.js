@@ -1,4 +1,5 @@
 import { asArray, escapeHtml, money } from "/app/api.js";
+import { fieldLabel, statusLabel, t } from "/app/i18n.js";
 
 export function renderDataGrid({
   id,
@@ -9,8 +10,11 @@ export function renderDataGrid({
   importable = false,
   exportable = true,
   runLabel = "",
+  runLabelKey = "",
+  locale = "ko",
 }) {
   const safeId = escapeHtml(id);
+  const actionLabel = runLabelKey ? t(locale, runLabelKey) : runLabel;
   return `
     <article class="panel data-grid" data-grid="${safeId}">
       <div class="panel-head">
@@ -19,13 +23,13 @@ export function renderDataGrid({
           ${subtitle ? `<p class="eyebrow">${escapeHtml(subtitle)}</p>` : ""}
         </div>
         <div class="button-row">
-          ${runLabel ? `<button class="primary-btn compact" type="button" data-grid-run="${safeId}">${escapeHtml(runLabel)}</button>` : ""}
-          ${exportable ? `<button class="secondary-btn compact" type="button" data-grid-export="${safeId}">Export</button>` : ""}
-          ${importable ? `<button class="secondary-btn compact" type="button" data-grid-import="${safeId}">Import JSON</button>` : ""}
+          ${actionLabel ? `<button class="primary-btn compact" type="button" data-grid-run="${safeId}">${escapeHtml(actionLabel)}</button>` : ""}
+          ${exportable ? `<button class="secondary-btn compact" type="button" data-grid-export="${safeId}">${escapeHtml(t(locale, "grid.export"))}</button>` : ""}
+          ${importable ? `<button class="secondary-btn compact" type="button" data-grid-import="${safeId}">${escapeHtml(t(locale, "grid.importJson"))}</button>` : ""}
         </div>
       </div>
-      ${importable ? `<textarea class="grid-paste" data-grid-paste="${safeId}" placeholder="Paste endpoint JSON body"></textarea>` : ""}
-      ${gridTable(columns, rows)}
+      ${importable ? `<textarea class="grid-paste" data-grid-paste="${safeId}" placeholder="${escapeHtml(t(locale, "grid.pasteJson"))}"></textarea>` : ""}
+      ${gridTable(columns, rows, locale)}
     </article>`;
 }
 
@@ -52,26 +56,34 @@ export function bindDataGridActions({ grids, onRun, onImport }) {
   });
 }
 
-function gridTable(columns, rows) {
+function gridTable(columns, rows, locale) {
   const body = asArray(rows)
     .map((item) => `
       <tr>
-        ${columns.map((column) => `<td>${formatCell(item, column)}</td>`).join("")}
+        ${columns.map((column) => `<td>${formatCell(item, column, locale)}</td>`).join("")}
       </tr>`)
     .join("");
   return `
     <div class="table-wrap">
       <table>
-        <thead><tr>${columns.map((column) => `<th>${escapeHtml(column.label)}</th>`).join("")}</tr></thead>
-        <tbody>${body || `<tr><td colspan="${columns.length}">No rows</td></tr>`}</tbody>
+        <thead><tr>${columns.map((column) => `<th>${escapeHtml(columnLabel(column, locale))}</th>`).join("")}</tr></thead>
+        <tbody>${body || `<tr><td colspan="${columns.length}">${escapeHtml(t(locale, "grid.empty"))}</td></tr>`}</tbody>
       </table>
     </div>`;
 }
 
-function formatCell(item, column) {
+function columnLabel(column, locale) {
+  if (column.labelKey) return t(locale, column.labelKey);
+  if (column.labels?.[locale]) return column.labels[locale];
+  if (column.key) return fieldLabel(column.key, locale);
+  return column.label || "";
+}
+
+function formatCell(item, column, locale) {
   const value = column.value ? column.value(item) : item?.[column.key];
   if (column.format === "money") return money.format(Number(value || 0));
   if (column.format === "json") return escapeHtml(JSON.stringify(value ?? null));
+  if (column.format === "status") return escapeHtml(statusLabel(value, locale));
   return escapeHtml(value ?? "-");
 }
 
@@ -80,7 +92,7 @@ function exportJson(fileName, rows) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = fileName;
+  link.download = fileName || "download";
   document.body.appendChild(link);
   link.click();
   link.remove();

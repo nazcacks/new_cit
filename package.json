@@ -1,6 +1,6 @@
 {
   "scripts": {
-    "test:frontend": "node tests/frontend/leaf_screens.spec.js && node tests/frontend/leaf_table.spec.js && node tests/frontend/typology.spec.js && node tests/frontend/edit_actions.spec.js",
-    "leaf-smoke": "node tests/frontend/leaf_screens.spec.js && node tests/frontend/leaf_table.spec.js && node tests/frontend/typology.spec.js && node tests/frontend/edit_actions.spec.js"
+    "test:frontend": "node tests/frontend/i18n.spec.js && node tests/frontend/adjustment_taxonomy.spec.js && node tests/frontend/adjustment_workbench.spec.js && node tests/frontend/phase5_8_workbench.spec.js && node tests/frontend/admin_settings_workbench.spec.js && node tests/frontend/workflow_stage_renderers.spec.js && node tests/frontend/auth_2fa.spec.js && node tests/frontend/work_start.spec.js && node tests/frontend/tax_data_workbench.spec.js && node tests/frontend/leaf_screens.spec.js && node tests/frontend/leaf_table.spec.js && node tests/frontend/typology.spec.js && node tests/frontend/edit_actions.spec.js",
+    "leaf-smoke": "node tests/frontend/i18n.spec.js && node tests/frontend/adjustment_taxonomy.spec.js && node tests/frontend/adjustment_workbench.spec.js && node tests/frontend/phase5_8_workbench.spec.js && node tests/frontend/admin_settings_workbench.spec.js && node tests/frontend/workflow_stage_renderers.spec.js && node tests/frontend/auth_2fa.spec.js && node tests/frontend/work_start.spec.js && node tests/frontend/tax_data_workbench.spec.js && node tests/frontend/leaf_screens.spec.js && node tests/frontend/leaf_table.spec.js && node tests/frontend/typology.spec.js && node tests/frontend/edit_actions.spec.js"
   }
 }

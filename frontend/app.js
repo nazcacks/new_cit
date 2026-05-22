@@ -5,6 +5,8 @@ import { renderMenu, renderContextBadge, renderStateBadge, renderStepper, render
 import { currentKey, navigate, onRouteChange } from "/app/router.js";
 import { routeMeta, renderScreen, refreshHealth } from "/app/screens.js";
 
+applySmokeBootstrapFromQuery();
+
 const state = {
   token: localStorage.getItem("cit.auth.token") || "",
   auth: null,
@@ -19,6 +21,26 @@ setUnauthorizedHandler(() => showLogin(t(state.locale, "session.expired")));
 const $ = (id) => document.getElementById(id);
 const RECENT_TENANTS_KEY = "cit.auth.recentTenants";
 let tenantSuggestTimer = null;
+let loginOtpChallenge = false;
+
+function applySmokeBootstrapFromQuery() {
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get("cit_smoke_token");
+  const context = params.get("cit_smoke_context");
+  if (!token && !context) return;
+  if (token) localStorage.setItem("cit.auth.token", token);
+  if (context) {
+    try {
+      const parsed = JSON.parse(context);
+      saveContext(parsed);
+    } catch {}
+  }
+  params.delete("cit_smoke_token");
+  params.delete("cit_smoke_context");
+  const search = params.toString();
+  const next = `${window.location.pathname}${search ? `?${search}` : ""}${window.location.hash}`;
+  window.history.replaceState({}, document.title, next);
+}
 
 function setContext(next) {
   state.workContext = saveContext({ ...state.workContext, ...next });
@@ -32,6 +54,8 @@ function showLogin(message = "") {
   state.auth = null;
   state.menuTree = null;
   localStorage.removeItem("cit.auth.token");
+  resetLoginOtpChallenge();
+  renderStaticShell(state.locale);
   $("loginView").classList.remove("hidden");
   $("appView").classList.add("hidden");
   $("loginMessage").textContent = message;
@@ -45,6 +69,7 @@ function showApp(auth) {
   state.menuTree = auth.modules;
   localStorage.setItem("cit.auth.token", state.token);
   saveRecentTenant(auth.user);
+  renderStaticShell(state.locale);
   $("loginView").classList.add("hidden");
   $("appView").classList.remove("hidden");
   $("signedTenant").textContent = `${auth.user.tenant_name} / ${auth.user.tenant_code}`;
@@ -85,27 +110,61 @@ async function submitLogin(event) {
   event.preventDefault();
   $("loginBtn").disabled = true;
   $("loginMessage").textContent = "";
+  const otp = $("loginOtp")?.value.trim() || "";
   try {
     const auth = await request("/api/auth/login", {
       method: "POST",
+      skipUnauthorized: true,
       body: JSON.stringify({
         tenant_code: $("loginTenant").value.trim(),
         login_id: $("loginId").value.trim(),
         password: $("loginPassword").value,
+        ...(loginOtpChallenge || otp ? { otp } : {}),
       }),
     });
+    resetLoginOtpChallenge();
     showApp(auth);
     await refreshHealth($("healthBadge"), $("healthText"), state.locale);
     navigate("dashboard:overview");
-  } catch {
-    $("loginMessage").textContent = t(state.locale, "auth.failed");
+  } catch (error) {
+    const message = error.message || "";
+    if (message.includes("2fa otp is required")) {
+      enableLoginOtpChallenge(t(state.locale, "auth.otpRequired"));
+    } else if (message.includes("invalid 2fa otp")) {
+      enableLoginOtpChallenge(t(state.locale, "auth.otpInvalid"));
+    } else if (message.includes("2fa enrollment")) {
+      enableLoginOtpChallenge(t(state.locale, "auth.otpEnrollmentRequired"));
+    } else if (message.includes("client IP") || message.includes("allowlist")) {
+      $("loginMessage").textContent = t(state.locale, "auth.ipBlocked");
+    } else if (message.includes("locked") || message.includes("LOCKED")) {
+      $("loginMessage").textContent = t(state.locale, "auth.accountLocked");
+    } else if (message.includes("expired")) {
+      $("loginMessage").textContent = t(state.locale, "auth.passwordExpired");
+    } else {
+      $("loginMessage").textContent = t(state.locale, "auth.failed");
+    }
   } finally {
     $("loginBtn").disabled = false;
   }
 }
 
+function enableLoginOtpChallenge(message) {
+  loginOtpChallenge = true;
+  $("loginOtpWrap")?.classList.remove("hidden");
+  $("loginOtpHelp")?.classList.remove("hidden");
+  $("loginMessage").textContent = message;
+  $("loginOtp")?.focus();
+}
+
+function resetLoginOtpChallenge() {
+  loginOtpChallenge = false;
+  $("loginOtpWrap")?.classList.add("hidden");
+  $("loginOtpHelp")?.classList.add("hidden");
+  if ($("loginOtp")) $("loginOtp").value = "";
+}
+
 function renderNavigation(key) {
-  const meta = routeMeta(key);
+  const meta = routeMeta(key, state.locale);
   renderMenu($("moduleMenu"), state.menuTree, state.workContext, key, navigate, state.locale, state.auth);
   if (shouldShowFlowChrome(key, meta)) {
     $("stepper").classList.remove("hidden");
@@ -124,7 +183,7 @@ function shouldShowFlowChrome(key, meta) {
 }
 
 function displayRouteMeta(key) {
-  return routeLabelsFromMenu(state.menuTree, key, state.locale, routeMeta(key));
+  return routeLabelsFromMenu(state.menuTree, key, state.locale, routeMeta(key, state.locale));
 }
 
 function syncLanguageSelect() {
@@ -190,17 +249,44 @@ async function refreshTenantSuggestions() {
   syncTenantDatalist(suggestions);
 }
 
-function changeLanguage(locale) {
+function renderStaticShell(locale) {
+  const normalized = saveLocale(locale);
+  document.documentElement.lang = normalized === "en" ? "en" : "ko";
+  document.title = t(normalized, "app.title");
+  document.querySelectorAll("[data-i18n]").forEach((element) => {
+    element.textContent = t(normalized, element.dataset.i18n);
+  });
+  document.querySelectorAll("[data-i18n-placeholder]").forEach((element) => {
+    element.setAttribute("placeholder", t(normalized, element.dataset.i18nPlaceholder));
+  });
+  document.querySelectorAll("[data-i18n-title]").forEach((element) => {
+    element.setAttribute("title", t(normalized, element.dataset.i18nTitle));
+  });
+  document.querySelectorAll("[data-i18n-attr]").forEach((element) => {
+    element.dataset.i18nAttr.split(";").forEach((entry) => {
+      const [attr, key] = entry.split(":");
+      if (attr && key) element.setAttribute(attr, t(normalized, key));
+    });
+  });
+}
+
+function applyLocale(locale) {
   state.locale = saveLocale(locale);
+  renderStaticShell(state.locale);
   syncLanguageSelect();
   syncHealthLabel();
   if (!state.auth) return;
+  document.querySelector("[data-leaf-modal]")?.remove();
   renderTenantSwitcher($("tenantSwitcher"), state.auth, switchTenant, state.locale);
   renderStateBadge($("stateBadge"), state.workContext, state.locale);
   renderContextBadge($("contextBadge"), state.workContext, state.locale);
   renderRoute(currentKey()).catch((error) => {
     $("cwk-route-outlet").innerHTML = `<section class="panel"><p class="empty">${error.message}</p></section>`;
   });
+}
+
+function changeLanguage(locale) {
+  applyLocale(locale);
 }
 
 async function switchTenant(tenantCode) {
@@ -222,6 +308,8 @@ function syncHealthLabel() {
     $("healthText").textContent = t(state.locale, "health.ok");
   } else if (badge.classList.contains("error")) {
     $("healthText").textContent = t(state.locale, "health.error");
+  } else {
+    $("healthText").textContent = t(state.locale, "health.pending");
   }
 }
 
@@ -233,6 +321,7 @@ function menuTreeContains(node, key) {
 }
 
 async function restoreSession() {
+  renderStaticShell(state.locale);
   syncLanguageSelect();
   setupTenantAutocomplete();
   if (!state.token) {

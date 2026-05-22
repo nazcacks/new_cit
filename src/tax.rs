@@ -1,6 +1,7 @@
 use std::io::{Cursor, Write};
 
 use anyhow::{anyhow, Context, Result};
+use chrono::Utc;
 use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
 
@@ -607,6 +608,66 @@ pub async fn ensure_law_snapshot(
         .fetch_one(pool)
         .await
         .context("failed to create law snapshot")
+}
+
+pub async fn clone_law_snapshot(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    source_by_id: i64,
+    target_by_id: i64,
+) -> Result<LawSnapshot> {
+    let source = ensure_law_snapshot(pool, tenant, source_by_id).await?;
+    let target = tenant::get_business_year(pool, tenant, target_by_id).await?;
+    let mut snapshot_data = source.snapshot_data.clone();
+    if let Some(object) = snapshot_data.as_object_mut() {
+        object.insert(
+            "business_year".to_string(),
+            json!({
+                "by_id": target.by_id,
+                "year_label": target.year_label,
+                "start_date": target.start_date.to_string(),
+                "end_date": target.end_date.to_string(),
+                "carry_forward_from_by_id": source_by_id
+            }),
+        );
+        object.insert(
+            "carry_forward".to_string(),
+            json!({
+                "source_by_id": source_by_id,
+                "copied_at": Utc::now().to_rfc3339()
+            }),
+        );
+    }
+
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        INSERT INTO {schema}.by_law_snapshot (
+            by_id, law_version_id, rate_version_ids, form_version_ids, efile_master_ids, snapshot_data
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (by_id)
+        DO UPDATE SET
+            law_version_id = EXCLUDED.law_version_id,
+            rate_version_ids = EXCLUDED.rate_version_ids,
+            form_version_ids = EXCLUDED.form_version_ids,
+            efile_master_ids = EXCLUDED.efile_master_ids,
+            snapshot_data = EXCLUDED.snapshot_data
+        RETURNING snapshot_id, by_id, law_version_id, rate_version_ids,
+                  form_version_ids, efile_master_ids, snapshot_data, locked, created_at
+        "#
+    );
+
+    sqlx::query_as::<_, LawSnapshot>(&sql)
+        .bind(target_by_id)
+        .bind(source.law_version_id)
+        .bind(source.rate_version_ids)
+        .bind(source.form_version_ids)
+        .bind(source.efile_master_ids)
+        .bind(snapshot_data)
+        .fetch_one(pool)
+        .await
+        .context("failed to clone law snapshot")
 }
 
 pub async fn get_law_snapshot(
@@ -5515,7 +5576,6 @@ fn form_field_label(field: &str) -> String {
 mod tests {
     use super::{calculate_corporate_tax, minimum_tax_extra_due};
     use crate::domain::TaxRate;
-    use chrono::NaiveDate;
     use serde_json::json;
 
     fn rate(from: i64, to: Option<i64>, bps: i32, deduction: i64) -> TaxRate {

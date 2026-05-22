@@ -1,0 +1,11 @@
+{
+  "customerId": 1,
+  "customerName": "Alpha Manufacturing Co.",
+  "byId": 1,
+  "fy": "2024",
+  "status": "FILED",
+  "progress": 92,
+  "lockMode": "FILED_LOCK",
+  "selectedFormCode": "FORM3",
+  "selectedPrintFormCode": "FORM3"
+}

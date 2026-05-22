@@ -957,6 +957,15 @@ pub async fn create_business_year(
     tenant: &TenantRef,
     request: CreateBusinessYearRequest,
 ) -> Result<BusinessYear> {
+    let source_by = if let Some(source_by_id) = request.carry_forward_from_by_id {
+        let source = get_business_year(pool, tenant, source_by_id).await?;
+        if source.customer_id != request.customer_id {
+            anyhow::bail!("carry-forward source must belong to the same customer");
+        }
+        Some(source)
+    } else {
+        None
+    };
     let schema = quote_ident(&tenant.schema_name)?;
     let sql = format!(
         r#"
@@ -986,7 +995,8 @@ pub async fn create_business_year(
             new_data: json!({
                 "customer_id": business_year.customer_id,
                 "year_label": business_year.year_label,
-                "status": business_year.status.clone()
+                "status": business_year.status.clone(),
+                "carry_forward_from_by_id": source_by.as_ref().map(|item| item.by_id)
             }),
             changed_by: "system",
         },

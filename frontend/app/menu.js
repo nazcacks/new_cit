@@ -1,6 +1,6 @@
 import { escapeHtml } from "/app/api.js";
 import { hasWorkContext } from "/app/context.js";
-import { labelForNode, t } from "/app/i18n.js";
+import { labelForNode, statusLabel, t } from "/app/i18n.js";
 
 const workspaceSteps = [
   "ws-start",
@@ -37,7 +37,7 @@ export function renderTenantSwitcher(container, auth, onSwitch, locale = "ko") {
   const canSwitch = tenants.length >= 2 || auth?.user?.roles?.includes("SUPER_ADMIN");
   if (!container) return;
   if (!canSwitch) {
-    container.innerHTML = `<span class="tenant-label">${escapeHtml(current.tenant_name || "-")} · ${escapeHtml(current.tenant_code || "-")}</span>`;
+    container.innerHTML = `<span class="tenant-label">${escapeHtml(current.tenant_name || "-")} / ${escapeHtml(current.tenant_code || "-")}</span>`;
     return;
   }
   container.innerHTML = `
@@ -46,7 +46,7 @@ export function renderTenantSwitcher(container, auth, onSwitch, locale = "ko") {
       <select id="tenantSwitchSelect" aria-label="${escapeHtml(t(locale, "tenant.switch"))}">
         ${tenants.map((tenant) => `
           <option value="${escapeHtml(tenant.tenant_code)}" ${tenant.current ? "selected" : ""}>
-            ${escapeHtml(tenant.tenant_name)} · ${escapeHtml(tenant.tenant_code)} · ${escapeHtml(tenant.role)}
+            ${escapeHtml(tenant.tenant_name)} / ${escapeHtml(tenant.tenant_code)} / ${escapeHtml(tenant.role)}
           </option>`).join("")}
       </select>
     </label>`;
@@ -60,7 +60,7 @@ export function renderContextBadge(container, context, locale = "ko") {
   container.innerHTML = ready
     ? `
       <strong>${escapeHtml(context.customerName || "-")}</strong>
-      <span>${escapeHtml(context.fy || "-")} / ${escapeHtml(context.status || "DRAFT")}</span>
+      <span>${escapeHtml(context.fy || "-")} / ${escapeHtml(statusLabel(context.status || "DRAFT", locale))}</span>
       <div class="bar-track"><span style="width:${Number(context.progress || 0)}%"></span></div>
       <span>${context.lockMode === "LOCKED" ? t(locale, "context.locked") : t(locale, "context.editable")}</span>
     `
@@ -71,9 +71,10 @@ export function renderStateBadge(container, context, locale = "ko") {
   if (!container) return;
   const status = context?.status || "NO_CONTEXT";
   const locked = context?.lockMode === "LOCKED" || context?.locked === true;
+  const lockLabel = locked ? t(locale, "status.locked") : t(locale, "status.open");
   container.innerHTML = `
-    <span class="state-pill ${escapeHtml(status.toLowerCase().replaceAll("_", "-"))}">${escapeHtml(status)}</span>
-    <span class="lock-badge ${locked ? "locked" : "open"}" title="${escapeHtml(locked ? t(locale, "context.locked") : t(locale, "context.editable"))}">${locked ? "LOCKED" : "OPEN"}</span>`;
+    <span class="state-pill ${escapeHtml(status.toLowerCase().replaceAll("_", "-"))}">${escapeHtml(statusLabel(status, locale))}</span>
+    <span class="lock-badge ${locked ? "locked" : "open"}" title="${escapeHtml(lockLabel)}">${escapeHtml(lockLabel)}</span>`;
 }
 
 export function renderStepper(container, context, activeKey, locale = "ko") {

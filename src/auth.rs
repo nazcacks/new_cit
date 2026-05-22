@@ -13,13 +13,31 @@ use crate::{
 const TOTP_STEP_SECONDS: i64 = 30;
 const TOTP_WINDOW: i64 = 1;
 const TOTP_DIGITS: u32 = 6;
+const PASSWORD_MAX_AGE_DAYS: i64 = 90;
+
+#[derive(sqlx::FromRow)]
+struct LoginCandidate {
+    user_id: i64,
+    tenant_id: i64,
+    tenant_code: String,
+    tenant_name: String,
+    schema_name: String,
+    login_id: String,
+    user_name: String,
+    email: Option<String>,
+    status: String,
+    use_2fa: bool,
+    locked: bool,
+    pwd_changed_at: Option<DateTime<Utc>>,
+    roles: Vec<String>,
+}
 
 pub async fn login(
     pool: &PgPool,
     request: LoginRequest,
     client_ip: Option<&str>,
 ) -> Result<LoginResponse> {
-    let user = sqlx::query_as::<_, AuthUser>(
+    let user = sqlx::query_as::<_, LoginCandidate>(
         r#"
         SELECT
             u.user_id,
@@ -32,6 +50,8 @@ pub async fn login(
             u.email,
             u.status,
             u.use_2fa,
+            u.locked,
+            u.pwd_changed_at,
             COALESCE(
                 ARRAY_AGG(ur.role_code ORDER BY ur.role_code)
                     FILTER (WHERE ur.role_code IS NOT NULL),
@@ -43,9 +63,7 @@ pub async fn login(
         WHERE t.tenant_code = $1
           AND u.login_id = $2
           AND u.password_hash = crypt($3, u.password_hash)
-          AND u.status = 'ACTIVE'
           AND t.status = 'ACTIVE'
-          AND u.locked = FALSE
         GROUP BY u.user_id, t.tenant_id
         "#,
     )
@@ -57,7 +75,9 @@ pub async fn login(
     .context("failed to verify login")?
     .ok_or_else(|| anyhow!("invalid tenant, login id, or password"))?;
 
+    enforce_login_candidate_state(&user)?;
     enforce_ip_allowlist(pool, user.tenant_id, client_ip).await?;
+    enforce_2fa_for_user(pool, user.user_id, user.use_2fa, request.otp.as_deref()).await?;
 
     let token = sqlx::query_scalar::<_, Uuid>(
         r#"
@@ -97,12 +117,26 @@ pub async fn login(
     .await
     .context("failed to load session expiry")?;
 
+    let auth_user = AuthUser {
+        user_id: user.user_id,
+        tenant_id: user.tenant_id,
+        tenant_code: user.tenant_code,
+        tenant_name: user.tenant_name,
+        schema_name: user.schema_name,
+        login_id: user.login_id,
+        user_name: user.user_name,
+        email: user.email,
+        status: user.status,
+        use_2fa: user.use_2fa,
+        roles: user.roles,
+    };
+
     Ok(LoginResponse {
         token,
         token_type: "Bearer",
         expires_at,
-        accessible_tenants: accessible_tenants(pool, &user).await?,
-        user,
+        accessible_tenants: accessible_tenants(pool, &auth_user).await?,
+        user: auth_user,
         modules: modules::module_tree(),
     })
 }
@@ -302,6 +336,30 @@ fn accessible_tenant_from_row(row: sqlx::postgres::PgRow) -> AccessibleTenant {
         tenant_name: row.get("tenant_name"),
         role: row.get("role"),
         current: row.get("current"),
+    }
+}
+
+fn enforce_login_candidate_state(user: &LoginCandidate) -> Result<()> {
+    if user.locked || user.status.eq_ignore_ascii_case("LOCKED") {
+        return Err(anyhow!("account locked"));
+    }
+    if !user.status.eq_ignore_ascii_case("ACTIVE") {
+        return Err(anyhow!("account is not active"));
+    }
+    enforce_password_freshness(user.pwd_changed_at)
+}
+
+fn enforce_password_freshness(pwd_changed_at: Option<DateTime<Utc>>) -> Result<()> {
+    let Some(pwd_changed_at) = pwd_changed_at else {
+        return Err(anyhow!("password expired"));
+    };
+    let age_days = Utc::now()
+        .signed_duration_since(pwd_changed_at)
+        .num_days();
+    if age_days >= PASSWORD_MAX_AGE_DAYS {
+        Err(anyhow!("password expired"))
+    } else {
+        Ok(())
     }
 }
 
