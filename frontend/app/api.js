@@ -9,13 +9,25 @@ export function setUnauthorizedHandler(handler) {
   unauthorizedHandler = handler;
 }
 
+function shouldBypassHttpCache(path) {
+  return typeof path === "string" && (
+    path.includes("/dashboard") ||
+    path.includes("/workflow/queue") ||
+    path.includes("/notifications")
+  );
+}
+
 export async function request(path, options = {}) {
+  const bypassCache = shouldBypassHttpCache(path);
   const headers = {
     ...(options.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
+    ...(bypassCache ? { "Cache-Control": "no-cache" } : {}),
     ...(tokenGetter() ? { Authorization: `Bearer ${tokenGetter()}` } : {}),
     ...(options.headers || {}),
   };
-  const response = await fetch(path, { ...options, headers });
+  const fetchOptions = { ...options, headers };
+  if (bypassCache) fetchOptions.cache = "no-store";
+  const response = await fetch(path, fetchOptions);
   if (response.status === 401 && !options.skipUnauthorized) {
     unauthorizedHandler();
   }

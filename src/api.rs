@@ -29,7 +29,7 @@ use crate::{
         DismissValidationIssueRequest, EnqueueEfilingRequest, EnqueueJobRequest,
         EvaluationAdjustmentRequest, FormMigrationRequest, HealthResponse,
         LawVersioningImpactRequest, LoginRequest, ResolveFormVersionQuery,
-        SpecialTaxAdjustmentRequest, SwitchTenantRequest, TaxAmountAdjustmentRequest,
+        SpecialTaxAdjustmentRequest, SwitchTenantRequest, TaxAmountAdjustmentRequest, TenantRef,
         TransactionBasedAdjustmentRequest, UnlockBusinessYearRequest, UpdateAdminUserRequest,
         UpdateAdminUserStatusRequest, UpdateBusinessYearStatusRequest, UpdateFormDataRequest,
         UpdateFormVersionStatusRequest, UpdateMenuFunctionsRequest, UpdateMenuNodeRequest,
@@ -230,6 +230,30 @@ pub fn router(state: AppState) -> Router {
             get(list_customers).post(create_customer),
         )
         .route("/api/tenants/:tenant_code/dashboard", get(get_dashboard))
+        .route(
+            "/api/tenants/:tenant_code/dashboard/filing-deadlines",
+            get(get_dashboard_filing_deadlines),
+        )
+        .route(
+            "/api/tenants/:tenant_code/dashboard/notifications",
+            get(get_dashboard_notifications),
+        )
+        .route(
+            "/api/tenants/:tenant_code/dashboard/recent-activities",
+            get(get_dashboard_recent_activities),
+        )
+        .route(
+            "/api/tenants/:tenant_code/dashboard/kpi/tax-burden",
+            get(get_dashboard_tax_burden_kpi),
+        )
+        .route(
+            "/api/tenants/:tenant_code/dashboard/kpi/industry-distribution",
+            get(get_dashboard_industry_distribution),
+        )
+        .route(
+            "/api/tenants/:tenant_code/dashboard/kpi/loss-expiry",
+            get(get_dashboard_loss_expiry_kpi),
+        )
         .route("/api/tenants/:tenant_code/audit-logs", get(list_audit_logs))
         .route(
             "/api/tenants/:tenant_code/audit-logs/verify",
@@ -1084,15 +1108,172 @@ async fn list_business_years(
 
 async fn get_dashboard(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path(tenant_code): Path<String>,
 ) -> AppResult<Json<crate::domain::DashboardSummary>> {
     let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
         .await
         .map_err(map_anyhow)?;
-    let dashboard = tenant::dashboard_summary(&state.pool, &tenant_ref)
+    ensure_tenant_route_access(&user, &tenant_ref)?;
+    let dashboard = tenant::dashboard_summary(&state.pool, &tenant_ref, &user)
         .await
         .map_err(map_anyhow)?;
     Ok(Json(dashboard))
+}
+
+#[derive(Debug, Deserialize)]
+struct DashboardDeadlineQuery {
+    #[serde(default, alias = "withinDays")]
+    within_days: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DashboardNotificationQuery {
+    limit: Option<i64>,
+    #[serde(default, alias = "unreadOnly")]
+    unread_only: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DashboardRecentActivityQuery {
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DashboardTaxBurdenKpiQuery {
+    years: Option<i64>,
+    #[serde(default, alias = "customerId")]
+    customer_id: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DashboardLossExpiryKpiQuery {
+    years: Option<i64>,
+}
+
+async fn get_dashboard_filing_deadlines(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(tenant_code): Path<String>,
+    Query(query): Query<DashboardDeadlineQuery>,
+) -> AppResult<Json<crate::domain::DashboardFilingDeadlineSummary>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_tenant_route_access(&user, &tenant_ref)?;
+    let deadlines = tenant::dashboard_filing_deadlines(
+        &state.pool,
+        &tenant_ref,
+        &user,
+        query.within_days.unwrap_or(30),
+    )
+    .await
+    .map_err(map_anyhow)?;
+    Ok(Json(deadlines))
+}
+
+async fn get_dashboard_notifications(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(tenant_code): Path<String>,
+    Query(query): Query<DashboardNotificationQuery>,
+) -> AppResult<Json<crate::domain::DashboardNotificationSummary>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_tenant_route_access(&user, &tenant_ref)?;
+    let notifications = tenant::dashboard_notifications(
+        &state.pool,
+        &tenant_ref,
+        &user,
+        query.limit.unwrap_or(10),
+        query.unread_only.unwrap_or(false),
+    )
+    .await
+    .map_err(map_anyhow)?;
+    Ok(Json(notifications))
+}
+
+async fn get_dashboard_recent_activities(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(tenant_code): Path<String>,
+    Query(query): Query<DashboardRecentActivityQuery>,
+) -> AppResult<Json<crate::domain::DashboardRecentActivitySummary>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_tenant_route_access(&user, &tenant_ref)?;
+    let activities = tenant::dashboard_recent_activities(
+        &state.pool,
+        &tenant_ref,
+        &user,
+        query.limit.unwrap_or(15),
+    )
+    .await
+    .map_err(map_anyhow)?;
+    Ok(Json(activities))
+}
+
+async fn get_dashboard_tax_burden_kpi(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(tenant_code): Path<String>,
+    Query(query): Query<DashboardTaxBurdenKpiQuery>,
+) -> AppResult<Json<crate::domain::DashboardTaxBurdenKpiSummary>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_tenant_route_access(&user, &tenant_ref)?;
+    ensure_dashboard_kpi_access(&user)?;
+    let summary = tenant::dashboard_tax_burden_kpi(
+        &state.pool,
+        &tenant_ref,
+        &user,
+        query.years.unwrap_or(5),
+        query.customer_id,
+    )
+    .await
+    .map_err(map_anyhow)?;
+    Ok(Json(summary))
+}
+
+async fn get_dashboard_industry_distribution(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(tenant_code): Path<String>,
+) -> AppResult<Json<crate::domain::DashboardIndustryDistributionSummary>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_tenant_route_access(&user, &tenant_ref)?;
+    ensure_dashboard_kpi_access(&user)?;
+    let summary = tenant::dashboard_industry_distribution(&state.pool, &tenant_ref, &user)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(summary))
+}
+
+async fn get_dashboard_loss_expiry_kpi(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(tenant_code): Path<String>,
+    Query(query): Query<DashboardLossExpiryKpiQuery>,
+) -> AppResult<Json<crate::domain::DashboardLossExpiryKpiSummary>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_tenant_route_access(&user, &tenant_ref)?;
+    ensure_dashboard_kpi_access(&user)?;
+    let summary = tenant::dashboard_loss_expiry_kpi(
+        &state.pool,
+        &tenant_ref,
+        &user,
+        query.years.unwrap_or(3),
+    )
+    .await
+    .map_err(map_anyhow)?;
+    Ok(Json(summary))
 }
 
 async fn list_audit_logs(
@@ -1150,11 +1331,13 @@ async fn create_access_delegation(
 
 async fn list_notifications(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path(tenant_code): Path<String>,
 ) -> AppResult<Json<Vec<crate::domain::Notification>>> {
     let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
         .await
         .map_err(map_anyhow)?;
+    ensure_tenant_route_access(&user, &tenant_ref)?;
     let notifications = tenant::list_notifications(&state.pool, &tenant_ref)
         .await
         .map_err(map_anyhow)?;
@@ -1163,14 +1346,16 @@ async fn list_notifications(
 
 async fn update_notification(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path((tenant_code, notification_id)): Path<(String, i64)>,
     Json(request): Json<UpdateNotificationRequest>,
 ) -> AppResult<Json<crate::domain::Notification>> {
     let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
         .await
         .map_err(map_anyhow)?;
+    ensure_tenant_route_access(&user, &tenant_ref)?;
     let notification =
-        tenant::update_notification(&state.pool, &tenant_ref, notification_id, request)
+        tenant::update_notification(&state.pool, &tenant_ref, &user, notification_id, request)
             .await
             .map_err(map_anyhow)?;
     Ok(Json(notification))
@@ -1303,13 +1488,31 @@ struct WorkflowQueueQuery {
 
 async fn get_workflow_queue(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path(tenant_code): Path<String>,
     Query(query): Query<WorkflowQueueQuery>,
 ) -> AppResult<Json<Vec<crate::domain::WorkflowQueueItem>>> {
     let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
         .await
         .map_err(map_anyhow)?;
-    let rows = tenant::workflow_queue(&state.pool, &tenant_ref, query.assignee.as_deref())
+    ensure_tenant_route_access(&user, &tenant_ref)?;
+    let assignee = query
+        .assignee
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| {
+            if value.eq_ignore_ascii_case("me") {
+                if is_super_admin(&user) {
+                    None
+                } else {
+                    Some(user.login_id.as_str())
+                }
+            } else {
+                Some(value)
+            }
+        });
+    let rows = tenant::workflow_queue(&state.pool, &tenant_ref, assignee)
         .await
         .map_err(map_anyhow)?;
     Ok(Json(rows))
@@ -1317,12 +1520,14 @@ async fn get_workflow_queue(
 
 async fn update_business_year_status(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path((tenant_code, by_id)): Path<(String, i64)>,
     Json(request): Json<UpdateBusinessYearStatusRequest>,
 ) -> AppResult<Json<crate::domain::BusinessYear>> {
     let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
         .await
         .map_err(map_anyhow)?;
+    ensure_tenant_route_access(&user, &tenant_ref)?;
     let next_status = request.status.trim().to_ascii_uppercase();
     let by = tenant::update_business_year_status(&state.pool, &tenant_ref, by_id, request)
         .await
@@ -1337,11 +1542,13 @@ async fn update_business_year_status(
 
 async fn get_business_year_workflow(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path((tenant_code, by_id)): Path<(String, i64)>,
 ) -> AppResult<Json<crate::domain::BusinessYearWorkflow>> {
     let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
         .await
         .map_err(map_anyhow)?;
+    ensure_tenant_route_access(&user, &tenant_ref)?;
     let workflow = tenant::get_business_year_workflow(&state.pool, &tenant_ref, by_id)
         .await
         .map_err(map_anyhow)?;
@@ -2975,6 +3182,27 @@ fn ensure_tenant_admin_or_super(user: &AuthUser) -> AppResult<()> {
         Err(AppError::forbidden(
             "TENANT_ADMIN or SUPER_ADMIN role is required",
         ))
+    }
+}
+
+fn ensure_tenant_route_access(user: &AuthUser, tenant_ref: &TenantRef) -> AppResult<()> {
+    if user.tenant_id == tenant_ref.tenant_id || is_super_admin(user) {
+        Ok(())
+    } else {
+        Err(AppError::forbidden("tenant access denied"))
+    }
+}
+
+fn ensure_dashboard_kpi_access(user: &AuthUser) -> AppResult<()> {
+    if user.roles.iter().any(|role| {
+        matches!(
+            role.as_str(),
+            "SUPER_ADMIN" | "TENANT_ADMIN" | "SYSTEM_ADMIN" | "TAX_EXPERT" | "TAX_REVIEWER"
+        )
+    }) {
+        Ok(())
+    } else {
+        Err(AppError::forbidden("dashboard KPI access denied"))
     }
 }
 

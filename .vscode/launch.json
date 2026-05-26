@@ -1,0 +1,55 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Rust: Debug Backend (cit-system)",
+      "cargo": {
+        "args": [
+          "build",
+          "--bin=cit-system"
+        ],
+        "filter": {
+          "name": "cit-system",
+          "kind": "bin"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "DATABASE_URL": "postgres://cit:cit@localhost:5432/cit",
+        "APP_HOST": "127.0.0.1",
+        "APP_PORT": "8080",
+        "ENABLE_WORKER": "true",
+        "JOB_POLL_SECONDS": "2",
+        "RUST_LOG": "cit_system=info,tower_http=info",
+        "ALLOWED_ORIGINS": "http://localhost:8080,http://127.0.0.1:8080"
+      },
+      "preLaunchTask": "Docker: Start PostgreSQL"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Rust: Debug Seed Demo",
+      "cargo": {
+        "args": [
+          "build",
+          "--bin=seed-demo"
+        ],
+        "filter": {
+          "name": "seed-demo",
+          "kind": "bin"
+        }
+      },
+      "args": [
+        "--reset"
+      ],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "DATABASE_URL": "postgres://cit:cit@localhost:5432/cit"
+      },
+      "preLaunchTask": "Docker: Start PostgreSQL"
+    }
+  ]
+}

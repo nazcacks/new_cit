@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
@@ -5,9 +7,14 @@ use sqlx::{PgPool, Row};
 use crate::{
     db::{execute_batch, quote_ident},
     domain::{
-        AmendmentDiff, AmendmentPreview, ApprovalLine, AuditLog, BusinessYear,
+        AmendmentDiff, AmendmentPreview, ApprovalLine, AuditLog, AuthUser, BusinessYear,
         BusinessYearWorkflow, CreateBusinessYearRequest, CreateCustomerRequest,
-        CreateTenantRequest, CreateUserReportDefinitionRequest, Customer, DashboardSummary,
+        CreateTenantRequest, CreateUserReportDefinitionRequest, Customer, DashboardFilingDeadline,
+        DashboardFilingDeadlineSummary, DashboardIndustryDistributionItem,
+        DashboardIndustryDistributionSummary, DashboardLossExpiryKpiBucket,
+        DashboardLossExpiryKpiSummary, DashboardNotificationItem, DashboardNotificationSummary,
+        DashboardRecentActivityItem, DashboardRecentActivitySummary, DashboardSummary,
+        DashboardTaxBurdenKpiPoint, DashboardTaxBurdenKpiSummary, DashboardWorkStatus,
         Notification, ReserveTrendReportRow, TaxBurdenReportRow, Tenant, TenantRef,
         UnlockBusinessYearRequest, UpdateBusinessYearStatusRequest, UpdateNotificationRequest,
         UpdateTenantPlanRequest, UpdateTenantStatusRequest, WorkflowEvent, WorkflowEventRequest,
@@ -1456,17 +1463,302 @@ pub async fn list_audit_logs(
         .context("failed to list audit logs")
 }
 
+pub async fn dashboard_recent_activities(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    user: &AuthUser,
+    limit: i64,
+) -> Result<DashboardRecentActivitySummary> {
+    let super_admin = user.roles.iter().any(|role| role == "SUPER_ADMIN");
+    if user.tenant_id != tenant.tenant_id && !super_admin {
+        anyhow::bail!("tenant access denied");
+    }
+    let all_access = super_admin
+        || (user.tenant_id == tenant.tenant_id
+            && user.roles.iter().any(|role| {
+                matches!(
+                    role.as_str(),
+                    "TENANT_ADMIN" | "SYSTEM_ADMIN" | "SUPER_ADMIN"
+                )
+            }));
+    let limit = limit.clamp(1, 50);
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        WITH visible_customers AS (
+            SELECT a.customer_id
+            FROM user_customer_access a
+            WHERE a.user_id = $3
+              AND a.tenant_id = $1
+              AND a.access_level <> 'BLOCKED'
+              AND (a.valid_from IS NULL OR a.valid_from <= CURRENT_DATE)
+              AND (a.valid_to IS NULL OR a.valid_to >= CURRENT_DATE)
+            UNION
+            SELECT d.customer_id
+            FROM access_delegations d
+            WHERE d.tenant_id = $1
+              AND d.delegatee_user_id = $3
+              AND d.status = 'ACTIVE'
+              AND (d.valid_from IS NULL OR d.valid_from <= CURRENT_DATE)
+              AND (d.valid_to IS NULL OR d.valid_to >= CURRENT_DATE)
+        ),
+        resolved AS (
+            SELECT
+                al.audit_id,
+                al.table_name,
+                al.record_id,
+                al.action,
+                al.old_data,
+                al.new_data,
+                al.changed_by,
+                COALESCE(u.user_name, al.changed_by) AS actor_name,
+                al.changed_at,
+                COALESCE(by_log.by_id, by_notification.by_id) AS by_id,
+                COALESCE(by_log.customer_id, by_notification.customer_id, customer_log.customer_id) AS customer_id,
+                COALESCE(customer_by.customer_name, customer_notification.customer_name, customer_log.customer_name) AS customer_name,
+                COALESCE(by_log.year_label, by_notification.year_label) AS fiscal_year,
+                COALESCE(by_log.start_date, by_notification.start_date) AS start_date,
+                COALESCE(by_log.end_date, by_notification.end_date) AS end_date,
+                COALESCE(by_log.status, by_notification.status) AS business_year_status
+            FROM {schema}.audit_logs al
+            LEFT JOIN users u
+              ON u.tenant_id = $1
+             AND u.login_id = al.changed_by
+            LEFT JOIN {schema}.business_years by_log
+              ON al.table_name = 'business_years'
+             AND al.record_id ~ '^[0-9]+$'
+             AND by_log.by_id = al.record_id::BIGINT
+            LEFT JOIN {schema}.customers customer_by
+              ON customer_by.customer_id = by_log.customer_id
+            LEFT JOIN {schema}.customers customer_log
+              ON al.table_name = 'customers'
+             AND al.record_id ~ '^[0-9]+$'
+             AND customer_log.customer_id = al.record_id::BIGINT
+            LEFT JOIN {schema}.notifications notification_log
+              ON al.table_name = 'notifications'
+             AND al.record_id ~ '^[0-9]+$'
+             AND notification_log.notification_id = al.record_id::BIGINT
+            LEFT JOIN {schema}.business_years by_notification
+              ON by_notification.by_id = notification_log.by_id
+            LEFT JOIN {schema}.customers customer_notification
+              ON customer_notification.customer_id = by_notification.customer_id
+        ),
+        filtered AS (
+            SELECT *
+            FROM resolved
+            WHERE $2::BOOL
+               OR changed_by = $4
+               OR customer_id IN (SELECT customer_id FROM visible_customers)
+        )
+        SELECT *,
+               COUNT(*) OVER() AS total_count
+        FROM filtered
+        ORDER BY audit_id DESC
+        LIMIT $5
+        "#
+    );
+
+    let rows = sqlx::query(&sql)
+        .bind(tenant.tenant_id)
+        .bind(all_access)
+        .bind(user.user_id)
+        .bind(&user.login_id)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+        .context("failed to load dashboard recent activities")?;
+
+    let total_count = rows
+        .first()
+        .map(|row| row.get::<i64, _>("total_count"))
+        .unwrap_or(0);
+    let activities = rows
+        .into_iter()
+        .map(|row| {
+            let table_name = row.get::<String, _>("table_name");
+            let action = row.get::<String, _>("action");
+            let old_data = row.get::<Option<Value>, _>("old_data");
+            let new_data = row.get::<Option<Value>, _>("new_data");
+            let descriptor = dashboard_activity_descriptor(
+                &table_name,
+                &action,
+                old_data.as_ref(),
+                new_data.as_ref(),
+            );
+            DashboardRecentActivityItem {
+                audit_id: row.get("audit_id"),
+                activity_type: descriptor.activity_type,
+                type_label: descriptor.type_label,
+                description: descriptor.description,
+                table_name,
+                action,
+                record_id: row.get("record_id"),
+                actor_login_id: row.get("changed_by"),
+                actor_name: row.get("actor_name"),
+                customer_id: row.get("customer_id"),
+                customer_name: row.get("customer_name"),
+                by_id: row.get("by_id"),
+                fiscal_year: row.get("fiscal_year"),
+                start_date: row.get("start_date"),
+                end_date: row.get("end_date"),
+                business_year_status: row.get("business_year_status"),
+                route_key: descriptor.route_key,
+                occurred_at: row.get("changed_at"),
+            }
+        })
+        .collect();
+
+    Ok(DashboardRecentActivitySummary {
+        activities,
+        total_count,
+        limit,
+    })
+}
+
+struct DashboardActivityDescriptor {
+    activity_type: String,
+    type_label: String,
+    description: String,
+    route_key: String,
+}
+
+fn dashboard_activity_descriptor(
+    table_name: &str,
+    action: &str,
+    old_data: Option<&Value>,
+    new_data: Option<&Value>,
+) -> DashboardActivityDescriptor {
+    let old_status = old_data
+        .and_then(|value| value.get("status"))
+        .and_then(Value::as_str);
+    let new_status = new_data
+        .and_then(|value| value.get("status"))
+        .and_then(Value::as_str);
+    let action = action.to_ascii_uppercase();
+    match (table_name, action.as_str(), old_status, new_status) {
+        ("business_years", "UPDATE", Some("DRAFT"), Some("IN_REVIEW")) => activity_descriptor(
+            "REVIEW_REQUESTED",
+            "결재 요청",
+            "결재 요청 (IN_REVIEW 전환)",
+            "ws/appr:inbox",
+        ),
+        ("business_years", "UPDATE", Some("IN_REVIEW"), Some("APPROVED")) => activity_descriptor(
+            "REVIEW_APPROVED",
+            "결재 승인",
+            "결재 승인 (APPROVED 전환)",
+            "ws/appr:inbox",
+        ),
+        ("business_years", "UPDATE", Some("IN_REVIEW"), Some("DRAFT")) => activity_descriptor(
+            "REVIEW_REJECTED",
+            "결재 반려",
+            "결재 반려 (DRAFT 전환)",
+            "ws/appr:rejected",
+        ),
+        ("business_years", "UPDATE", Some("APPROVED"), Some("FILED")) => activity_descriptor(
+            "EFILING_SUBMITTED",
+            "신고 완료",
+            "신고 제출 완료 (FILED)",
+            "post/hist:list",
+        ),
+        ("business_years", "UPDATE", Some("FILED"), Some("AMENDED")) => activity_descriptor(
+            "LOCK_RELEASED",
+            "잠금 해제",
+            "잠금 해제 신청 (수정신고)",
+            "post/amend:unlock",
+        ),
+        ("business_years", "CREATE", _, _) => activity_descriptor(
+            "BUSINESS_YEAR_CREATED",
+            "사업연도 생성",
+            "사업연도 생성",
+            "ws/start:snapshot",
+        ),
+        ("business_years", "UPDATE", _, _) => activity_descriptor(
+            "BUSINESS_YEAR_UPDATED",
+            "사업연도 변경",
+            "사업연도 상태 변경",
+            "ws/start:snapshot",
+        ),
+        ("customers", "CREATE", _, _) => activity_descriptor(
+            "CUSTOMER_CREATED",
+            "고객사 등록",
+            "고객사 등록",
+            "ws/start:customer-pick",
+        ),
+        ("tax_adjustments", _, _, _) | ("adjustment_items", _, _, _) => activity_descriptor(
+            "TAX_ADJ_SAVED",
+            "세무조정 저장",
+            "세무조정 저장",
+            "ws/adj:B1",
+        ),
+        ("form_data", _, _, _) => activity_descriptor(
+            "FORM_GENERATED",
+            "서식 생성",
+            "서식 생성 완료",
+            "ws/form:preview",
+        ),
+        ("validation_issues", _, _, _) => {
+            activity_descriptor("VALIDATION_RUN", "검증 실행", "검증 실행", "ws/val:run")
+        }
+        ("efiling_history", _, _, _) | ("efiling_files", _, _, _) => activity_descriptor(
+            "EFILING_SUBMITTED",
+            "전자신고",
+            "전자신고 파일 처리",
+            "post/hist:list",
+        ),
+        ("notifications", _, _, _) => activity_descriptor(
+            "NOTIFICATION_UPDATED",
+            "알림 변경",
+            "알림 상태 변경",
+            "rp-alerts",
+        ),
+        _ => activity_descriptor(
+            "AUDIT_EVENT",
+            "업무 변경",
+            &format!("{} {}", table_name, action),
+            "ad-audit",
+        ),
+    }
+}
+
+fn activity_descriptor(
+    activity_type: &str,
+    type_label: &str,
+    description: &str,
+    route_key: &str,
+) -> DashboardActivityDescriptor {
+    DashboardActivityDescriptor {
+        activity_type: activity_type.to_string(),
+        type_label: type_label.to_string(),
+        description: description.to_string(),
+        route_key: route_key.to_string(),
+    }
+}
+
 pub async fn ensure_due_notifications(pool: &PgPool, tenant: &TenantRef) -> Result<i64> {
     let schema = quote_ident(&tenant.schema_name)?;
     let mut created = 0_i64;
-    for (bucket, days, severity) in [("D-30", 30_i64, "WARN"), ("D-7", 7_i64, "ERROR")] {
+    for (bucket, days, severity, notification_type) in [
+        ("D-30", 30_i64, "WARN", "DEADLINE_D30"),
+        ("D-7", 7_i64, "ERROR", "DEADLINE_D7"),
+        ("D-Day", 0_i64, "ERROR", "DEADLINE_DDAY"),
+    ] {
         let title = format!("사업연도 마감 {bucket}");
-        let message_suffix = format!(" 사업연도 마감일이 {days}일 이내입니다.");
+        let message_suffix = if days == 0 {
+            " 사업연도 마감일이 오늘입니다.".to_string()
+        } else {
+            format!(" 사업연도 마감일이 {days}일 이내입니다.")
+        };
         sqlx::query(&format!(
             r#"
             UPDATE {schema}.notifications
             SET title = $2,
-                message = CONCAT(COALESCE(metadata->>'year_label', ''), $3)
+                message = CONCAT(COALESCE(metadata->>'year_label', ''), $3),
+                metadata = jsonb_set(
+                    jsonb_set(metadata, '{{notification_type}}', to_jsonb($4::TEXT), true),
+                    '{{route_key}}',
+                    to_jsonb(COALESCE(metadata->>'route_key', 'ws/start:snapshot')::TEXT),
+                    true
+                )
             WHERE metadata->>'due_bucket' = $1::TEXT
               AND title LIKE 'Business year due%'
             "#
@@ -1474,6 +1766,7 @@ pub async fn ensure_due_notifications(pool: &PgPool, tenant: &TenantRef) -> Resu
         .bind(bucket)
         .bind(&title)
         .bind(&message_suffix)
+        .bind(notification_type)
         .execute(pool)
         .await
         .context("failed to normalize due notifications")?;
@@ -1484,7 +1777,20 @@ pub async fn ensure_due_notifications(pool: &PgPool, tenant: &TenantRef) -> Resu
                    $4,
                    CONCAT(b.year_label, $5),
                    $3,
-                   jsonb_build_object('by_id', b.by_id, 'year_label', b.year_label, 'end_date', b.end_date, 'due_bucket', $1::TEXT)
+                   jsonb_build_object(
+                       'by_id', b.by_id,
+                       'year_label', b.year_label,
+                       'end_date', b.end_date,
+                       'due_bucket', $1::TEXT,
+                       'notification_type', $6::TEXT,
+                       'route_key', CASE
+                           WHEN b.status = 'IN_REVIEW' THEN 'ws/appr:inbox'
+                           WHEN b.status = 'APPROVED' THEN 'ws/print:preview'
+                           WHEN b.status = 'AMENDED' THEN 'post/amend:unlock'
+                           ELSE 'ws/start:snapshot'
+                       END,
+                       'days_remaining', (b.end_date - CURRENT_DATE)
+                   )
             FROM {schema}.business_years b
             WHERE b.status <> 'FILED'
               AND b.end_date BETWEEN CURRENT_DATE AND CURRENT_DATE + ($2::INT * INTERVAL '1 day')
@@ -1501,6 +1807,7 @@ pub async fn ensure_due_notifications(pool: &PgPool, tenant: &TenantRef) -> Resu
             .bind(severity)
             .bind(&title)
             .bind(&message_suffix)
+            .bind(notification_type)
             .execute(pool)
             .await
             .context("failed to ensure due notifications")?
@@ -1555,12 +1862,181 @@ pub async fn list_notifications(pool: &PgPool, tenant: &TenantRef) -> Result<Vec
         .context("failed to list notifications")
 }
 
+fn ensure_dashboard_user_tenant_access(user: &AuthUser, tenant: &TenantRef) -> Result<()> {
+    if user.tenant_id == tenant.tenant_id || user.roles.iter().any(|role| role == "SUPER_ADMIN") {
+        Ok(())
+    } else {
+        anyhow::bail!("tenant access denied")
+    }
+}
+
+fn dashboard_user_has_all_access(user: &AuthUser, tenant: &TenantRef) -> bool {
+    user.roles.iter().any(|role| role == "SUPER_ADMIN")
+        || (user.tenant_id == tenant.tenant_id
+            && user.roles.iter().any(|role| {
+                matches!(
+                    role.as_str(),
+                    "TENANT_ADMIN" | "SYSTEM_ADMIN" | "SUPER_ADMIN"
+                )
+            }))
+}
+
+pub async fn dashboard_notifications(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    user: &AuthUser,
+    limit: i64,
+    unread_only: bool,
+) -> Result<DashboardNotificationSummary> {
+    ensure_dashboard_user_tenant_access(user, tenant)?;
+    ensure_due_notifications(pool, tenant).await?;
+    let all_access = dashboard_user_has_all_access(user, tenant);
+    let schema = quote_ident(&tenant.schema_name)?;
+    let bounded_limit = limit.clamp(1, 50);
+    let notifications = sqlx::query_as::<_, DashboardNotificationItem>(&format!(
+        r#"
+        WITH visible_customers AS (
+            SELECT a.customer_id
+            FROM user_customer_access a
+            WHERE a.user_id = $3
+              AND a.tenant_id = $1
+              AND a.access_level <> 'BLOCKED'
+              AND (a.valid_from IS NULL OR a.valid_from <= CURRENT_DATE)
+              AND (a.valid_to IS NULL OR a.valid_to >= CURRENT_DATE)
+            UNION
+            SELECT d.customer_id
+            FROM access_delegations d
+            WHERE d.tenant_id = $1
+              AND d.delegatee_user_id = $3
+              AND d.status = 'ACTIVE'
+              AND (d.valid_from IS NULL OR d.valid_from <= CURRENT_DATE)
+              AND (d.valid_to IS NULL OR d.valid_to >= CURRENT_DATE)
+        )
+        SELECT
+            n.notification_id,
+            n.by_id,
+            b.customer_id,
+            c.customer_name,
+            b.year_label AS fiscal_year,
+            b.start_date,
+            b.end_date AS filing_due_date,
+            b.status AS business_year_status,
+            n.title,
+            n.message,
+            n.severity,
+            n.status,
+            COALESCE(
+                n.metadata->>'notification_type',
+                CASE WHEN n.metadata ? 'due_bucket' THEN 'DUE_DEADLINE' ELSE 'GENERAL' END
+            ) AS notification_type,
+            NULLIF(n.metadata->>'due_bucket', '') AS due_bucket,
+            COALESCE(
+                n.metadata->>'route_key',
+                CASE
+                    WHEN n.by_id IS NULL THEN 'rp-alerts'
+                    WHEN b.status = 'IN_REVIEW' AND EXISTS (
+                        SELECT 1
+                        FROM {schema}.approval_lines al
+                        WHERE al.by_id = b.by_id
+                          AND al.status = 'PENDING'
+                    ) THEN 'ws/appr:inbox'
+                    WHEN b.status = 'IN_REVIEW' THEN 'ws/val:run'
+                    WHEN b.status = 'APPROVED' THEN 'ws/print:preview'
+                    WHEN b.status = 'FILED' THEN 'post/hist:list'
+                    WHEN b.status = 'AMENDED' THEN 'post/amend:unlock'
+                    ELSE 'ws/start:snapshot'
+                END
+            ) AS route_key,
+            n.created_at,
+            n.read_at
+        FROM {schema}.notifications n
+        LEFT JOIN {schema}.business_years b ON b.by_id = n.by_id
+        LEFT JOIN {schema}.customers c ON c.customer_id = b.customer_id
+        WHERE n.status <> 'ARCHIVED'
+          AND ($4::BOOL = FALSE OR n.status = 'UNREAD')
+          AND (
+              $2::BOOL
+              OR b.customer_id IN (SELECT customer_id FROM visible_customers)
+          )
+        ORDER BY
+            CASE WHEN n.status = 'UNREAD' THEN 0 ELSE 1 END,
+            CASE n.severity WHEN 'ERROR' THEN 0 WHEN 'WARN' THEN 1 ELSE 2 END,
+            n.created_at DESC,
+            n.notification_id DESC
+        LIMIT $5
+        "#
+    ))
+    .bind(tenant.tenant_id)
+    .bind(all_access)
+    .bind(user.user_id)
+    .bind(unread_only)
+    .bind(bounded_limit)
+    .fetch_all(pool)
+    .await
+    .context("failed to load dashboard notifications")?;
+
+    let count_row = sqlx::query(&format!(
+        r#"
+        WITH visible_customers AS (
+            SELECT a.customer_id
+            FROM user_customer_access a
+            WHERE a.user_id = $3
+              AND a.tenant_id = $1
+              AND a.access_level <> 'BLOCKED'
+              AND (a.valid_from IS NULL OR a.valid_from <= CURRENT_DATE)
+              AND (a.valid_to IS NULL OR a.valid_to >= CURRENT_DATE)
+            UNION
+            SELECT d.customer_id
+            FROM access_delegations d
+            WHERE d.tenant_id = $1
+              AND d.delegatee_user_id = $3
+              AND d.status = 'ACTIVE'
+              AND (d.valid_from IS NULL OR d.valid_from <= CURRENT_DATE)
+              AND (d.valid_to IS NULL OR d.valid_to >= CURRENT_DATE)
+        ),
+        visible_notifications AS (
+            SELECT n.notification_id, n.status
+            FROM {schema}.notifications n
+            LEFT JOIN {schema}.business_years b ON b.by_id = n.by_id
+            WHERE n.status <> 'ARCHIVED'
+              AND (
+                  $2::BOOL
+                  OR b.customer_id IN (SELECT customer_id FROM visible_customers)
+              )
+        )
+        SELECT
+            (SELECT COUNT(*) FROM visible_notifications WHERE status = 'UNREAD') AS unread_count,
+            (SELECT COUNT(*)
+             FROM visible_notifications
+             WHERE $4::BOOL = FALSE OR status = 'UNREAD') AS total_count
+        "#
+    ))
+    .bind(tenant.tenant_id)
+    .bind(all_access)
+    .bind(user.user_id)
+    .bind(unread_only)
+    .fetch_one(pool)
+    .await
+    .context("failed to count dashboard notifications")?;
+
+    Ok(DashboardNotificationSummary {
+        notifications,
+        unread_count: count_row.get("unread_count"),
+        total_count: count_row.get("total_count"),
+        limit: bounded_limit,
+        unread_only,
+    })
+}
+
 pub async fn update_notification(
     pool: &PgPool,
     tenant: &TenantRef,
+    user: &AuthUser,
     notification_id: i64,
     request: UpdateNotificationRequest,
 ) -> Result<Notification> {
+    ensure_dashboard_user_tenant_access(user, tenant)?;
+    let all_access = dashboard_user_has_all_access(user, tenant);
     let status = request
         .status
         .as_deref()
@@ -1573,21 +2049,50 @@ pub async fn update_notification(
     let schema = quote_ident(&tenant.schema_name)?;
     let sql = format!(
         r#"
-        UPDATE {schema}.notifications
+        WITH visible_customers AS (
+            SELECT a.customer_id
+            FROM user_customer_access a
+            WHERE a.user_id = $3
+              AND a.tenant_id = $1
+              AND a.access_level <> 'BLOCKED'
+              AND (a.valid_from IS NULL OR a.valid_from <= CURRENT_DATE)
+              AND (a.valid_to IS NULL OR a.valid_to >= CURRENT_DATE)
+            UNION
+            SELECT d.customer_id
+            FROM access_delegations d
+            WHERE d.tenant_id = $1
+              AND d.delegatee_user_id = $3
+              AND d.status = 'ACTIVE'
+              AND (d.valid_from IS NULL OR d.valid_from <= CURRENT_DATE)
+              AND (d.valid_to IS NULL OR d.valid_to >= CURRENT_DATE)
+        )
+        UPDATE {schema}.notifications n
         SET status = $2,
             read_at = CASE
                 WHEN $2 = 'READ' THEN COALESCE(read_at, NOW())
                 WHEN $2 = 'UNREAD' THEN NULL
                 ELSE read_at
             END
-        WHERE notification_id = $1
+        WHERE n.notification_id = $4
+          AND (
+              $5::BOOL
+              OR EXISTS (
+                  SELECT 1
+                  FROM {schema}.business_years b
+                  WHERE b.by_id = n.by_id
+                    AND b.customer_id IN (SELECT customer_id FROM visible_customers)
+              )
+          )
         RETURNING notification_id, by_id, title, message, severity, status,
                   metadata, created_at, read_at
         "#
     );
     let notification = sqlx::query_as::<_, Notification>(&sql)
-        .bind(notification_id)
+        .bind(tenant.tenant_id)
         .bind(&status)
+        .bind(user.user_id)
+        .bind(notification_id)
+        .bind(all_access)
         .fetch_one(pool)
         .await
         .context("notification not found")?;
@@ -1607,27 +2112,100 @@ pub async fn update_notification(
     Ok(notification)
 }
 
-pub async fn dashboard_summary(pool: &PgPool, tenant: &TenantRef) -> Result<DashboardSummary> {
+pub async fn dashboard_summary(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    user: &AuthUser,
+) -> Result<DashboardSummary> {
+    ensure_dashboard_user_tenant_access(user, tenant)?;
     ensure_due_notifications(pool, tenant).await?;
+    let all_access = dashboard_user_has_all_access(user, tenant);
     let schema = quote_ident(&tenant.schema_name)?;
     let sql = format!(
         r#"
+        WITH visible_customers AS (
+            SELECT a.customer_id
+            FROM user_customer_access a
+            WHERE a.user_id = $3
+              AND a.tenant_id = $1
+              AND a.access_level <> 'BLOCKED'
+              AND (a.valid_from IS NULL OR a.valid_from <= CURRENT_DATE)
+              AND (a.valid_to IS NULL OR a.valid_to >= CURRENT_DATE)
+            UNION
+            SELECT d.customer_id
+            FROM access_delegations d
+            WHERE d.tenant_id = $1
+              AND d.delegatee_user_id = $3
+              AND d.status = 'ACTIVE'
+              AND (d.valid_from IS NULL OR d.valid_from <= CURRENT_DATE)
+              AND (d.valid_to IS NULL OR d.valid_to >= CURRENT_DATE)
+        ),
+        visible_business_years AS (
+            SELECT b.*
+            FROM {schema}.business_years b
+            WHERE $2::BOOL OR b.customer_id IN (SELECT customer_id FROM visible_customers)
+        ),
+        visible_notifications AS (
+            SELECT n.notification_id, n.status
+            FROM {schema}.notifications n
+            LEFT JOIN {schema}.business_years b ON b.by_id = n.by_id
+            WHERE n.status <> 'ARCHIVED'
+              AND (
+                  $2::BOOL
+                  OR b.customer_id IN (SELECT customer_id FROM visible_customers)
+              )
+        ),
+        visible_audit_logs AS (
+            SELECT al.audit_id
+            FROM {schema}.audit_logs al
+            WHERE $2::BOOL
+               OR EXISTS (
+                   SELECT 1
+                   FROM visible_business_years b
+                   WHERE (al.table_name = 'business_years' AND al.record_id = b.by_id::TEXT)
+                      OR al.new_data->>'by_id' = b.by_id::TEXT
+                      OR al.old_data->>'by_id' = b.by_id::TEXT
+               )
+               OR EXISTS (
+                   SELECT 1
+                   FROM visible_customers c
+                   WHERE (al.table_name = 'customers' AND al.record_id = c.customer_id::TEXT)
+                      OR al.new_data->>'customer_id' = c.customer_id::TEXT
+                      OR al.old_data->>'customer_id' = c.customer_id::TEXT
+               )
+        )
         SELECT
-            (SELECT COUNT(*) FROM {schema}.customers) AS customer_count,
-            (SELECT COUNT(*) FROM {schema}.business_years) AS business_year_count,
-            (SELECT COUNT(*) FROM {schema}.business_years WHERE status = 'FILED') AS filed_count,
-            (SELECT COUNT(*) FROM {schema}.business_years WHERE status = 'IN_REVIEW') AS pending_review_count,
-            (SELECT COUNT(*) FROM {schema}.business_years
+            (SELECT COUNT(*)
+             FROM {schema}.customers c
+             WHERE $2::BOOL OR c.customer_id IN (SELECT customer_id FROM visible_customers)) AS customer_count,
+            (SELECT COUNT(*) FROM visible_business_years) AS business_year_count,
+            (SELECT COUNT(*) FROM visible_business_years WHERE status = 'FILED') AS filed_count,
+            (SELECT COUNT(*) FROM visible_business_years WHERE status = 'IN_REVIEW') AS pending_review_count,
+            (SELECT COUNT(*) FROM visible_business_years
              WHERE status <> 'FILED'
                AND end_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days') AS due_soon_count,
-            (SELECT COUNT(*) FROM {schema}.notifications WHERE status = 'UNREAD') AS unread_notifications,
-            (SELECT COUNT(*) FROM {schema}.audit_logs) AS audit_log_count
+            (SELECT COUNT(*) FROM visible_notifications WHERE status = 'UNREAD') AS unread_notifications,
+            (SELECT COUNT(*) FROM visible_audit_logs) AS audit_log_count
         "#
     );
     let row = sqlx::query_as::<_, DashboardCounts>(&sql)
+        .bind(tenant.tenant_id)
+        .bind(all_access)
+        .bind(user.user_id)
         .fetch_one(pool)
         .await
         .context("failed to load dashboard summary")?;
+    let (work_status, rejected_count) =
+        dashboard_work_status(pool, &schema, tenant.tenant_id, all_access, user.user_id).await?;
+    let filing_deadlines = dashboard_filing_deadlines_for_schema(
+        pool,
+        &schema,
+        tenant.tenant_id,
+        all_access,
+        user.user_id,
+        30,
+    )
+    .await?;
     Ok(DashboardSummary {
         tenant_code: tenant.tenant_code.clone(),
         customer_count: row.customer_count,
@@ -1637,7 +2215,320 @@ pub async fn dashboard_summary(pool: &PgPool, tenant: &TenantRef) -> Result<Dash
         due_soon_count: row.due_soon_count,
         unread_notifications: row.unread_notifications,
         audit_log_count: row.audit_log_count,
+        work_status,
+        rejected_count,
+        filing_deadlines,
     })
+}
+
+pub async fn dashboard_filing_deadlines(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    user: &AuthUser,
+    within_days: i64,
+) -> Result<DashboardFilingDeadlineSummary> {
+    ensure_dashboard_user_tenant_access(user, tenant)?;
+    let all_access = dashboard_user_has_all_access(user, tenant);
+    let schema = quote_ident(&tenant.schema_name)?;
+    dashboard_filing_deadlines_for_schema(
+        pool,
+        &schema,
+        tenant.tenant_id,
+        all_access,
+        user.user_id,
+        within_days,
+    )
+    .await
+}
+
+async fn dashboard_filing_deadlines_for_schema(
+    pool: &PgPool,
+    schema: &str,
+    tenant_id: i64,
+    all_access: bool,
+    user_id: i64,
+    within_days: i64,
+) -> Result<DashboardFilingDeadlineSummary> {
+    let bounded_days = within_days.clamp(1, 365);
+    let deadlines = sqlx::query_as::<_, DashboardFilingDeadline>(&format!(
+        r#"
+        WITH visible_customers AS (
+            SELECT a.customer_id
+            FROM user_customer_access a
+            WHERE a.user_id = $3
+              AND a.tenant_id = $1
+              AND a.access_level <> 'BLOCKED'
+              AND (a.valid_from IS NULL OR a.valid_from <= CURRENT_DATE)
+              AND (a.valid_to IS NULL OR a.valid_to >= CURRENT_DATE)
+            UNION
+            SELECT d.customer_id
+            FROM access_delegations d
+            WHERE d.tenant_id = $1
+              AND d.delegatee_user_id = $3
+              AND d.status = 'ACTIVE'
+              AND (d.valid_from IS NULL OR d.valid_from <= CURRENT_DATE)
+              AND (d.valid_to IS NULL OR d.valid_to >= CURRENT_DATE)
+        ),
+        adjustment_progress AS (
+            SELECT
+                by_id,
+                COUNT(DISTINCT COALESCE(NULLIF(metadata->>'module', ''), adj_category))::BIGINT AS saved_modules
+            FROM {schema}.tax_adjustments
+            WHERE status = 'POSTED'
+            GROUP BY by_id
+        ),
+        deadline_rows AS (
+            SELECT
+                b.by_id AS business_year_id,
+                b.customer_id,
+                c.customer_name,
+                b.year_label AS fiscal_year,
+                b.start_date,
+                b.end_date AS filing_due_date,
+                (b.end_date - CURRENT_DATE)::BIGINT AS days_remaining,
+                b.status,
+                CASE
+                    WHEN b.status = 'DRAFT' THEN '작성중'
+                    WHEN b.status = 'IN_REVIEW' AND EXISTS (
+                        SELECT 1
+                        FROM {schema}.approval_lines al
+                        WHERE al.by_id = b.by_id
+                          AND al.status = 'PENDING'
+                    ) THEN '결재 대기'
+                    WHEN b.status = 'IN_REVIEW' THEN '검증 대기'
+                    WHEN b.status = 'APPROVED' THEN '승인 완료'
+                    WHEN b.status = 'AMENDED' THEN '수정신고'
+                    ELSE b.status
+                END AS status_label,
+                LEAST(100, ROUND(COALESCE(ap.saved_modules, 0) * 100.0 / 17, 0))::BIGINT AS progress_pct,
+                CASE
+                    WHEN (b.end_date - CURRENT_DATE) <= 7 THEN 'CRITICAL'
+                    WHEN (b.end_date - CURRENT_DATE) <= 14 THEN 'WARNING'
+                    ELSE 'NOTICE'
+                END AS urgency_level,
+                CASE
+                    WHEN b.status = 'IN_REVIEW' AND EXISTS (
+                        SELECT 1
+                        FROM {schema}.approval_lines al
+                        WHERE al.by_id = b.by_id
+                          AND al.status = 'PENDING'
+                    ) THEN 'ws/appr:request'
+                    WHEN b.status = 'IN_REVIEW' THEN 'ws/val:run'
+                    WHEN b.status = 'APPROVED' THEN 'ws/print:preview'
+                    WHEN b.status = 'AMENDED' THEN 'post/amend:unlock'
+                    ELSE 'ws/start:snapshot'
+                END AS route_key
+            FROM {schema}.business_years b
+            JOIN {schema}.customers c ON c.customer_id = b.customer_id
+            LEFT JOIN adjustment_progress ap ON ap.by_id = b.by_id
+            WHERE b.status <> 'FILED'
+              AND b.end_date BETWEEN CURRENT_DATE AND CURRENT_DATE + ($4::INT * INTERVAL '1 day')
+              AND (
+                  $2::BOOL
+                  OR b.customer_id IN (SELECT customer_id FROM visible_customers)
+              )
+        )
+        SELECT *
+        FROM deadline_rows
+        ORDER BY days_remaining ASC, filing_due_date ASC, business_year_id ASC
+        "#
+    ))
+    .bind(tenant_id)
+    .bind(all_access)
+    .bind(user_id)
+    .bind(bounded_days as i32)
+    .fetch_all(pool)
+    .await
+    .context("failed to load dashboard filing deadlines")?;
+    let total_count = deadlines.len() as i64;
+    Ok(DashboardFilingDeadlineSummary {
+        deadlines,
+        total_count,
+    })
+}
+
+async fn dashboard_work_status(
+    pool: &PgPool,
+    schema: &str,
+    tenant_id: i64,
+    all_access: bool,
+    user_id: i64,
+) -> Result<(Vec<DashboardWorkStatus>, i64)> {
+    let rows = sqlx::query_as::<_, DashboardWorkStatusCounts>(&format!(
+        r#"
+        WITH visible_customers AS (
+            SELECT a.customer_id
+            FROM user_customer_access a
+            WHERE a.user_id = $3
+              AND a.tenant_id = $1
+              AND a.access_level <> 'BLOCKED'
+              AND (a.valid_from IS NULL OR a.valid_from <= CURRENT_DATE)
+              AND (a.valid_to IS NULL OR a.valid_to >= CURRENT_DATE)
+            UNION
+            SELECT d.customer_id
+            FROM access_delegations d
+            WHERE d.tenant_id = $1
+              AND d.delegatee_user_id = $3
+              AND d.status = 'ACTIVE'
+              AND (d.valid_from IS NULL OR d.valid_from <= CURRENT_DATE)
+              AND (d.valid_to IS NULL OR d.valid_to >= CURRENT_DATE)
+        ),
+        base AS (
+            SELECT
+                b.by_id,
+                b.customer_id,
+                b.status,
+                b.end_date,
+                EXISTS (
+                    SELECT 1
+                    FROM {schema}.approval_lines al
+                    WHERE al.by_id = b.by_id
+                      AND al.status = 'PENDING'
+                ) AS has_pending_approval,
+                EXISTS (
+                    SELECT 1
+                    FROM {schema}.approval_lines al
+                    WHERE al.by_id = b.by_id
+                      AND al.status = 'RETURNED'
+                ) AS has_returned_approval
+            FROM {schema}.business_years b
+            WHERE $2::BOOL
+               OR b.customer_id IN (SELECT customer_id FROM visible_customers)
+        ),
+        classified AS (
+            SELECT
+                by_id,
+                customer_id,
+                end_date,
+                has_returned_approval,
+                CASE
+                    WHEN status = 'IN_REVIEW' AND has_pending_approval THEN 'IN_REVIEW_APPROVAL'
+                    WHEN status = 'IN_REVIEW' THEN 'IN_REVIEW_VALIDATION'
+                    WHEN status IN ('DRAFT', 'APPROVED', 'FILED') THEN status
+                    ELSE NULL
+                END AS status_key
+            FROM base
+        )
+        SELECT
+            status_key,
+            COUNT(*)::BIGINT AS year_count,
+            COUNT(DISTINCT customer_id)::BIGINT AS customer_count,
+            COUNT(*) FILTER (
+                WHERE status_key <> 'FILED'
+                  AND end_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days'
+            )::BIGINT AS urgent_count
+        FROM classified
+        WHERE status_key IS NOT NULL
+        GROUP BY status_key
+        "#
+    ))
+    .bind(tenant_id)
+    .bind(all_access)
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .context("failed to load dashboard work status")?;
+    let rejected_count = sqlx::query_scalar::<_, i64>(&format!(
+        r#"
+        WITH visible_customers AS (
+            SELECT a.customer_id
+            FROM user_customer_access a
+            WHERE a.user_id = $3
+              AND a.tenant_id = $1
+              AND a.access_level <> 'BLOCKED'
+              AND (a.valid_from IS NULL OR a.valid_from <= CURRENT_DATE)
+              AND (a.valid_to IS NULL OR a.valid_to >= CURRENT_DATE)
+            UNION
+            SELECT d.customer_id
+            FROM access_delegations d
+            WHERE d.tenant_id = $1
+              AND d.delegatee_user_id = $3
+              AND d.status = 'ACTIVE'
+              AND (d.valid_from IS NULL OR d.valid_from <= CURRENT_DATE)
+              AND (d.valid_to IS NULL OR d.valid_to >= CURRENT_DATE)
+        )
+        SELECT COUNT(*)::BIGINT
+        FROM {schema}.business_years b
+        WHERE b.status = 'DRAFT'
+          AND (
+              $2::BOOL
+              OR b.customer_id IN (SELECT customer_id FROM visible_customers)
+          )
+          AND EXISTS (
+              SELECT 1
+              FROM {schema}.approval_lines al
+              WHERE al.by_id = b.by_id
+                AND al.status = 'RETURNED'
+          )
+        "#
+    ))
+    .bind(tenant_id)
+    .bind(all_access)
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+    .context("failed to count rejected dashboard work status")?;
+    let counts = rows
+        .into_iter()
+        .map(|row| (row.status_key.clone(), row))
+        .collect::<HashMap<_, _>>();
+    let work_status = DASHBOARD_WORK_STATUS_DEFS
+        .iter()
+        .map(|definition| {
+            let count = counts.get(definition.status);
+            DashboardWorkStatus {
+                status: definition.status.to_string(),
+                label: definition.label.to_string(),
+                year_count: count.map(|item| item.year_count).unwrap_or_default(),
+                customer_count: count.map(|item| item.customer_count).unwrap_or_default(),
+                urgent_count: count.map(|item| item.urgent_count).unwrap_or_default(),
+                color: definition.color.to_string(),
+            }
+        })
+        .collect();
+    Ok((work_status, rejected_count))
+}
+
+const DASHBOARD_WORK_STATUS_DEFS: &[DashboardWorkStatusDefinition] = &[
+    DashboardWorkStatusDefinition {
+        status: "DRAFT",
+        label: "작성중",
+        color: "#3B82F6",
+    },
+    DashboardWorkStatusDefinition {
+        status: "IN_REVIEW_VALIDATION",
+        label: "검증 대기",
+        color: "#FB923C",
+    },
+    DashboardWorkStatusDefinition {
+        status: "IN_REVIEW_APPROVAL",
+        label: "결재 대기",
+        color: "#EF4444",
+    },
+    DashboardWorkStatusDefinition {
+        status: "APPROVED",
+        label: "승인 완료",
+        color: "#22C55E",
+    },
+    DashboardWorkStatusDefinition {
+        status: "FILED",
+        label: "신고 완료",
+        color: "#6B7280",
+    },
+];
+
+struct DashboardWorkStatusDefinition {
+    status: &'static str,
+    label: &'static str,
+    color: &'static str,
+}
+
+#[derive(sqlx::FromRow)]
+struct DashboardWorkStatusCounts {
+    status_key: String,
+    year_count: i64,
+    customer_count: i64,
+    urgent_count: i64,
 }
 
 #[derive(sqlx::FromRow)]
@@ -1678,6 +2569,372 @@ pub async fn tax_burden_report(
         .fetch_all(pool)
         .await
         .context("failed to load tax burden report")
+}
+
+pub async fn dashboard_tax_burden_kpi(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    user: &AuthUser,
+    years: i64,
+    customer_id: Option<i64>,
+) -> Result<DashboardTaxBurdenKpiSummary> {
+    let super_admin = user.roles.iter().any(|role| role == "SUPER_ADMIN");
+    if user.tenant_id != tenant.tenant_id && !super_admin {
+        anyhow::bail!("tenant access denied");
+    }
+    let all_access = super_admin
+        || (user.tenant_id == tenant.tenant_id
+            && user.roles.iter().any(|role| {
+                matches!(
+                    role.as_str(),
+                    "TENANT_ADMIN" | "SYSTEM_ADMIN" | "SUPER_ADMIN"
+                )
+            }));
+    let years = years.clamp(1, 10);
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        WITH visible_customers AS (
+            SELECT a.customer_id
+            FROM user_customer_access a
+            WHERE a.user_id = $3
+              AND a.tenant_id = $1
+              AND a.access_level <> 'BLOCKED'
+              AND (a.valid_from IS NULL OR a.valid_from <= CURRENT_DATE)
+              AND (a.valid_to IS NULL OR a.valid_to >= CURRENT_DATE)
+            UNION
+            SELECT d.customer_id
+            FROM access_delegations d
+            WHERE d.tenant_id = $1
+              AND d.delegatee_user_id = $3
+              AND d.status = 'ACTIVE'
+              AND (d.valid_from IS NULL OR d.valid_from <= CURRENT_DATE)
+              AND (d.valid_to IS NULL OR d.valid_to >= CURRENT_DATE)
+        ),
+        business_year_values AS (
+            SELECT
+                b.by_id,
+                b.customer_id,
+                b.year_label,
+                COALESCE(
+                    MAX(a.amount) FILTER (
+                        WHERE a.adj_code = 'TAXABLE_INCOME'
+                          AND a.status = 'POSTED'
+                    ),
+                    CASE
+                        WHEN latest_form.data_json->>'taxable_income' ~ '^-?[0-9]+$'
+                        THEN (latest_form.data_json->>'taxable_income')::BIGINT
+                        ELSE 0
+                    END
+                )::BIGINT AS taxable_income,
+                COALESCE(
+                    MAX(a.amount) FILTER (
+                        WHERE a.adj_code = 'TOTAL_TAX_DUE'
+                          AND a.status = 'POSTED'
+                    ),
+                    CASE
+                        WHEN latest_form.data_json->>'total_tax_due' ~ '^-?[0-9]+$'
+                        THEN (latest_form.data_json->>'total_tax_due')::BIGINT
+                        ELSE 0
+                    END
+                )::BIGINT AS total_tax_due
+            FROM {schema}.business_years b
+            LEFT JOIN {schema}.tax_adjustments a ON a.by_id = b.by_id
+            LEFT JOIN LATERAL (
+                SELECT data_json
+                FROM {schema}.form_data fd
+                WHERE fd.by_id = b.by_id
+                  AND fd.form_code = 'FORM3'
+                ORDER BY fd.updated_at DESC, fd.form_data_id DESC
+                LIMIT 1
+            ) latest_form ON TRUE
+            WHERE b.status IN ('APPROVED', 'FILED', 'AMENDED')
+              AND ($2::BOOL OR b.customer_id IN (SELECT customer_id FROM visible_customers))
+              AND ($4::BIGINT IS NULL OR b.customer_id = $4)
+            GROUP BY b.by_id, b.customer_id, b.year_label, latest_form.data_json
+        ),
+        selected_years AS (
+            SELECT DISTINCT year_label
+            FROM business_year_values
+            WHERE taxable_income > 0
+            ORDER BY year_label DESC
+            LIMIT $5
+        )
+        SELECT
+            v.year_label AS fiscal_year,
+            COUNT(DISTINCT v.customer_id)::BIGINT AS customer_count,
+            SUM(v.taxable_income)::BIGINT AS taxable_income,
+            SUM(v.total_tax_due)::BIGINT AS total_tax_due,
+            CASE
+                WHEN SUM(v.taxable_income) = 0 THEN 0
+                ELSE (SUM(v.total_tax_due) * 10000 / SUM(v.taxable_income))::BIGINT
+            END AS effective_tax_rate_bps,
+            CASE
+                WHEN SUM(v.taxable_income) = 0 THEN 0::DOUBLE PRECISION
+                ELSE (SUM(v.total_tax_due)::DOUBLE PRECISION * 100.0 / SUM(v.taxable_income)::DOUBLE PRECISION)
+            END AS effective_tax_rate_pct
+        FROM business_year_values v
+        JOIN selected_years y ON y.year_label = v.year_label
+        WHERE v.taxable_income > 0
+        GROUP BY v.year_label
+        ORDER BY v.year_label ASC
+        "#
+    );
+    let trend = sqlx::query_as::<_, DashboardTaxBurdenKpiPoint>(&sql)
+        .bind(tenant.tenant_id)
+        .bind(all_access)
+        .bind(user.user_id)
+        .bind(customer_id)
+        .bind(years)
+        .fetch_all(pool)
+        .await
+        .context("failed to load dashboard tax burden KPI")?;
+    let total_taxable_income = trend.iter().map(|row| row.taxable_income).sum::<i64>();
+    let total_tax_due = trend.iter().map(|row| row.total_tax_due).sum::<i64>();
+    let average_effective_tax_rate_bps = if total_taxable_income == 0 {
+        0
+    } else {
+        total_tax_due * 10_000 / total_taxable_income
+    };
+    let average_effective_tax_rate_pct = if total_taxable_income == 0 {
+        0.0
+    } else {
+        total_tax_due as f64 * 100.0 / total_taxable_income as f64
+    };
+    Ok(DashboardTaxBurdenKpiSummary {
+        years,
+        customer_id,
+        trend,
+        total_taxable_income,
+        total_tax_due,
+        average_effective_tax_rate_bps,
+        average_effective_tax_rate_pct,
+    })
+}
+
+pub async fn dashboard_industry_distribution(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    user: &AuthUser,
+) -> Result<DashboardIndustryDistributionSummary> {
+    let super_admin = user.roles.iter().any(|role| role == "SUPER_ADMIN");
+    if user.tenant_id != tenant.tenant_id && !super_admin {
+        anyhow::bail!("tenant access denied");
+    }
+    let all_access = super_admin
+        || (user.tenant_id == tenant.tenant_id
+            && user.roles.iter().any(|role| {
+                matches!(
+                    role.as_str(),
+                    "TENANT_ADMIN" | "SYSTEM_ADMIN" | "SUPER_ADMIN"
+                )
+            }));
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        WITH visible_customers AS (
+            SELECT a.customer_id
+            FROM user_customer_access a
+            WHERE a.user_id = $3
+              AND a.tenant_id = $1
+              AND a.access_level <> 'BLOCKED'
+              AND (a.valid_from IS NULL OR a.valid_from <= CURRENT_DATE)
+              AND (a.valid_to IS NULL OR a.valid_to >= CURRENT_DATE)
+            UNION
+            SELECT d.customer_id
+            FROM access_delegations d
+            WHERE d.tenant_id = $1
+              AND d.delegatee_user_id = $3
+              AND d.status = 'ACTIVE'
+              AND (d.valid_from IS NULL OR d.valid_from <= CURRENT_DATE)
+              AND (d.valid_to IS NULL OR d.valid_to >= CURRENT_DATE)
+        ),
+        filtered AS (
+            SELECT
+                COALESCE(NULLIF(TRIM(c.industry_code), ''), 'UNSPECIFIED') AS industry_code,
+                c.customer_id
+            FROM {schema}.customers c
+            WHERE c.status = 'ACTIVE'
+              AND ($2::BOOL OR c.customer_id IN (SELECT customer_id FROM visible_customers))
+        )
+        SELECT industry_code,
+               COUNT(DISTINCT customer_id)::BIGINT AS customer_count
+        FROM filtered
+        GROUP BY industry_code
+        ORDER BY customer_count DESC, industry_code ASC
+        "#
+    );
+    let rows = sqlx::query(&sql)
+        .bind(tenant.tenant_id)
+        .bind(all_access)
+        .bind(user.user_id)
+        .fetch_all(pool)
+        .await
+        .context("failed to load dashboard industry distribution")?;
+    let total_customers = rows
+        .iter()
+        .map(|row| row.get::<i64, _>("customer_count"))
+        .sum::<i64>();
+    let industries = rows
+        .into_iter()
+        .map(|row| {
+            let industry_code = row.get::<String, _>("industry_code");
+            let customer_count = row.get::<i64, _>("customer_count");
+            let percentage_bps = if total_customers == 0 {
+                0
+            } else {
+                customer_count * 10_000 / total_customers
+            };
+            DashboardIndustryDistributionItem {
+                industry_name: industry_display_name(&industry_code).to_string(),
+                industry_code,
+                customer_count,
+                percentage_bps,
+                percentage_pct: percentage_bps as f64 / 100.0,
+            }
+        })
+        .collect();
+    Ok(DashboardIndustryDistributionSummary {
+        industries,
+        total_customers,
+    })
+}
+
+pub async fn dashboard_loss_expiry_kpi(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    user: &AuthUser,
+    years: i64,
+) -> Result<DashboardLossExpiryKpiSummary> {
+    let super_admin = user.roles.iter().any(|role| role == "SUPER_ADMIN");
+    if user.tenant_id != tenant.tenant_id && !super_admin {
+        anyhow::bail!("tenant access denied");
+    }
+    let all_access = super_admin
+        || (user.tenant_id == tenant.tenant_id
+            && user.roles.iter().any(|role| {
+                matches!(
+                    role.as_str(),
+                    "TENANT_ADMIN" | "SYSTEM_ADMIN" | "SUPER_ADMIN"
+                )
+            }));
+    let years = years.clamp(1, 10);
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        WITH visible_customers AS (
+            SELECT a.customer_id
+            FROM user_customer_access a
+            WHERE a.user_id = $3
+              AND a.tenant_id = $1
+              AND a.access_level <> 'BLOCKED'
+              AND (a.valid_from IS NULL OR a.valid_from <= CURRENT_DATE)
+              AND (a.valid_to IS NULL OR a.valid_to >= CURRENT_DATE)
+            UNION
+            SELECT d.customer_id
+            FROM access_delegations d
+            WHERE d.tenant_id = $1
+              AND d.delegatee_user_id = $3
+              AND d.status = 'ACTIVE'
+              AND (d.valid_from IS NULL OR d.valid_from <= CURRENT_DATE)
+              AND (d.valid_to IS NULL OR d.valid_to >= CURRENT_DATE)
+        ),
+        eligible AS (
+            SELECT
+                l.loss_id,
+                l.customer_id,
+                l.expires_year,
+                l.remaining_amount
+            FROM {schema}.carryforward_loss l
+            JOIN {schema}.customers c ON c.customer_id = l.customer_id
+            WHERE l.remaining_amount > 0
+              AND l.expires_year BETWEEN EXTRACT(YEAR FROM CURRENT_DATE)::INT
+                                     AND EXTRACT(YEAR FROM CURRENT_DATE)::INT + $4::INT - 1
+              AND ($2::BOOL OR l.customer_id IN (SELECT customer_id FROM visible_customers))
+        )
+        SELECT
+            expires_year,
+            SUM(remaining_amount)::BIGINT AS total_amount,
+            COUNT(DISTINCT customer_id)::BIGINT AS customer_count,
+            COUNT(*)::BIGINT AS loss_count
+        FROM eligible
+        GROUP BY expires_year
+        ORDER BY expires_year ASC
+        "#
+    );
+    let rows = sqlx::query(&sql)
+        .bind(tenant.tenant_id)
+        .bind(all_access)
+        .bind(user.user_id)
+        .bind(years)
+        .fetch_all(pool)
+        .await
+        .context("failed to load dashboard loss expiry KPI")?;
+    let buckets = rows
+        .into_iter()
+        .map(|row| DashboardLossExpiryKpiBucket {
+            expires_year: row.get("expires_year"),
+            total_amount: row.get("total_amount"),
+            customer_count: row.get("customer_count"),
+            loss_count: row.get("loss_count"),
+        })
+        .collect::<Vec<_>>();
+    let total_amount = buckets.iter().map(|row| row.total_amount).sum::<i64>();
+    let total_loss_count = buckets.iter().map(|row| row.loss_count).sum::<i64>();
+    let total_customer_count = if buckets.is_empty() {
+        0
+    } else {
+        sqlx::query_scalar::<_, i64>(&format!(
+            r#"
+            WITH visible_customers AS (
+                SELECT a.customer_id
+                FROM user_customer_access a
+                WHERE a.user_id = $3
+                  AND a.tenant_id = $1
+                  AND a.access_level <> 'BLOCKED'
+                  AND (a.valid_from IS NULL OR a.valid_from <= CURRENT_DATE)
+                  AND (a.valid_to IS NULL OR a.valid_to >= CURRENT_DATE)
+                UNION
+                SELECT d.customer_id
+                FROM access_delegations d
+                WHERE d.tenant_id = $1
+                  AND d.delegatee_user_id = $3
+                  AND d.status = 'ACTIVE'
+                  AND (d.valid_from IS NULL OR d.valid_from <= CURRENT_DATE)
+                  AND (d.valid_to IS NULL OR d.valid_to >= CURRENT_DATE)
+            )
+            SELECT COUNT(DISTINCT l.customer_id)::BIGINT
+            FROM {schema}.carryforward_loss l
+            WHERE l.remaining_amount > 0
+              AND l.expires_year BETWEEN EXTRACT(YEAR FROM CURRENT_DATE)::INT
+                                     AND EXTRACT(YEAR FROM CURRENT_DATE)::INT + $4::INT - 1
+              AND ($2::BOOL OR l.customer_id IN (SELECT customer_id FROM visible_customers))
+            "#
+        ))
+        .bind(tenant.tenant_id)
+        .bind(all_access)
+        .bind(user.user_id)
+        .bind(years)
+        .fetch_one(pool)
+        .await
+        .context("failed to count dashboard loss expiry customers")?
+    };
+    Ok(DashboardLossExpiryKpiSummary {
+        years,
+        buckets,
+        total_amount,
+        total_customer_count,
+        total_loss_count,
+    })
+}
+
+fn industry_display_name(industry_code: &str) -> &'static str {
+    match industry_code {
+        "62010" => "Software development",
+        "101" => "Cash",
+        "UNSPECIFIED" => "Unspecified",
+        _ => "Other",
+    }
 }
 
 pub async fn year_comparison_report(
@@ -1928,17 +3185,20 @@ pub async fn workflow_queue(
     assignee: Option<&str>,
 ) -> Result<Vec<WorkflowQueueItem>> {
     let schema = quote_ident(&tenant.schema_name)?;
-    let assignee = assignee.filter(|value| !value.eq_ignore_ascii_case("me"));
     let sql = format!(
         r#"
         SELECT b.by_id,
                b.customer_id,
                c.customer_name,
                b.year_label,
+               b.start_date,
+               b.end_date,
                b.status,
                al.approver_login_id,
+               we.actor AS requester_login_id,
                we.created_at AS submitted_at,
-               GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - COALESCE(we.created_at, b.updated_at))) / 86400))::BIGINT AS pending_days
+               GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - COALESCE(we.created_at, b.updated_at))) / 86400))::BIGINT AS pending_days,
+               'ws/appr:inbox'::TEXT AS route_key
         FROM {schema}.business_years b
         JOIN {schema}.customers c ON c.customer_id = b.customer_id
         LEFT JOIN LATERAL (
@@ -1949,7 +3209,7 @@ pub async fn workflow_queue(
             LIMIT 1
         ) al ON TRUE
         LEFT JOIN LATERAL (
-            SELECT created_at
+            SELECT actor, created_at
             FROM {schema}.workflow_events
             WHERE by_id = b.by_id AND to_status = 'IN_REVIEW'
             ORDER BY created_at DESC, event_id DESC

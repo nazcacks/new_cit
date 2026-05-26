@@ -87,11 +87,21 @@ async fn workflow_queue_events_and_unlock_follow_phase2_contract() {
         &format!("{base_url}/api/tenants/{tenant_code}/workflow/queue?assignee=reviewer01"),
     )
     .await;
-    assert!(queue
+    let queue_item = queue
         .as_array()
         .unwrap()
         .iter()
-        .any(|row| row["by_id"] == by_id));
+        .find(|row| row["by_id"] == by_id)
+        .unwrap_or_else(|| panic!("workflow queue missing business year {by_id}: {queue}"));
+    assert_eq!(queue_item["customer_id"], customer_id);
+    assert_eq!(queue_item["customer_name"], "Workflow Customer");
+    assert_eq!(queue_item["year_label"], 2026);
+    assert_eq!(queue_item["start_date"], "2026-01-01");
+    assert_eq!(queue_item["end_date"], "2026-12-31");
+    assert_eq!(queue_item["requester_login_id"], "workflow-test");
+    assert_eq!(queue_item["approver_login_id"], "reviewer01");
+    assert_eq!(queue_item["route_key"], "ws/appr:inbox");
+    assert!(queue_item["pending_days"].as_i64().unwrap() >= 0);
 
     let event = post_json(
         &client,

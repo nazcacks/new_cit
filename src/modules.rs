@@ -417,27 +417,31 @@ fn workspace_info_defs() -> Vec<MenuDef> {
 
 fn workspace_adjustment_defs() -> Vec<MenuDef> {
     adjustment_taxonomy()
-    .into_iter()
-    .enumerate()
-    .map(|(index, (code, _label_ko, label_en))| {
-        leaf(
-            &format!("ws/adj:{code}"),
-            Some("ws/adj"),
-            label_en,
-            "calculator",
-            "workspace",
-            work_context(),
-            "adjustment",
-            "CALCULATE",
-            231 + index as i32,
-        )
-    })
-    .collect()
+        .into_iter()
+        .enumerate()
+        .map(|(index, (code, _label_ko, label_en))| {
+            leaf(
+                &format!("ws/adj:{code}"),
+                Some("ws/adj"),
+                label_en,
+                "calculator",
+                "workspace",
+                work_context(),
+                "adjustment",
+                "CALCULATE",
+                231 + index as i32,
+            )
+        })
+        .collect()
 }
 
 fn adjustment_taxonomy() -> [(&'static str, &'static str, &'static str); 17] {
     [
-        ("B1", "B1 소득금액조정명세서", "B1 Income adjustment statement"),
+        (
+            "B1",
+            "B1 소득금액조정명세서",
+            "B1 Income adjustment statement",
+        ),
         ("B2", "B2 기부금", "B2 Donations"),
         ("B3", "B3 접대비", "B3 Entertainment expense"),
         ("B4", "B4 감가상각비", "B4 Depreciation expense"),
@@ -466,7 +470,11 @@ fn adjustment_taxonomy() -> [(&'static str, &'static str, &'static str); 17] {
             "B9 지급이자 손금불산입",
             "B9 Non-deductible interest expense",
         ),
-        ("B10", "B10 업무용승용차 관련비용", "B10 Business vehicle expenses"),
+        (
+            "B10",
+            "B10 업무용승용차 관련비용",
+            "B10 Business vehicle expenses",
+        ),
         ("B11", "B11 이월결손금", "B11 Loss carryforward"),
         ("B12", "B12 세액공제·감면", "B12 Tax credits/reductions"),
         ("B13", "B13 최저한세", "B13 Minimum tax"),

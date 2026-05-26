@@ -148,11 +148,15 @@ fn every_menu_node_exposes_ko_and_en_labels() {
     fn assert_labels(node: &Value) {
         let code = node["code"].as_str().unwrap_or("<unknown>");
         assert!(
-            node["labels"]["ko"].as_str().is_some_and(|value| !value.is_empty()),
+            node["labels"]["ko"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()),
             "{code} must expose labels.ko"
         );
         assert!(
-            node["labels"]["en"].as_str().is_some_and(|value| !value.is_empty()),
+            node["labels"]["en"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()),
             "{code} must expose labels.en"
         );
         for child in node["children"].as_array().into_iter().flatten() {

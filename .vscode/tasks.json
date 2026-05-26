@@ -1,0 +1,76 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Docker: Start PostgreSQL",
+      "type": "shell",
+      "command": "docker compose up -d postgres",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "runOptions": {
+        "runOn": "default"
+      },
+      "group": "none"
+    },
+    {
+      "label": "Docker: Stop All Services",
+      "type": "shell",
+      "command": "docker compose down",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "Rust: Seed Demo Data",
+      "type": "shell",
+      "command": "cargo run --bin seed-demo -- --reset",
+      "options": {
+        "env": {
+          "DATABASE_URL": "postgres://cit:cit@localhost:5432/cit"
+        }
+      },
+      "dependsOn": "Docker: Start PostgreSQL",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "Rust: Cargo Build",
+      "type": "cargo",
+      "command": "build",
+      "problemMatcher": [
+        "$rustc"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "Rust: Cargo Test",
+      "type": "cargo",
+      "command": "test",
+      "args": [
+        "--all",
+        "--all-targets"
+      ],
+      "options": {
+        "env": {
+          "DATABASE_URL": "postgres://cit:cit@localhost:5432/cit"
+        }
+      },
+      "problemMatcher": [
+        "$rustc"
+      ],
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      }
+    }
+  ]
+}

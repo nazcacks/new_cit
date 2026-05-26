@@ -24,6 +24,10 @@ const workflowRendererContract = Object.fromEntries(
   [...objectBlock("workflowLeafRendererContract").matchAll(/^\s*"([^"]+)": "([^"]+)"/gm)]
     .map((match) => [match[1], match[2]])
 );
+const dashboardRendererContract = {
+  "dashboard:overview": "renderDashboard",
+  "dashboard:duesoon": "renderDashboard",
+};
 const adminRendererContract = {
   "admin/tenant:list": "renderAdminTenantLeaf",
   "admin/cust:list": "renderAdminCustomers",
@@ -74,6 +78,12 @@ const screenKeys = [...objectBlock("screenByLeaf").matchAll(/^\s*"([^"]+)": \(en
         `workflow leaf ${match[1]} must use ${workflowRendererContract[match[1]]}`
       );
       assert(!match[2].includes("renderLeafScreen"), `workflow leaf ${match[1]} must not use generic renderer`);
+    } else if (dashboardRendererContract[match[1]]) {
+      assert(
+        match[2].includes(`${dashboardRendererContract[match[1]]}(env)`),
+        `dashboard leaf ${match[1]} must use ${dashboardRendererContract[match[1]]}`
+      );
+      assert(!match[2].includes("renderLeafScreen"), `dashboard leaf ${match[1]} must not use generic renderer`);
     } else if (adminRendererContract[match[1]] && adminRendererContract[match[1]] !== "renderLeafScreen") {
       assert(
         match[2].includes(`${adminRendererContract[match[1]]}(env)`),

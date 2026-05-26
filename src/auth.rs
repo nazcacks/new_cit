@@ -353,9 +353,7 @@ fn enforce_password_freshness(pwd_changed_at: Option<DateTime<Utc>>) -> Result<(
     let Some(pwd_changed_at) = pwd_changed_at else {
         return Err(anyhow!("password expired"));
     };
-    let age_days = Utc::now()
-        .signed_duration_since(pwd_changed_at)
-        .num_days();
+    let age_days = Utc::now().signed_duration_since(pwd_changed_at).num_days();
     if age_days >= PASSWORD_MAX_AGE_DAYS {
         Err(anyhow!("password expired"))
     } else {

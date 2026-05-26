@@ -3,6 +3,10 @@ import { bindDataGridActions, renderDataGrid } from "/app/components/grid.js";
 import { hasWorkContext, progressForStatus } from "/app/context.js";
 import { fieldLabel, leafFocusText, localizeRouteMeta, routeKeyToLabelKey, statusLabel, t } from "/app/i18n.js";
 
+const DASHBOARD_REFRESH_INTERVAL_MS = 30_000;
+let dashboardRealtime = null;
+let dashboardCacheVersion = 0;
+
 const legacyRouteLabels = {
   dashboard: ["대시보드", "대시보드"],
   "ws-start": ["신고 작업", "0. 작업 시작"],
@@ -391,10 +395,10 @@ const validationRunState = new Map();
 
 export const leafScreenSpecs = Object.freeze({
   "dashboard:overview": leafSpec("GET", "/api/tenants/{tenant}/dashboard", "dashboard", "READ"),
-  "dashboard:duesoon": leafSpec("GET", "/api/tenants/{tenant}/business-years?dueWithinDays=30", "dashboard", "READ"),
+  "dashboard:duesoon": leafSpec("GET", "/api/tenants/{tenant}/dashboard/filing-deadlines?withinDays=30", "dashboard", "READ"),
   "dashboard:inbox": leafSpec("GET", "/api/tenants/{tenant}/workflow/queue?assignee=me", "workflow", "READ"),
-  "dashboard:recent": leafSpec("GET", "/api/tenants/{tenant}/audit-logs?limit=20", "audit", "READ"),
-  "dashboard:kpi-tax": leafSpec("GET", "/api/tenants/{tenant}/reports/tax-burden?range=5y", "reports", "READ"),
+  "dashboard:recent": leafSpec("GET", "/api/tenants/{tenant}/dashboard/recent-activities?limit=15", "audit", "READ"),
+  "dashboard:kpi-tax": leafSpec("GET", "/api/tenants/{tenant}/dashboard/kpi/tax-burden?years=5", "reports", "READ"),
   "ws/start:customer-pick": leafSpec("GET", "/api/tenants/{tenant}/customers", "customer", "READ"),
   "ws/start:by-pick": leafSpec("GET", "/api/tenants/{tenant}/business-years", "customer", "READ"),
   "ws/start:snapshot": leafSpec("GET", "/api/tenants/{tenant}/business-years/{byId}/snapshot", "customer", "READ", { requires: ["work-context"] }),
@@ -493,8 +497,8 @@ export const leafScreenSpecs = Object.freeze({
 });
 
 export const screenByLeaf = Object.freeze({
-  "dashboard:overview": (env) => renderLeafScreen(env, "dashboard:overview"),
-  "dashboard:duesoon": (env) => renderLeafScreen(env, "dashboard:duesoon"),
+  "dashboard:overview": (env) => renderDashboard(env),
+  "dashboard:duesoon": (env) => renderDashboard(env),
   "dashboard:inbox": (env) => renderLeafScreen(env, "dashboard:inbox"),
   "dashboard:recent": (env) => renderLeafScreen(env, "dashboard:recent"),
   "dashboard:kpi-tax": (env) => renderLeafScreen(env, "dashboard:kpi-tax"),
@@ -1798,6 +1802,9 @@ export async function renderScreen(env) {
     hideLawBanner(env.lawBanner);
   }
   const screen = screenByLeaf[env.key] || screenByDelegate[meta.delegate] || renderDashboard;
+  if (screen !== renderDashboard) {
+    stopDashboardRealtime();
+  }
   const leafEnv = {
     ...env,
     key: meta.delegate,
@@ -2054,54 +2061,547 @@ async function refreshContextFromBy(env, by, customer) {
   });
 }
 
+function formatDday(daysRemaining) {
+  const days = Number(daysRemaining ?? 0);
+  if (days === 0) return "D-Day";
+  if (days < 0) return `D+${Math.abs(days)}`;
+  return `D-${days}`;
+}
+
+function deadlineUrgencyClass(urgencyLevel) {
+  const normalized = String(urgencyLevel || "NOTICE").toLowerCase();
+  return `deadline-${normalized}`;
+}
+
+function formatNotificationTime(value) {
+  if (!value) return "-";
+  return String(value).replace("T", " ").slice(0, 16);
+}
+
+function notificationSeverityClass(severity) {
+  if (severity === "ERROR") return "danger";
+  if (severity === "WARN") return "warn";
+  if (severity === "OK") return "ok";
+  return "info";
+}
+
+function renderDashboardDeadlineTable(deadlines, locale = "ko") {
+  const rows = asArray(deadlines).map((item) => {
+    const statusText = item.status === "DRAFT"
+      ? `${item.statusLabel || statusLabel(item.status, locale)} (${item.progressPct || 0}%)`
+      : item.statusLabel || statusLabel(item.status, locale);
+    return `
+      <tr class="deadline-row ${escapeHtml(deadlineUrgencyClass(item.urgencyLevel))}" data-deadline-by="${escapeHtml(item.businessYearId)}" tabindex="0">
+        <td><span class="badge ${item.urgencyLevel === "CRITICAL" ? "danger" : item.urgencyLevel === "WARNING" ? "warn" : "info"}">${escapeHtml(formatDday(item.daysRemaining))}</span></td>
+        <td>${escapeHtml(item.customerName)}</td>
+        <td>${escapeHtml(item.fiscalYear)}</td>
+        <td>${escapeHtml(item.filingDueDate)}</td>
+        <td>${pill(item.status, locale)} <span class="muted">${escapeHtml(statusText)}</span></td>
+      </tr>`;
+  });
+  return `
+    <div class="table-wrap dashboard-deadlines" data-dashboard-section="filing-deadlines">
+      <table>
+        <thead><tr><th>긴급도</th><th>고객사</th><th>사업연도</th><th>마감일</th><th>상태</th></tr></thead>
+        <tbody>${rows.length ? rows.join("") : `<tr><td colspan="5">${escapeHtml(t(locale, "grid.empty"))}</td></tr>`}</tbody>
+      </table>
+    </div>`;
+}
+
+function dashboardStatusRoute(status) {
+  return {
+    DRAFT: "ws/start:customer-pick",
+    IN_REVIEW_VALIDATION: "ws/val:run",
+    IN_REVIEW_APPROVAL: "ws/appr:inbox",
+    APPROVED: "ws/print:preview",
+    FILED: "post/hist:list",
+  }[status] || "dashboard:overview";
+}
+
+function renderDashboardWorkStatusCards(summary, locale = "ko") {
+  const statuses = asArray(summary.workStatus);
+  return `
+    <section class="dashboard-status-grid" data-dashboard-section="work-status" aria-label="업무현황">
+      ${statuses.map((item) => `
+        <button class="dashboard-status-card" type="button" data-work-status="${escapeHtml(item.status)}" style="--status-color: ${escapeHtml(item.color || "#3B82F6")}">
+          <span class="status-accent" aria-hidden="true"></span>
+          <span class="status-title">${escapeHtml(item.label || statusLabel(item.status, locale))}</span>
+          <strong>${money.format(item.yearCount || 0)}</strong>
+          <span class="status-meta">고객사 ${money.format(item.customerCount || 0)}개</span>
+          ${Number(item.urgentCount || 0) > 0 ? `<span class="status-urgent">즉시 처리 필요 ${money.format(item.urgentCount)}건</span>` : `<span class="status-quiet">마감 안정</span>`}
+        </button>`).join("")}
+    </section>`;
+}
+
+function renderDashboardNotificationPanel(notificationSummary, queue, locale = "ko", showApprovals = true) {
+  const notifications = asArray(notificationSummary?.notifications).slice(0, 10);
+  const unreadCount = Number(notificationSummary?.unreadCount || 0);
+  const approvalRows = asArray(queue);
+  return `
+    <article class="panel dashboard-notification-panel" data-dashboard-section="notifications">
+      <div class="panel-head">
+        <div>
+          <h2>알림 / 결재 대기함</h2>
+          <p class="empty">마감 알림과 결재 대기 업무를 한 곳에서 처리합니다.</p>
+        </div>
+        <button id="dashAlerts" class="secondary-btn compact" type="button">알림 센터</button>
+      </div>
+      <div class="dashboard-tabs" role="tablist" aria-label="대시보드 알림 탭">
+        <button class="tab active" type="button" role="tab" aria-selected="true" data-dashboard-tab="notifications">
+          알림 <span class="dashboard-unread-badge" data-notification-unread-badge>${money.format(unreadCount)}</span>
+        </button>
+        ${showApprovals ? `<button class="tab" type="button" role="tab" aria-selected="false" data-dashboard-tab="approvals">
+          결재 대기 <span class="dashboard-unread-badge quiet">${money.format(approvalRows.length)}</span>
+        </button>` : ""}
+      </div>
+      <div class="dashboard-tab-panel" data-dashboard-tab-panel="notifications">
+        ${renderDashboardNotificationList(notifications, locale)}
+      </div>
+      ${showApprovals ? `<div class="dashboard-tab-panel hidden" data-dashboard-tab-panel="approvals">
+        <div class="panel-head compact-head"><h3>내 결재함</h3><button id="dashApproval" class="secondary-btn compact" type="button">열기</button></div>
+        ${renderDashboardApprovalQueue(approvalRows, locale)}
+      </div>` : ""}
+    </article>`;
+}
+
+function renderDashboardApprovalQueue(queue, locale = "ko") {
+  if (!queue.length) {
+    return `<p class="empty dashboard-empty">내 결재 대기 항목이 없습니다.</p>`;
+  }
+  return `
+    <ul class="dashboard-approval-list">
+      ${queue.map((item) => `
+        <li class="dashboard-approval-item" data-approval-by="${escapeHtml(item.by_id)}" tabindex="0">
+          <div class="approval-target">
+            <span class="badge warn">결재 대기</span>
+            <strong>${escapeHtml(item.customer_name)} · ${escapeHtml(item.year_label)}</strong>
+            <span class="muted">사업연도 ${escapeHtml(item.start_date || "-")} ~ ${escapeHtml(item.end_date || "-")} · ${escapeHtml(statusLabel(item.status, locale))}</span>
+          </div>
+          <div class="approval-meta">
+            <span>요청자 <strong>${escapeHtml(item.requester_login_id || "-")}</strong></span>
+            <span>대기일 <strong>${money.format(item.pending_days || 0)}일</strong></span>
+          </div>
+          <div class="approval-inline-actions">
+            <button class="primary-btn compact" type="button" data-approve-approval="${escapeHtml(item.by_id)}">승인</button>
+            <button class="danger-btn compact" type="button" data-reject-approval="${escapeHtml(item.by_id)}">반려</button>
+            <button class="secondary-btn compact" type="button" data-open-approval="${escapeHtml(item.by_id)}">상세</button>
+          </div>
+        </li>`).join("")}
+    </ul>`;
+}
+
+function renderDashboardNotificationList(notifications, locale = "ko") {
+  if (!notifications.length) {
+    return `<p class="empty dashboard-empty">최근 알림이 없습니다.</p>`;
+  }
+  return `
+    <ul class="dashboard-notification-list">
+      ${notifications.map((item) => {
+        const unread = item.status === "UNREAD";
+        const bucket = item.dueBucket ? `<span class="badge info">${escapeHtml(item.dueBucket)}</span>` : "";
+        return `
+          <li class="dashboard-notification-item ${unread ? "unread" : "read"}" data-notification-id="${escapeHtml(item.notificationId)}">
+            <span class="notification-dot" aria-hidden="true"></span>
+            <div class="notification-copy">
+              <div class="notification-title-line">
+                <span class="badge ${notificationSeverityClass(item.severity)}">${escapeHtml(item.severity)}</span>
+                ${bucket}
+                <strong>${escapeHtml(item.title)}</strong>
+              </div>
+              <p>${escapeHtml(item.message)}</p>
+              <span class="muted">${escapeHtml(item.customerName || "공통")} · ${escapeHtml(formatNotificationTime(item.createdAt))} · ${escapeHtml(item.notificationType || "GENERAL")}</span>
+            </div>
+            <div class="notification-actions">
+              <button class="secondary-btn compact" type="button" data-open-notification="${escapeHtml(item.notificationId)}">이동</button>
+              <button class="secondary-btn compact" type="button" data-read-notification="${escapeHtml(item.notificationId)}" ${unread ? "" : "disabled"}>읽음</button>
+            </div>
+          </li>`;
+      }).join("")}
+    </ul>`;
+}
+
+function renderDashboardRecentActivities(activitySummary, locale = "ko") {
+  const activities = asArray(activitySummary?.activities).slice(0, 15);
+  return `
+    <article class="panel dashboard-activity-panel" data-dashboard-section="recent-activities">
+      <div class="panel-head">
+        <div>
+          <h2>최근활동</h2>
+          <p class="empty">감사 로그를 업무 피드로 요약해 최근 변경된 화면으로 바로 이동합니다.</p>
+        </div>
+        <button id="dashAudit" class="secondary-btn compact" type="button">감사 로그 전체</button>
+      </div>
+      ${activities.length ? `
+        <ul class="dashboard-activity-list">
+          ${activities.map((item) => {
+            const target = [item.customerName || "공통", item.fiscalYear || ""].filter(Boolean).join(" / ");
+            return `
+              <li class="dashboard-activity-item" data-activity-audit="${escapeHtml(item.auditId)}" tabindex="0">
+                <time>${escapeHtml(formatNotificationTime(item.occurredAt))}</time>
+                <div class="activity-copy">
+                  <div class="activity-title-line">
+                    <span class="badge info">${escapeHtml(item.typeLabel || item.activityType || "업무 변경")}</span>
+                    <strong>${escapeHtml(item.description || item.activityType || item.action)}</strong>
+                  </div>
+                  <p>${escapeHtml(target || item.tableName || "-")}</p>
+                  <span class="muted">${escapeHtml(item.actorName || item.actorLoginId || "system")} · ${escapeHtml(item.routeKey || "ad-audit")}</span>
+                </div>
+                <button class="secondary-btn compact" type="button" data-open-activity="${escapeHtml(item.auditId)}">이동</button>
+              </li>`;
+          }).join("")}
+        </ul>` : `<p class="empty dashboard-empty">최근활동이 없습니다.</p>`}
+    </article>`;
+}
+
+function kpiDonutGradient(industries) {
+  const colors = ["#0ea5e9", "#22c55e", "#f59e0b", "#ef4444", "#64748b"];
+  let start = 0;
+  const segments = asArray(industries).slice(0, 5).map((item, index) => {
+    const pct = Math.max(0, Number(item.percentageBps || 0) / 100);
+    const end = Math.min(100, start + pct);
+    const segment = `${colors[index % colors.length]} ${start}% ${end}%`;
+    start = end;
+    return segment;
+  });
+  if (start < 100) segments.push(`#e2e8f0 ${start}% 100%`);
+  return `conic-gradient(${segments.join(", ")})`;
+}
+
+function renderKpiIndustryDistribution(industrySummary) {
+  const industries = asArray(industrySummary?.industries);
+  return `
+    <section class="kpi-subpanel" data-dashboard-section="kpi-industry-distribution">
+      <div class="kpi-subpanel-head">
+        <h3>업종별 법인 분포</h3>
+        <span>${money.format(industrySummary?.totalCustomers || 0)}개 법인</span>
+      </div>
+      ${industries.length ? `
+        <div class="kpi-donut-layout">
+          <div class="kpi-donut" style="background:${escapeHtml(kpiDonutGradient(industries))}" aria-label="업종별 법인 분포"></div>
+          <ul class="kpi-distribution-list">
+            ${industries.slice(0, 5).map((item) => `
+              <li class="kpi-distribution-row" data-kpi-industry="${escapeHtml(item.industryCode)}">
+                <span>${escapeHtml(item.industryName || item.industryCode)}</span>
+                <strong>${Number(item.percentagePct || 0).toFixed(1)}%</strong>
+                <em>${money.format(item.customerCount || 0)}개</em>
+              </li>`).join("")}
+          </ul>
+        </div>` : `<p class="empty dashboard-empty">업종별 법인 데이터가 없습니다.</p>`}
+    </section>`;
+}
+
+function renderKpiLossExpiry(lossSummary) {
+  const buckets = asArray(lossSummary?.buckets);
+  const maxAmount = Math.max(1, ...buckets.map((item) => Number(item.totalAmount || 0)));
+  return `
+    <section class="kpi-subpanel" data-dashboard-section="kpi-loss-expiry">
+      <div class="kpi-subpanel-head">
+        <h3>이월결손금 만료 예측</h3>
+        <span>${money.format(lossSummary?.totalCustomerCount || 0)}개 법인</span>
+      </div>
+      ${buckets.length ? `
+        <div class="kpi-loss-table">
+          ${buckets.map((item) => `
+            <div class="kpi-loss-row" data-kpi-loss-year="${escapeHtml(item.expiresYear)}">
+              <span>${escapeHtml(item.expiresYear)}년</span>
+              <div class="bar-track"><span style="width:${Math.max(4, Math.round(Number(item.totalAmount || 0) / maxAmount * 100))}%"></span></div>
+              <strong>${money.format(item.totalAmount || 0)}</strong>
+              <em>${money.format(item.customerCount || 0)}개 / ${money.format(item.lossCount || 0)}건</em>
+            </div>`).join("")}
+        </div>
+        <p class="kpi-caption">향후 ${escapeHtml(lossSummary?.years || 3)}개년 만료 예정 잔액 ${money.format(lossSummary?.totalAmount || 0)}</p>`
+        : `<p class="empty dashboard-empty">만료 예정 이월결손금이 없습니다.</p>`}
+    </section>`;
+}
+
+function renderDashboardTaxBurdenKpi(kpiSummary, industrySummary, lossSummary, locale = "ko") {
+  const trend = asArray(kpiSummary?.trend).slice(-5);
+  const maxRate = Math.max(1, ...trend.map((item) => Number(item.effectiveTaxRateBps || 0)));
+  const latest = trend[trend.length - 1];
+  const averagePct = Number(kpiSummary?.averageEffectiveTaxRatePct || 0);
+  return `
+    <article class="panel dashboard-kpi-panel" data-dashboard-section="kpi-tax-burden">
+      <div class="panel-head">
+        <div>
+          <h2>핵심지표</h2>
+          <p class="empty">최근 ${escapeHtml(kpiSummary?.years || 5)}개년 당기 세부담 추이</p>
+        </div>
+        <button id="dashKpiTax" class="secondary-btn compact" type="button">세부담 분석</button>
+      </div>
+      <div class="kpi-summary-strip">
+        <span>평균 실효세율 <strong>${averagePct.toFixed(2)}%</strong></span>
+        <span>총 부담세액 <strong>${money.format(kpiSummary?.totalTaxDue || 0)}</strong></span>
+      </div>
+      ${trend.length ? `
+        <div class="dashboard-kpi-chart" aria-label="당기 세부담 추이">
+          ${trend.map((item) => {
+            const rate = Number(item.effectiveTaxRateBps || 0);
+            return `
+              <div class="kpi-trend-row" data-kpi-year="${escapeHtml(item.fiscalYear)}">
+                <span>${escapeHtml(item.fiscalYear)}</span>
+                <div class="bar-track"><span style="width:${Math.max(4, Math.round(rate / maxRate * 100))}%"></span></div>
+                <strong>${(rate / 100).toFixed(2)}%</strong>
+              </div>`;
+          }).join("")}
+        </div>
+        <p class="kpi-caption">최신 ${escapeHtml(latest?.fiscalYear || "-")}년: 과세표준 ${money.format(latest?.taxableIncome || 0)}, 부담세액 ${money.format(latest?.totalTaxDue || 0)}, 담당 법인 ${money.format(latest?.customerCount || 0)}개</p>`
+        : `<p class="empty dashboard-empty">세부담 추이 데이터가 없습니다.</p>`}
+      <section class="dashboard-kpi-secondary">
+        ${renderKpiIndustryDistribution(industrySummary)}
+        ${renderKpiLossExpiry(lossSummary)}
+      </section>
+    </article>`;
+}
+
+function dashboardRoles(auth) {
+  return asArray(auth?.user?.roles).map((role) => String(role).toUpperCase());
+}
+
+function canViewDashboardApprovals(auth) {
+  return dashboardRoles(auth).includes("TAX_REVIEWER");
+}
+
+function canViewDashboardKpi(auth) {
+  return dashboardRoles(auth).some((role) => ["SUPER_ADMIN", "TENANT_ADMIN", "SYSTEM_ADMIN", "TAX_EXPERT", "TAX_REVIEWER"].includes(role));
+}
+
+function invalidateDashboardCache(reason = "manual") {
+  dashboardCacheVersion += 1;
+  return { version: dashboardCacheVersion, reason };
+}
+
+function stopDashboardRealtime() {
+  if (!dashboardRealtime) return;
+  clearInterval(dashboardRealtime.pollTimer);
+  dashboardRealtime = null;
+}
+
+function startDashboardRealtime(env, root) {
+  stopDashboardRealtime();
+  const realtime = { root, pollTimer: null, refreshing: false };
+  realtime.pollTimer = setInterval(async () => {
+    if (!dashboardRealtime || dashboardRealtime.root !== root || realtime.refreshing) return;
+    realtime.refreshing = true;
+    try {
+      invalidateDashboardCache("poll");
+      await renderDashboard(env);
+    } finally {
+      if (dashboardRealtime === realtime) {
+        realtime.refreshing = false;
+      }
+    }
+  }, DASHBOARD_REFRESH_INTERVAL_MS);
+  dashboardRealtime = realtime;
+}
+
 async function renderDashboard(env) {
   const root = routeRoot(env);
-  const [summary, notifications, queue, audit] = await Promise.all([
+  const showApprovals = canViewDashboardApprovals(env.auth);
+  const showKpi = canViewDashboardKpi(env.auth);
+  const [
+    summary,
+    deadlines,
+    notificationSummary,
+    queue,
+    recentSummary,
+    kpiTaxBurden,
+    kpiIndustryDistribution,
+    kpiLossExpiry,
+  ] = await Promise.all([
     request(`${root}/dashboard`),
-    request(`${root}/notifications`),
-    request(`${root}/workflow/queue?assignee=me`),
-    request(`${root}/audit-logs`),
+    request(`${root}/dashboard/filing-deadlines?withinDays=30`),
+    request(`${root}/dashboard/notifications?limit=10`),
+    showApprovals ? request(`${root}/workflow/queue?assignee=me`) : Promise.resolve([]),
+    request(`${root}/dashboard/recent-activities?limit=15`),
+    showKpi ? request(`${root}/dashboard/kpi/tax-burden?years=5`) : Promise.resolve({ trend: [] }),
+    showKpi ? request(`${root}/dashboard/kpi/industry-distribution`) : Promise.resolve({ industries: [] }),
+    showKpi ? request(`${root}/dashboard/kpi/loss-expiry?years=3`) : Promise.resolve({ buckets: [] }),
   ]);
+  const deadlineRows = asArray(deadlines.deadlines || summary.filingDeadlines?.deadlines).slice(0, 10);
+  const dashboardNotifications = asArray(notificationSummary.notifications);
+  const approvalQueue = asArray(queue);
+  const recentActivities = asArray(recentSummary.activities);
   env.outlet.innerHTML = `
-    <section class="grid">
-      ${metrics([
-        ["작성 중", summary.business_year_count - summary.filed_count],
-        ["검증/결재 대기", summary.pending_review_count],
-        ["승인/신고 완료", summary.filed_count],
-        ["마감 임박", summary.due_soon_count],
-      ])}
-      <section class="grid two">
-        <article class="panel">
-          <div class="panel-head"><h2>내 결재함</h2><button id="dashApproval" class="secondary-btn compact" type="button">열기</button></div>
-          ${table(["사업연도", "고객사", "담당자", "대기"], queue.map((item) => row([
-            escapeHtml(item.year_label),
-            escapeHtml(item.customer_name),
-            escapeHtml(item.approver_login_id || "-"),
-            `${item.pending_days}일`,
-          ])))}
-        </article>
-        <article class="panel">
-          <div class="panel-head"><h2>최근 알림</h2><button id="dashAlerts" class="secondary-btn compact" type="button">열기</button></div>
-          ${table(["등급", "제목", "상태"], notifications.slice(0, 8).map((item) => row([
-            `<span class="badge ${item.severity === "WARN" ? "warn" : "info"}">${escapeHtml(item.severity)}</span>`,
-            escapeHtml(item.title),
-            escapeHtml(item.status),
-          ])))}
-        </article>
+    <section class="dashboard-home" data-dashboard="overview" data-dashboard-cache-version="${dashboardCacheVersion}">
+      <section class="panel dashboard-hero" data-dashboard-section="start">
+        <div>
+          <span class="badge info">Dashboard</span>
+          <h2>신고 업무 현황</h2>
+          <p class="empty">작성, 검증, 결재, 승인, 신고 완료 상태를 확인하고 다음 작업으로 바로 이동합니다.</p>
+        </div>
+        <button id="dashStartWork" class="primary-btn" type="button">신고 작업 시작</button>
       </section>
-      <article class="panel">
-        <div class="panel-head"><h2>최근 활동</h2><button id="dashAudit" class="secondary-btn compact" type="button">감사 로그</button></div>
-        ${table(["모듈", "작업", "사용자", "일시"], audit.slice(0, 10).map((item) => row([
-          escapeHtml(item.table_name),
-          escapeHtml(item.action),
-          escapeHtml(item.changed_by),
-          escapeHtml(item.changed_at),
-        ])))}
-      </article>
+      ${Number(summary.rejectedCount || 0) > 0 ? `<section class="dashboard-rejected-banner" data-dashboard-section="rejected">반려 ${money.format(summary.rejectedCount)}건 - 재작성 필요</section>` : ""}
+      ${renderDashboardWorkStatusCards(summary, env.locale)}
+      <section class="dashboard-main-grid">
+        <article class="panel dashboard-deadline-panel">
+          <div class="panel-head"><h2>신고마감 임박</h2><button id="dashDueSoonAll" class="secondary-btn compact" type="button">전체 보기</button></div>
+          ${renderDashboardDeadlineTable(deadlineRows, env.locale)}
+        </article>
+        ${renderDashboardNotificationPanel(notificationSummary, queue, env.locale, showApprovals)}
+      </section>
+      <section class="dashboard-lower-grid">
+        ${renderDashboardRecentActivities(recentSummary, env.locale)}
+        ${showKpi ? renderDashboardTaxBurdenKpi(kpiTaxBurden, kpiIndustryDistribution, kpiLossExpiry, env.locale) : ""}
+      </section>
     </section>`;
-  document.getElementById("dashApproval").addEventListener("click", () => env.navigate("ws-appr"));
-  document.getElementById("dashAlerts").addEventListener("click", () => env.navigate("rp-alerts"));
-  document.getElementById("dashAudit").addEventListener("click", () => env.navigate("ad-audit"));
+  document.getElementById("dashStartWork").addEventListener("click", () => env.navigate("ws/start:customer-pick"));
+  document.querySelectorAll("[data-work-status]").forEach((card) => {
+    card.addEventListener("click", () => env.navigate(dashboardStatusRoute(card.dataset.workStatus)));
+  });
+  document.getElementById("dashDueSoonAll").addEventListener("click", () => env.navigate("dashboard:duesoon"));
+  document.querySelectorAll("[data-dashboard-tab]").forEach((button) => {
+    button.addEventListener("click", () => {
+      document.querySelectorAll("[data-dashboard-tab]").forEach((tab) => {
+        const active = tab === button;
+        tab.classList.toggle("active", active);
+        tab.setAttribute("aria-selected", active ? "true" : "false");
+      });
+      document.querySelectorAll("[data-dashboard-tab-panel]").forEach((panel) => {
+        panel.classList.toggle("hidden", panel.dataset.dashboardTabPanel !== button.dataset.dashboardTab);
+      });
+    });
+  });
+  document.querySelectorAll("[data-read-notification]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await request(`${root}/notifications/${button.dataset.readNotification}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: "READ" }),
+      });
+      invalidateDashboardCache("notification-read");
+      await renderDashboard(env);
+    });
+  });
+  document.querySelectorAll("[data-open-notification]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const item = dashboardNotifications.find((candidate) => String(candidate.notificationId) === String(button.dataset.openNotification));
+      if (!item) return;
+      if (item.byId) {
+        await refreshContextFromBy(env, {
+          by_id: item.byId,
+          customer_id: item.customerId,
+          year_label: item.fiscalYear,
+          start_date: item.startDate,
+          end_date: item.filingDueDate,
+          status: item.businessYearStatus || "DRAFT",
+        }, { customer_name: item.customerName });
+      }
+      env.navigate(item.routeKey || "rp-alerts");
+    });
+  });
+  const openApproval = async (byId) => {
+    const item = approvalQueue.find((candidate) => String(candidate.by_id) === String(byId));
+    if (!item) return;
+    await refreshContextFromBy(env, {
+      by_id: item.by_id,
+      customer_id: item.customer_id,
+      year_label: item.year_label,
+      start_date: item.start_date,
+      end_date: item.end_date,
+      status: item.status,
+    }, { customer_name: item.customer_name });
+    env.navigate(item.route_key || "ws/appr:inbox");
+  };
+  const runApprovalAction = async (byId, status) => {
+    const item = approvalQueue.find((candidate) => String(candidate.by_id) === String(byId));
+    if (!item) return;
+    const approved = status === "APPROVED";
+    await request(`${root}/business-years/${encodeURIComponent(item.by_id)}/status`, {
+      method: "POST",
+      body: JSON.stringify({
+        status,
+        actor: env.auth?.user?.login_id || "dashboard",
+        approver: env.auth?.user?.login_id || item.approver_login_id || "dashboard",
+        comment: approved ? "dashboard inline approval" : "dashboard inline rejection",
+      }),
+    });
+    invalidateDashboardCache("approval-action");
+    await renderDashboard(env);
+  };
+  document.querySelectorAll("[data-open-approval]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openApproval(button.dataset.openApproval);
+    });
+  });
+  document.querySelectorAll("[data-approve-approval]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      await runApprovalAction(button.dataset.approveApproval, "APPROVED");
+    });
+  });
+  document.querySelectorAll("[data-reject-approval]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      await runApprovalAction(button.dataset.rejectApproval, "DRAFT");
+    });
+  });
+  document.querySelectorAll("[data-approval-by]").forEach((rowElement) => {
+    rowElement.addEventListener("click", () => openApproval(rowElement.dataset.approvalBy));
+    rowElement.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openApproval(rowElement.dataset.approvalBy);
+      }
+    });
+  });
+  document.querySelectorAll("[data-deadline-by]").forEach((rowElement) => {
+    const openDeadline = async () => {
+      const item = deadlineRows.find((candidate) => String(candidate.businessYearId) === rowElement.dataset.deadlineBy);
+      if (!item) return;
+      await refreshContextFromBy(env, {
+        by_id: item.businessYearId,
+        customer_id: item.customerId,
+        year_label: item.fiscalYear,
+        start_date: item.startDate,
+        end_date: item.filingDueDate,
+        status: item.status,
+      }, { customer_name: item.customerName });
+      env.navigate(item.routeKey || "ws/start:snapshot");
+    };
+    rowElement.addEventListener("click", openDeadline);
+    rowElement.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openDeadline();
+      }
+    });
+  });
+  const openActivity = async (auditId) => {
+    const item = recentActivities.find((candidate) => String(candidate.auditId) === String(auditId));
+    if (!item) return;
+    if (item.byId) {
+      await refreshContextFromBy(env, {
+        by_id: item.byId,
+        customer_id: item.customerId,
+        year_label: item.fiscalYear,
+        start_date: item.startDate,
+        end_date: item.endDate,
+        status: item.businessYearStatus || "DRAFT",
+      }, { customer_name: item.customerName });
+    }
+    env.navigate(item.routeKey || "ad-audit");
+  };
+  document.querySelectorAll("[data-activity-audit]").forEach((rowElement) => {
+    rowElement.addEventListener("click", () => openActivity(rowElement.dataset.activityAudit));
+    rowElement.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openActivity(rowElement.dataset.activityAudit);
+      }
+    });
+  });
+  document.querySelectorAll("[data-open-activity]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openActivity(button.dataset.openActivity);
+    });
+  });
+  document.getElementById("dashKpiTax")?.addEventListener("click", () => env.navigate("report:tax-burden"));
+  document.getElementById("dashApproval")?.addEventListener("click", () => env.navigate("ws-appr"));
+  document.getElementById("dashAlerts")?.addEventListener("click", () => env.navigate("rp-alerts"));
+  document.getElementById("dashAudit")?.addEventListener("click", () => env.navigate("ad-audit"));
+  startDashboardRealtime(env, root);
 }
 
 async function renderWorkStart(env) {

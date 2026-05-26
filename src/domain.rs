@@ -385,6 +385,69 @@ pub struct UpdateNotificationRequest {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardNotificationSummary {
+    pub notifications: Vec<DashboardNotificationItem>,
+    pub unread_count: i64,
+    pub total_count: i64,
+    pub limit: i64,
+    pub unread_only: bool,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardNotificationItem {
+    pub notification_id: i64,
+    pub by_id: Option<i64>,
+    pub customer_id: Option<i64>,
+    pub customer_name: Option<String>,
+    pub fiscal_year: Option<i32>,
+    pub start_date: Option<NaiveDate>,
+    pub filing_due_date: Option<NaiveDate>,
+    pub business_year_status: Option<String>,
+    pub title: String,
+    pub message: String,
+    pub severity: String,
+    pub status: String,
+    pub notification_type: String,
+    pub due_bucket: Option<String>,
+    pub route_key: String,
+    pub created_at: DateTime<Utc>,
+    pub read_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardRecentActivitySummary {
+    pub activities: Vec<DashboardRecentActivityItem>,
+    pub total_count: i64,
+    pub limit: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardRecentActivityItem {
+    pub audit_id: i64,
+    pub activity_type: String,
+    pub type_label: String,
+    pub description: String,
+    pub table_name: String,
+    pub action: String,
+    pub record_id: String,
+    pub actor_login_id: String,
+    pub actor_name: String,
+    pub customer_id: Option<i64>,
+    pub customer_name: Option<String>,
+    pub by_id: Option<i64>,
+    pub fiscal_year: Option<i32>,
+    pub start_date: Option<NaiveDate>,
+    pub end_date: Option<NaiveDate>,
+    pub business_year_status: Option<String>,
+    pub route_key: String,
+    pub occurred_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct DashboardSummary {
     pub tenant_code: String,
     pub customer_count: i64,
@@ -394,6 +457,47 @@ pub struct DashboardSummary {
     pub due_soon_count: i64,
     pub unread_notifications: i64,
     pub audit_log_count: i64,
+    #[serde(rename = "workStatus")]
+    pub work_status: Vec<DashboardWorkStatus>,
+    #[serde(rename = "rejectedCount")]
+    pub rejected_count: i64,
+    #[serde(rename = "filingDeadlines")]
+    pub filing_deadlines: DashboardFilingDeadlineSummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardWorkStatus {
+    pub status: String,
+    pub label: String,
+    pub year_count: i64,
+    pub customer_count: i64,
+    pub urgent_count: i64,
+    pub color: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardFilingDeadlineSummary {
+    pub deadlines: Vec<DashboardFilingDeadline>,
+    pub total_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardFilingDeadline {
+    pub business_year_id: i64,
+    pub customer_id: i64,
+    pub customer_name: String,
+    pub fiscal_year: i32,
+    pub start_date: NaiveDate,
+    pub filing_due_date: NaiveDate,
+    pub days_remaining: i64,
+    pub status: String,
+    pub status_label: String,
+    pub progress_pct: i64,
+    pub urgency_level: String,
+    pub route_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -404,6 +508,65 @@ pub struct TaxBurdenReportRow {
     pub taxable_income: i64,
     pub total_tax_due: i64,
     pub effective_tax_rate_bps: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardTaxBurdenKpiSummary {
+    pub years: i64,
+    pub customer_id: Option<i64>,
+    pub trend: Vec<DashboardTaxBurdenKpiPoint>,
+    pub total_taxable_income: i64,
+    pub total_tax_due: i64,
+    pub average_effective_tax_rate_bps: i64,
+    pub average_effective_tax_rate_pct: f64,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardTaxBurdenKpiPoint {
+    pub fiscal_year: i32,
+    pub customer_count: i64,
+    pub taxable_income: i64,
+    pub total_tax_due: i64,
+    pub effective_tax_rate_bps: i64,
+    pub effective_tax_rate_pct: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardIndustryDistributionSummary {
+    pub industries: Vec<DashboardIndustryDistributionItem>,
+    pub total_customers: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardIndustryDistributionItem {
+    pub industry_code: String,
+    pub industry_name: String,
+    pub customer_count: i64,
+    pub percentage_bps: i64,
+    pub percentage_pct: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardLossExpiryKpiSummary {
+    pub years: i64,
+    pub buckets: Vec<DashboardLossExpiryKpiBucket>,
+    pub total_amount: i64,
+    pub total_customer_count: i64,
+    pub total_loss_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardLossExpiryKpiBucket {
+    pub expires_year: i32,
+    pub total_amount: i64,
+    pub customer_count: i64,
+    pub loss_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -430,10 +593,14 @@ pub struct WorkflowQueueItem {
     pub customer_id: i64,
     pub customer_name: String,
     pub year_label: i32,
+    pub start_date: NaiveDate,
+    pub end_date: NaiveDate,
     pub status: String,
     pub approver_login_id: Option<String>,
+    pub requester_login_id: Option<String>,
     pub submitted_at: Option<DateTime<Utc>>,
     pub pending_days: i64,
+    pub route_key: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

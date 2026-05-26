@@ -112,12 +112,10 @@ async fn filed_lock_login_ip_allowlist_and_lockout_are_enforced() {
         "{}",
         login_without_otp.1
     );
-    assert!(
-        login_without_otp.1["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("2fa otp is required")
-    );
+    assert!(login_without_otp.1["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("2fa otp is required"));
     let otp = current_otp(&state, secret).await;
     let login_with_otp = login_attempt_with_otp(
         &base_url,
@@ -166,12 +164,10 @@ async fn filed_lock_login_ip_allowlist_and_lockout_are_enforced() {
     )
     .await;
     assert_eq!(locked.0, StatusCode::UNAUTHORIZED);
-    assert!(
-        locked.1["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("locked")
-    );
+    assert!(locked.1["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("locked"));
 
     let unlocked = post_json(
         &admin_client,
@@ -201,12 +197,10 @@ async fn filed_lock_login_ip_allowlist_and_lockout_are_enforced() {
     )
     .await;
     assert_eq!(expired.0, StatusCode::UNAUTHORIZED);
-    assert!(
-        expired.1["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("password expired")
-    );
+    assert!(expired.1["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("password expired"));
     sqlx::query(
         r#"
         UPDATE users
@@ -338,7 +332,10 @@ async fn business_year_carryforward_clones_snapshot() {
     )
     .await;
 
-    assert_eq!(target_snapshot["law_version_id"], source_snapshot["law_version_id"]);
+    assert_eq!(
+        target_snapshot["law_version_id"],
+        source_snapshot["law_version_id"]
+    );
     assert_eq!(
         target_snapshot["snapshot_data"]["business_year"]["carry_forward_from_by_id"],
         source_by_id

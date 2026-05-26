@@ -1,0 +1,8 @@
+{
+  "recommendations": [
+    "rust-lang.rust-analyzer",
+    "vadimcn.vscode-lldb",
+    "ms-azuretools.vscode-docker",
+    "cweijan.vscode-database-client2"
+  ]
+}

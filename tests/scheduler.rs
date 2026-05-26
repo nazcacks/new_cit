@@ -12,7 +12,7 @@ use tokio::net::TcpListener;
 use uuid::Uuid;
 
 #[tokio::test]
-async fn due_alert_scheduler_creates_d30_and_d7_once() {
+async fn due_alert_scheduler_creates_d30_d7_and_dday_once() {
     let (base_url, _state) = spawn_app().await;
     let token = login(&base_url).await;
     let client = authed_client(&token);
@@ -60,6 +60,19 @@ async fn due_alert_scheduler_creates_d30_and_d7_once() {
         StatusCode::CREATED,
     )
     .await;
+    let dday = Utc::now().date_naive();
+    post_json(
+        &client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years"),
+        json!({
+            "customer_id": customer["customer_id"].as_i64().unwrap(),
+            "year_label": end.year() + 1,
+            "start_date": dday - Duration::days(30),
+            "end_date": dday
+        }),
+        StatusCode::CREATED,
+    )
+    .await;
 
     let first = post_json(
         &client,
@@ -69,7 +82,7 @@ async fn due_alert_scheduler_creates_d30_and_d7_once() {
     )
     .await;
     let created = first["created"].as_i64().unwrap();
-    assert!(created >= 2, "{first}");
+    assert!(created >= 5, "{first}");
     let second = post_json(
         &client,
         &format!("{base_url}/api/operations/scheduler/due-alerts/run"),
@@ -91,6 +104,7 @@ async fn due_alert_scheduler_creates_d30_and_d7_once() {
         .collect::<Vec<_>>();
     assert!(buckets.contains(&"D-30"));
     assert!(buckets.contains(&"D-7"));
+    assert!(buckets.contains(&"D-Day"));
 }
 
 async fn spawn_app() -> (String, AppState) {
