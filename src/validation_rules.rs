@@ -74,6 +74,31 @@ pub async fn run_validation(
     })
 }
 
+pub async fn list_issues(
+    pool: &PgPool,
+    tenant_ref: &TenantRef,
+    by_id: i64,
+) -> Result<Vec<ValidationIssue>> {
+    let schema = quote_ident(&tenant_ref.schema_name)?;
+    let sql = format!(
+        r#"
+        SELECT issue_id, by_id, rule_code, severity, area, message,
+               target_path, status, metadata, created_at, dismissed_at
+        FROM {schema}.validation_issues
+        WHERE by_id = $1
+        ORDER BY
+            CASE severity WHEN 'ERROR' THEN 0 WHEN 'WARN' THEN 1 ELSE 2 END,
+            created_at DESC,
+            issue_id DESC
+        "#
+    );
+    sqlx::query_as::<_, ValidationIssue>(&sql)
+        .bind(by_id)
+        .fetch_all(pool)
+        .await
+        .context("failed to list validation issues")
+}
+
 pub async fn dismiss_issue(
     pool: &PgPool,
     tenant_ref: &TenantRef,

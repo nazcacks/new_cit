@@ -334,6 +334,82 @@ pub async fn filtered_business_years(
     Ok(years)
 }
 
+pub async fn has_customer_work_scope(
+    pool: &PgPool,
+    tenant_ref: &TenantRef,
+    user: &AuthUser,
+    customer_id: i64,
+    work_scope: &str,
+) -> Result<bool> {
+    ensure_tenant_access(user, tenant_ref)?;
+    if customer_id <= 0 {
+        return Ok(false);
+    }
+    if user.roles.iter().any(|role| {
+        matches!(
+            role.as_str(),
+            "SUPER_ADMIN" | "TENANT_ADMIN" | "SYSTEM_ADMIN"
+        )
+    }) {
+        return Ok(true);
+    }
+    let work_scope = work_scope.trim().to_ascii_uppercase();
+    if !matches!(
+        work_scope.as_str(),
+        "INFO" | "ADJUST" | "FORM" | "VALIDATE" | "APPROVE" | "PRINT" | "EFILE" | "POST"
+    ) {
+        return Err(anyhow!("invalid work_scope"));
+    }
+    let assigned = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM user_customer_access a
+            JOIN user_customer_work_scope w ON w.access_id = a.access_id
+            WHERE a.user_id = $1
+              AND a.tenant_id = $2
+              AND a.customer_id = $3
+              AND a.access_level <> 'BLOCKED'
+              AND (a.valid_from IS NULL OR a.valid_from <= CURRENT_DATE)
+              AND (a.valid_to IS NULL OR a.valid_to >= CURRENT_DATE)
+              AND w.work_scope = $4
+        )
+        "#,
+    )
+    .bind(user.user_id)
+    .bind(tenant_ref.tenant_id)
+    .bind(customer_id)
+    .bind(&work_scope)
+    .fetch_one(pool)
+    .await
+    .context("failed to check assigned customer work scope")?;
+    if assigned {
+        return Ok(true);
+    }
+    sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM access_delegations
+            WHERE tenant_id = $1
+              AND delegatee_user_id = $2
+              AND customer_id = $3
+              AND work_scope = $4
+              AND status = 'ACTIVE'
+              AND (valid_from IS NULL OR valid_from <= CURRENT_DATE)
+              AND (valid_to IS NULL OR valid_to >= CURRENT_DATE)
+        )
+        "#,
+    )
+    .bind(tenant_ref.tenant_id)
+    .bind(user.user_id)
+    .bind(customer_id)
+    .bind(&work_scope)
+    .fetch_one(pool)
+    .await
+    .context("failed to check delegated customer work scope")
+}
+
 pub async fn verify_audit_chain(pool: &PgPool, tenant: &TenantRef) -> Result<Value> {
     let schema = quote_ident(&tenant.schema_name)?;
     let sql = format!(

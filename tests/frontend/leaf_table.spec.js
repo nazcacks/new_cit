@@ -24,7 +24,7 @@ for (const fn of [
   assert(screens.includes(`function ${fn}`), `${fn} must exist`);
 }
 
-for (const block of ["summary", "filters", "table"]) {
+for (const block of ["summary", "filters", "table", "row-actions", "toolbar"]) {
   assert(screens.includes(`data-leaf-block="${block}"`), `${block} block must render`);
 }
 
@@ -32,7 +32,6 @@ assert(screens.includes("/leaf-records"), "leaf CRUD must use persistent leaf-re
 assert(screens.includes("refreshLeafRows"), "CRUD actions must refresh the table without page reload");
 assert(!screens.includes("location.reload"), "leaf CRUD must not reload the page");
 assert(!screens.includes("leaf-row-actions-panel"), "separate row action panel must be removed");
-assert(!screens.includes('data-leaf-block="row-actions"'), "row action block must not render");
 assert(!screens.includes("leaf-toolbar"), "separate toolbar panel must be removed");
 assert(screens.includes("panel-head-actions"), "grid controls must be inline in panel head");
 assert(screens.includes("row-actions-th"), "table must keep a single management column");

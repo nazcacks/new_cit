@@ -2,7 +2,7 @@ use std::env;
 
 use axum::serve;
 use chrono::Utc;
-use cit_system::{auth, db, router, AppState, Config};
+use cit_system::{auth, db, queue, router, AppState, Config};
 use reqwest::{
     header::{HeaderMap, HeaderValue, AUTHORIZATION},
     Client, StatusCode,
@@ -247,9 +247,11 @@ async fn filed_lock_login_ip_allowlist_and_lockout_are_enforced() {
     )
     .await;
     assert_eq!(amended["lock_mode"], "AMENDMENT_UNLOCK");
+    let amended_by_id = amended["by_id"].as_i64().expect("amended by_id");
+    assert_ne!(amended_by_id, by_id);
     post_json(
         &secure_client,
-        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/adjustments"),
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{amended_by_id}/adjustments"),
         json!({"accounting_income": 1000000}),
         StatusCode::OK,
     )
@@ -346,6 +348,214 @@ async fn business_year_carryforward_clones_snapshot() {
     );
 }
 
+#[tokio::test]
+async fn efiling_submit_step_up_role_and_filed_lock_are_enforced() {
+    let (base_url, state) = spawn_app().await;
+    let admin_token = login_demo_admin(&base_url).await;
+    let admin_client = authed_client(&admin_token, None);
+
+    let tenant_code = format!("ef{}", &Uuid::new_v4().simple().to_string()[..10]);
+    post_json(
+        &admin_client,
+        &format!("{base_url}/api/tenants"),
+        json!({
+            "tenant_code": tenant_code,
+            "tenant_name": "Efiling Security",
+            "biz_reg_no": "1234567890",
+            "contract_start": "2026-01-01",
+            "contract_end": null,
+            "max_users": 10
+        }),
+        StatusCode::CREATED,
+    )
+    .await;
+    let customer = post_json(
+        &admin_client,
+        &format!("{base_url}/api/tenants/{tenant_code}/customers"),
+        json!({
+            "customer_code": "EF001",
+            "customer_name": "Efiling Customer",
+            "biz_reg_no": "2208112345",
+            "is_sme": true,
+            "work_scopes": ["INFO", "ADJUST", "FORM", "VALIDATE", "APPROVE", "PRINT", "EFILE", "POST"]
+        }),
+        StatusCode::CREATED,
+    )
+    .await;
+    let customer_id = customer["customer_id"].as_i64().unwrap();
+    let by = post_json(
+        &admin_client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years"),
+        json!({
+            "customer_id": customer_id,
+            "year_label": 2026,
+            "start_date": "2026-01-01",
+            "end_date": "2026-12-31"
+        }),
+        StatusCode::CREATED,
+    )
+    .await;
+    let by_id = by["by_id"].as_i64().unwrap();
+
+    post_json(
+        &admin_client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/adjustments"),
+        json!({"accounting_income": 500000000, "gross_revenue": 1000000000}),
+        StatusCode::OK,
+    )
+    .await;
+
+    for status in ["IN_REVIEW", "APPROVED"] {
+        post_json(
+            &admin_client,
+            &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/status"),
+            json!({"status": status, "actor": "admin", "approver": "admin"}),
+            StatusCode::OK,
+        )
+        .await;
+    }
+
+    let secret = "12345678901234567890";
+    post_json(
+        &admin_client,
+        &format!("{base_url}/api/admin/tenants/{tenant_code}/users"),
+        json!({
+            "login_id": "efile_secure",
+            "password": "ChangeMe123!",
+            "user_name": "Efile Secure",
+            "email": "efile-secure@example.test",
+            "use_2fa": true,
+            "totp_secret": secret,
+            "roles": ["TAX_EXPERT"],
+            "customer_access": [{
+                "customer_id": customer_id,
+                "access_level": "OWNER",
+                "is_primary": true,
+                "work_scopes": ["EFILE", "PRINT"]
+            }]
+        }),
+        StatusCode::CREATED,
+    )
+    .await;
+    post_json(
+        &admin_client,
+        &format!("{base_url}/api/admin/tenants/{tenant_code}/users"),
+        json!({
+            "login_id": "efile_assistant",
+            "password": "ChangeMe123!",
+            "user_name": "Efile Assistant",
+            "email": "efile-assistant@example.test",
+            "use_2fa": false,
+            "roles": ["ASSISTANT"],
+            "customer_access": [{
+                "customer_id": customer_id,
+                "access_level": "ASSISTANT",
+                "is_primary": true,
+                "work_scopes": ["EFILE"]
+            }]
+        }),
+        StatusCode::CREATED,
+    )
+    .await;
+
+    let job = post_json(
+        &admin_client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/efilings"),
+        json!({"max_attempts": 1}),
+        StatusCode::ACCEPTED,
+    )
+    .await;
+    run_until_job_status(&state, job["job_id"].as_str().unwrap(), "succeeded").await;
+    let histories = get_json(
+        &admin_client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/efilings"),
+    )
+    .await;
+    let efiling_id = histories[0]["efiling_id"].as_i64().unwrap();
+    let submit_url = format!(
+        "{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/efilings/{efiling_id}/submit"
+    );
+
+    let secure_otp = current_otp(&state, secret).await;
+    let secure_login = login_attempt_with_otp(
+        &base_url,
+        &tenant_code,
+        "efile_secure",
+        "ChangeMe123!",
+        "127.0.0.1",
+        Some(&secure_otp),
+    )
+    .await;
+    assert_eq!(secure_login.0, StatusCode::OK, "{}", secure_login.1);
+    let secure_client = authed_client(secure_login.1["token"].as_str().unwrap(), None);
+    let missing_otp = post_json(
+        &secure_client,
+        &submit_url,
+        json!({"actor": "efile_secure"}),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    assert!(missing_otp["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("2fa otp is required"));
+
+    let assistant_token = login_attempt(
+        &base_url,
+        &tenant_code,
+        "efile_assistant",
+        "ChangeMe123!",
+        "127.0.0.1",
+    )
+    .await;
+    assert_eq!(assistant_token.0, StatusCode::OK, "{}", assistant_token.1);
+    let assistant_client = authed_client(assistant_token.1["token"].as_str().unwrap(), None);
+    post_json(
+        &assistant_client,
+        &submit_url,
+        json!({"actor": "efile_assistant"}),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+
+    let submitted = post_json(
+        &secure_client,
+        &submit_url,
+        json!({"actor": "efile_secure", "otp": current_otp(&state, secret).await}),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(submitted["status"], "ACCEPTED");
+    assert!(submitted["receipt_no"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("R-"));
+    let resubmit_blocked = post_json(
+        &secure_client,
+        &submit_url,
+        json!({"actor": "efile_secure", "otp": current_otp(&state, secret).await}),
+        StatusCode::CONFLICT,
+    )
+    .await;
+    assert_eq!(resubmit_blocked["error"]["code"], "CONFLICT");
+
+    let workflow = get_json(
+        &admin_client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/workflow"),
+    )
+    .await;
+    assert_eq!(workflow["business_year"]["status"], "FILED");
+    assert!(!workflow["business_year"]["locked_at"].is_null());
+    let blocked = post_json(
+        &admin_client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/adjustments"),
+        json!({"accounting_income": 1000000}),
+        StatusCode::CONFLICT,
+    )
+    .await;
+    assert_eq!(blocked["error"]["code"], "CONFLICT");
+}
+
 async fn spawn_app() -> (String, AppState) {
     dotenvy::dotenv().ok();
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL is required");
@@ -422,6 +632,22 @@ async fn current_otp(state: &AppState, secret: &str) -> String {
     auth::hotp(&state.pool, secret.as_bytes(), counter)
         .await
         .unwrap()
+}
+
+async fn run_until_job_status(state: &AppState, job_id: &str, expected: &str) -> Value {
+    let id = job_id.parse::<Uuid>().unwrap();
+    for _ in 0..50 {
+        queue::run_once(state.clone()).await.unwrap();
+        let job = queue::get_job(&state.pool, id).await.unwrap();
+        if job.status == expected {
+            return serde_json::to_value(job).unwrap();
+        }
+    }
+    let job = queue::get_job(&state.pool, id).await.unwrap();
+    panic!(
+        "job {job_id} did not reach {expected}; current status={} last_error={:?}",
+        job.status, job.last_error
+    );
 }
 
 async fn post_json(client: &Client, url: &str, body: Value, expected: StatusCode) -> Value {

@@ -565,14 +565,17 @@ async fn ensure_seed_business_years(
     let sql = format!(
         r#"
         INSERT INTO {schema}.business_years (
-            customer_id, year_label, start_date, end_date, status, locked_at
+            customer_id, year_label, start_date, end_date, status, locked_at, amendment_sequence
         )
-        VALUES ($1, $2, $3, $4, $5, CASE WHEN $6 THEN NOW() ELSE NULL END)
-        ON CONFLICT (customer_id, year_label) DO UPDATE
+        VALUES ($1, $2, $3, $4, $5, CASE WHEN $6 THEN NOW() ELSE NULL END, 0)
+        ON CONFLICT (customer_id, year_label, amendment_sequence) DO UPDATE
         SET start_date = EXCLUDED.start_date,
             end_date = EXCLUDED.end_date,
             status = EXCLUDED.status,
             locked_at = EXCLUDED.locked_at,
+            original_by_id = NULL,
+            amendment_reason = NULL,
+            version_mode = NULL,
             updated_at = NOW()
         RETURNING by_id
         "#

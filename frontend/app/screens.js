@@ -978,8 +978,10 @@ function renderLeafTableBlock(state, rows, columns = leafColumns(rows, state)) {
     <section class="panel leaf-table" data-leaf-block="table">
       <div class="panel-head">
         <div><h2>${escapeHtml(state.meta.title || t(locale, "common.list"))}</h2><p>${escapeHtml(t(locale, "leaf.count", { count: rows.length, description: state.spec.description }))}</p></div>
-        <div class="panel-head-actions" data-leaf-block="filters">
-          ${renderLeafFilterControls(state)}
+        <div class="panel-head-actions" data-leaf-block="toolbar">
+          <div data-leaf-block="filters">
+            ${renderLeafFilterControls(state)}
+          </div>
           <button class="primary-btn compact" type="button" data-leaf-create="${escapeHtml(state.key)}">${escapeHtml(t(locale, "common.addPrefix"))}</button>
         </div>
       </div>
@@ -1018,7 +1020,7 @@ function renderLeafTableRows(state, rows, columns = leafColumns(rows, state)) {
   return rows.map((item) => `
     <tr data-leaf-row="${escapeHtml(item.__rowId)}">
       ${columns.map((column) => `<td class="${escapeHtml(leafCellClass(column))}" data-format="${escapeHtml(column.format)}">${formatLeafValue(item[column.key], column, item, state)}</td>`).join("")}
-      <td class="row-actions" data-format="actions">${renderLeafRowActions(state, item)}</td>
+      <td class="row-actions" data-leaf-block="row-actions" data-format="actions">${renderLeafRowActions(state, item)}</td>
     </tr>`).join("");
 }
 
@@ -3763,7 +3765,7 @@ async function renderPostAmendLegacy(env) {
       method: "POST",
       body: JSON.stringify({ reason: document.getElementById("unlockReason").value, version_mode: document.getElementById("unlockMode").value, actor: env.auth.user.login_id }),
     });
-    env.setContext({ status: by.status, progress: progressForStatus(by.status), lockMode: "OPEN" });
+    env.setContext({ byId: by.by_id, fy: String(by.year_label || env.context.fy || ""), period: `${by.start_date || ""} ~ ${by.end_date || ""}`, status: by.status, progress: progressForStatus(by.status), lockMode: by.lock_mode || "AMENDMENT_UNLOCK" });
     await renderPostAmend(env);
   });
 }
@@ -4251,7 +4253,8 @@ async function renderEfiling(env) {
     request(`${root}/efilings/latest`).catch(() => null),
   ]);
   const latestHistory = history[0] || latest || null;
-  const efileEnabled = statusIn(env.context?.status, ["APPROVED", "FILED", "AMENDED"]);
+  const filedLocked = statusIn(env.context?.status, ["FILED"]);
+  const efileEnabled = statusIn(env.context?.status, ["APPROVED", "AMENDED"]);
   const stageRoutes = ["ws/file:precheck", "ws/file:generate", "ws/file:submit", "ws/file:done"];
   env.outlet.innerHTML = `
     <section class="leaf-workbench efiling-workbench" data-stage="efiling">
@@ -4264,9 +4267,9 @@ async function renderEfiling(env) {
       <article class="panel">
         <div class="panel-head">
           <div>
-            <span class="badge ${efileEnabled ? "ok" : "warn"}">${efileEnabled ? "Filing open" : "Approval required"}</span>
+            <span class="badge ${efileEnabled ? "ok" : "warn"}">${efileEnabled ? "Filing open" : filedLocked ? "Filed locked" : "Approval required"}</span>
             <h2>E-filing wizard</h2>
-            <p>${efileEnabled ? "Generate the text file, submit it, and lock the business year as filed." : "E-filing remains blocked until approval is complete."}</p>
+            <p>${efileEnabled ? "Generate the text file, submit it, and lock the business year as filed." : filedLocked ? "The filed business year is locked for e-filing." : "E-filing remains blocked until approval is complete."}</p>
           </div>
           <div class="button-row">${renderStageRouteButtons(activeLeaf, stageRoutes, env.locale)}</div>
         </div>
@@ -4466,7 +4469,7 @@ async function renderPostAmend(env) {
       method: "POST",
       body: JSON.stringify({ reason: document.getElementById("unlockReason").value, version_mode: document.getElementById("unlockMode").value, actor: env.auth.user.login_id }),
     });
-    env.setContext({ status: by.status, progress: progressForStatus(by.status), lockMode: "OPEN" });
+    env.setContext({ byId: by.by_id, fy: String(by.year_label || env.context.fy || ""), period: `${by.start_date || ""} ~ ${by.end_date || ""}`, status: by.status, progress: progressForStatus(by.status), lockMode: by.lock_mode || "AMENDMENT_UNLOCK" });
     await renderPostAmend(env);
   });
   document.getElementById("resubmitAmendment")?.addEventListener("click", async () => {
@@ -4611,10 +4614,12 @@ async function renderAdminTenants(env) {
       <article class="panel leaf-table" data-leaf-block="table">
         <div class="panel-head">
           <div><h2>${escapeHtml(t(locale, "route.admin.tenant.list"))}</h2><p>${escapeHtml(t(locale, "leaf.count", { count: tenants.length, description: t(locale, "typology.grid.description") }))}</p></div>
-          <div class="panel-head-actions" data-leaf-block="filters">
-          <label>${escapeHtml(t(locale, "common.search"))} <input type="search" data-tenant-filter="q" placeholder="${escapeHtml(t(locale, "field.tenantCode"))}/${escapeHtml(t(locale, "field.tenantName"))}" /></label>
-          <label>${escapeHtml(t(locale, "field.status"))} <select data-tenant-filter="status"><option value="ALL">${escapeHtml(statusLabel("ALL", locale))}</option><option value="ACTIVE">${escapeHtml(statusLabel("ACTIVE", locale))}</option><option value="SUSPENDED">${escapeHtml(statusLabel("SUSPENDED", locale))}</option><option value="CLOSED">${escapeHtml(statusLabel("CLOSED", locale))}</option></select></label>
-          <button class="secondary-btn compact" type="button" data-tenant-filter-reset>${escapeHtml(t(locale, "common.reset"))}</button>
+          <div class="panel-head-actions" data-leaf-block="toolbar">
+          <div data-leaf-block="filters">
+            <label>${escapeHtml(t(locale, "common.search"))} <input type="search" data-tenant-filter="q" placeholder="${escapeHtml(t(locale, "field.tenantCode"))}/${escapeHtml(t(locale, "field.tenantName"))}" /></label>
+            <label>${escapeHtml(t(locale, "field.status"))} <select data-tenant-filter="status"><option value="ALL">${escapeHtml(statusLabel("ALL", locale))}</option><option value="ACTIVE">${escapeHtml(statusLabel("ACTIVE", locale))}</option><option value="SUSPENDED">${escapeHtml(statusLabel("SUSPENDED", locale))}</option><option value="CLOSED">${escapeHtml(statusLabel("CLOSED", locale))}</option></select></label>
+            <button class="secondary-btn compact" type="button" data-tenant-filter-reset>${escapeHtml(t(locale, "common.reset"))}</button>
+          </div>
             <button class="primary-btn compact" type="submit" form="tenantForm" ${canManage ? "" : "disabled"}>${escapeHtml(t(locale, "common.addPrefix"))}</button>
           </div>
         </div>

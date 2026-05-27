@@ -346,6 +346,10 @@ pub struct AmendmentDiff {
 pub struct AmendmentPreview {
     pub tenant_code: String,
     pub by_id: i64,
+    pub original_by_id: Option<i64>,
+    pub amendment_sequence: i32,
+    pub amendment_reason: Option<String>,
+    pub version_mode: Option<String>,
     pub current_status: String,
     pub locked: bool,
     pub differences: Vec<AmendmentDiff>,
@@ -1290,6 +1294,8 @@ pub struct FormData {
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdateFormDataRequest {
     pub fields: Value,
+    #[serde(default, alias = "expectedUpdatedAt", alias = "ifUnmodifiedSince")]
+    pub expected_updated_at: Option<DateTime<Utc>>,
     pub reason: Option<String>,
     pub changed_by: Option<String>,
 }
@@ -1464,6 +1470,8 @@ pub struct EfilingHistory {
     pub checksum: String,
     pub created_at: DateTime<Utc>,
     pub submitted_at: Option<DateTime<Utc>>,
+    pub receipt_no: Option<String>,
+    pub receipt_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]

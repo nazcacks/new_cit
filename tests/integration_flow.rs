@@ -186,11 +186,16 @@ async fn api_flow_persists_to_postgres_generates_efiling_and_handles_dlq() {
         .as_array()
         .expect("preview validations")
         .is_empty());
+    let expected_form_updated_at = linked_form3["updated_at"]
+        .as_str()
+        .expect("form updated_at")
+        .to_string();
     let updated_form = put_json(
         &client,
         &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/forms/FORM3"),
         json!({
             "fields": {"tax_credits": 3000001_i64},
+            "expected_updated_at": expected_form_updated_at,
             "reason": "integration manual edit",
             "changed_by": "integration"
         }),
@@ -198,6 +203,23 @@ async fn api_flow_persists_to_postgres_generates_efiling_and_handles_dlq() {
     )
     .await;
     assert_eq!(updated_form["data_json"]["tax_credits"], 3_000_001_i64);
+    let stale_update = put_json(
+        &client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/forms/FORM3"),
+        json!({
+            "fields": {"tax_credits": 3000002_i64},
+            "expected_updated_at": expected_form_updated_at,
+            "reason": "stale integration manual edit",
+            "changed_by": "integration"
+        }),
+        StatusCode::CONFLICT,
+    )
+    .await;
+    assert_eq!(stale_update["error"]["code"], "CONFLICT");
+    assert!(stale_update["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("updated_at conflict"));
     let edited_preview = get_json(
         &client,
         &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/forms/FORM3/preview"),

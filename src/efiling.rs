@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::{anyhow, Context, Result};
+use chrono::Utc;
 use encoding_rs::Encoding;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -73,6 +74,7 @@ pub async fn generate_efiling(
     tenant: &TenantRef,
     by_id: i64,
 ) -> Result<EfilingResult> {
+    tenant::ensure_business_year_editable(pool, tenant, by_id, "efiling").await?;
     let by = tenant::get_business_year(pool, tenant, by_id).await?;
     let snapshot = tax::ensure_law_snapshot(pool, tenant, by_id).await?;
     let master = load_efile_master(pool, by.start_date, by.end_date).await?;
@@ -118,7 +120,7 @@ pub async fn generate_efiling(
         )
         VALUES ($1, $2, 'GENERATED', $3, $4)
         RETURNING efiling_id, by_id, efile_master_id, status, total_records,
-                  checksum, created_at, submitted_at
+                  checksum, created_at, submitted_at, receipt_no, receipt_at
         "#
     );
     let history = sqlx::query_as::<_, EfilingHistory>(&history_sql)
@@ -239,7 +241,7 @@ pub async fn list_efilings(
     let sql = format!(
         r#"
         SELECT efiling_id, by_id, efile_master_id, status, total_records,
-               checksum, created_at, submitted_at
+               checksum, created_at, submitted_at, receipt_no, receipt_at
         FROM {schema}.efiling_history
         WHERE by_id = $1
         ORDER BY created_at DESC
@@ -250,6 +252,97 @@ pub async fn list_efilings(
         .fetch_all(pool)
         .await
         .context("failed to list efilings")
+}
+
+pub async fn get_efiling_history(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    efiling_id: i64,
+) -> Result<EfilingHistory> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        SELECT efiling_id, by_id, efile_master_id, status, total_records,
+               checksum, created_at, submitted_at, receipt_no, receipt_at
+        FROM {schema}.efiling_history
+        WHERE by_id = $1 AND efiling_id = $2
+        "#
+    );
+    sqlx::query_as::<_, EfilingHistory>(&sql)
+        .bind(by_id)
+        .bind(efiling_id)
+        .fetch_one(pool)
+        .await
+        .context("efiling history not found")
+}
+
+pub async fn latest_efiling(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+) -> Result<EfilingHistory> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        SELECT efiling_id, by_id, efile_master_id, status, total_records,
+               checksum, created_at, submitted_at, receipt_no, receipt_at
+        FROM {schema}.efiling_history
+        WHERE by_id = $1
+        ORDER BY created_at DESC, efiling_id DESC
+        LIMIT 1
+        "#
+    );
+    sqlx::query_as::<_, EfilingHistory>(&sql)
+        .bind(by_id)
+        .fetch_one(pool)
+        .await
+        .context("efiling history not found")
+}
+
+pub async fn submit_efiling(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    efiling_id: i64,
+    receipt_no: Option<&str>,
+) -> Result<EfilingHistory> {
+    let history = get_efiling_history(pool, tenant, by_id, efiling_id).await?;
+    let has_blocking_issue = efiling_error_count(pool, tenant, efiling_id).await? > 0;
+    if has_blocking_issue {
+        return Err(anyhow!("e-filing validation errors block submission"));
+    }
+    if history.status == "ACCEPTED" {
+        return Ok(history);
+    }
+    if history.status != "GENERATED" {
+        return Err(anyhow!("invalid e-filing status for submission"));
+    }
+    let receipt_no = receipt_no
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("R-{}-{efiling_id:06}", Utc::now().format("%Y%m%d%H%M%S")));
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        UPDATE {schema}.efiling_history
+        SET status = 'ACCEPTED',
+            submitted_at = NOW(),
+            receipt_no = $3,
+            receipt_at = NOW()
+        WHERE by_id = $1 AND efiling_id = $2
+        RETURNING efiling_id, by_id, efile_master_id, status, total_records,
+                  checksum, created_at, submitted_at, receipt_no, receipt_at
+        "#
+    );
+    sqlx::query_as::<_, EfilingHistory>(&sql)
+        .bind(by_id)
+        .bind(efiling_id)
+        .bind(receipt_no)
+        .fetch_one(pool)
+        .await
+        .context("failed to submit e-filing")
 }
 
 pub async fn get_efiling_file(
@@ -272,6 +365,22 @@ pub async fn get_efiling_file(
         .fetch_one(pool)
         .await
         .context("efiling file not found")
+}
+
+async fn efiling_error_count(pool: &PgPool, tenant: &TenantRef, efiling_id: i64) -> Result<i64> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        SELECT COUNT(*)
+        FROM {schema}.efiling_validation
+        WHERE efiling_id = $1 AND severity = 'ERROR'
+        "#
+    );
+    sqlx::query_scalar::<_, i64>(&sql)
+        .bind(efiling_id)
+        .fetch_one(pool)
+        .await
+        .context("failed to count e-filing validation errors")
 }
 
 async fn insert_efiling_validations(

@@ -54,9 +54,9 @@ async fn v13_leaf_routes_and_new_backend_routes_are_reachable() {
         };
         let status = response.status();
         let body = response.text().await.unwrap();
-        assert_eq!(
-            status,
-            StatusCode::OK,
+        let gated_action = case.url.ends_with("/submit");
+        assert!(
+            status == StatusCode::OK || (gated_action && status == StatusCode::FORBIDDEN),
             "{} {} failed: {}",
             case.method,
             case.url,

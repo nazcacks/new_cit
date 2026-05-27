@@ -274,15 +274,32 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
             status          VARCHAR(20) NOT NULL DEFAULT 'DRAFT',
             locked_at       TIMESTAMPTZ,
             lock_mode       VARCHAR(30) NOT NULL DEFAULT 'OPEN',
+            original_by_id  BIGINT REFERENCES {schema}.business_years(by_id),
+            amendment_sequence INT NOT NULL DEFAULT 0,
+            amendment_reason TEXT,
+            version_mode    VARCHAR(30),
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            CHECK (start_date <= end_date),
-            UNIQUE(customer_id, year_label)
+            CHECK (start_date <= end_date)
         );
         ALTER TABLE {schema}.business_years
             ALTER COLUMN status SET DEFAULT 'DRAFT';
         ALTER TABLE {schema}.business_years
             ADD COLUMN IF NOT EXISTS lock_mode VARCHAR(30) NOT NULL DEFAULT 'OPEN';
+        ALTER TABLE {schema}.business_years
+            ADD COLUMN IF NOT EXISTS original_by_id BIGINT REFERENCES {schema}.business_years(by_id);
+        ALTER TABLE {schema}.business_years
+            ADD COLUMN IF NOT EXISTS amendment_sequence INT NOT NULL DEFAULT 0;
+        ALTER TABLE {schema}.business_years
+            ADD COLUMN IF NOT EXISTS amendment_reason TEXT;
+        ALTER TABLE {schema}.business_years
+            ADD COLUMN IF NOT EXISTS version_mode VARCHAR(30);
+        ALTER TABLE {schema}.business_years
+            DROP CONSTRAINT IF EXISTS business_years_customer_id_year_label_key;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_business_years_customer_year_sequence
+            ON {schema}.business_years(customer_id, year_label, amendment_sequence);
+        CREATE INDEX IF NOT EXISTS idx_business_years_original
+            ON {schema}.business_years(original_by_id, amendment_sequence);
         UPDATE {schema}.business_years
             SET status = 'DRAFT'
             WHERE status = 'OPEN';
@@ -763,8 +780,14 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
             total_records   INT NOT NULL DEFAULT 0,
             checksum        VARCHAR(80) NOT NULL DEFAULT '',
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            submitted_at    TIMESTAMPTZ
+            submitted_at    TIMESTAMPTZ,
+            receipt_no      VARCHAR(80),
+            receipt_at      TIMESTAMPTZ
         );
+        ALTER TABLE {schema}.efiling_history
+            ADD COLUMN IF NOT EXISTS receipt_no VARCHAR(80);
+        ALTER TABLE {schema}.efiling_history
+            ADD COLUMN IF NOT EXISTS receipt_at TIMESTAMPTZ;
 
         CREATE TABLE IF NOT EXISTS {schema}.efiling_files (
             file_id         BIGSERIAL PRIMARY KEY,
@@ -3398,9 +3421,21 @@ pub async fn preview_amendment(
     by_id: i64,
 ) -> Result<AmendmentPreview> {
     let business_year = get_business_year(pool, tenant, by_id).await?;
+    let (original_by_id, amendment_sequence, amendment_reason, version_mode) =
+        load_amendment_meta(pool, tenant, by_id).await?;
+    let baseline_by_id = original_by_id.unwrap_or(by_id);
     let events = list_workflow_events(pool, tenant, by_id).await?;
-    let filed_event = events.iter().find(|event| event.to_status == "FILED");
-    let differences = vec![
+    let original_events = if baseline_by_id == by_id {
+        events.clone()
+    } else {
+        list_workflow_events(pool, tenant, baseline_by_id)
+            .await
+            .unwrap_or_default()
+    };
+    let filed_event = original_events
+        .iter()
+        .find(|event| event.to_status == "FILED");
+    let mut differences = vec![
         AmendmentDiff {
             area: "BUSINESS_YEAR".to_string(),
             field: "status".to_string(),
@@ -3423,9 +3458,17 @@ pub async fn preview_amendment(
             description: "수정신고 진입 시 작업 잠금 해제 여부".to_string(),
         },
     ];
+    if baseline_by_id != by_id {
+        append_form_amendment_differences(pool, tenant, baseline_by_id, by_id, &mut differences)
+            .await?;
+    }
     Ok(AmendmentPreview {
         tenant_code: tenant.tenant_code.clone(),
         by_id,
+        original_by_id,
+        amendment_sequence,
+        amendment_reason,
+        version_mode,
         current_status: business_year.status.clone(),
         locked: business_year.locked_at.is_some(),
         differences,
@@ -3448,17 +3491,16 @@ pub async fn unlock_business_year(
         .unwrap_or_else(|| "CURRENT".to_string());
 
     if current.status == "FILED" {
-        return update_business_year_status(
+        if let Some(existing) = find_open_amendment(pool, tenant, by_id).await? {
+            return Ok(existing);
+        }
+        return create_amended_business_year(
             pool,
             tenant,
-            by_id,
-            UpdateBusinessYearStatusRequest {
-                status: "AMENDED".to_string(),
-                actor: Some(actor),
-                approver: None,
-                approvers: None,
-                comment: Some(format!("{reason}; version_mode={version_mode}")),
-            },
+            &current,
+            &actor,
+            &reason,
+            &version_mode,
         )
         .await;
     }
@@ -3508,6 +3550,396 @@ pub async fn unlock_business_year(
     )
     .await?;
     Ok(by)
+}
+
+pub async fn business_year_amendment_metadata(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+) -> Result<Value> {
+    let by = get_business_year(pool, tenant, by_id).await?;
+    let (original_by_id, amendment_sequence, amendment_reason, version_mode) =
+        load_amendment_meta(pool, tenant, by_id).await?;
+    Ok(json!({
+        "by_id": by.by_id,
+        "current_status": by.status,
+        "locked": by.locked_at.is_some(),
+        "original_by_id": original_by_id,
+        "amendment_sequence": amendment_sequence,
+        "amendment_reason": amendment_reason,
+        "version_mode": version_mode
+    }))
+}
+
+async fn load_amendment_meta(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+) -> Result<(Option<i64>, i32, Option<String>, Option<String>)> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        SELECT original_by_id, amendment_sequence, amendment_reason, version_mode
+        FROM {schema}.business_years
+        WHERE by_id = $1
+        "#
+    );
+    sqlx::query_as::<_, (Option<i64>, i32, Option<String>, Option<String>)>(&sql)
+        .bind(by_id)
+        .fetch_one(pool)
+        .await
+        .context("failed to load amendment metadata")
+}
+
+async fn find_open_amendment(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    original_by_id: i64,
+) -> Result<Option<BusinessYear>> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        SELECT by_id, customer_id, year_label, start_date, end_date, status,
+               locked_at, lock_mode, created_at, updated_at
+        FROM {schema}.business_years
+        WHERE original_by_id = $1
+          AND status <> 'FILED'
+        ORDER BY amendment_sequence DESC, by_id DESC
+        LIMIT 1
+        "#
+    );
+    sqlx::query_as::<_, BusinessYear>(&sql)
+        .bind(original_by_id)
+        .fetch_optional(pool)
+        .await
+        .context("failed to find open amendment")
+}
+
+async fn create_amended_business_year(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    original: &BusinessYear,
+    actor: &str,
+    reason: &str,
+    version_mode: &str,
+) -> Result<BusinessYear> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sequence_sql = format!(
+        r#"
+        SELECT COALESCE(MAX(amendment_sequence), 0) + 1
+        FROM {schema}.business_years
+        WHERE customer_id = $1
+          AND year_label = $2
+          AND (by_id = $3 OR original_by_id = $3)
+        "#
+    );
+    let amendment_sequence = sqlx::query_scalar::<_, i32>(&sequence_sql)
+        .bind(original.customer_id)
+        .bind(original.year_label)
+        .bind(original.by_id)
+        .fetch_one(pool)
+        .await
+        .context("failed to calculate amendment sequence")?;
+
+    let insert_sql = format!(
+        r#"
+        INSERT INTO {schema}.business_years (
+            customer_id, year_label, start_date, end_date, status, locked_at, lock_mode,
+            original_by_id, amendment_sequence, amendment_reason, version_mode
+        )
+        VALUES ($1, $2, $3, $4, 'AMENDED', NULL, 'AMENDMENT_UNLOCK', $5, $6, $7, $8)
+        RETURNING by_id, customer_id, year_label, start_date, end_date, status,
+                  locked_at, lock_mode, created_at, updated_at
+        "#
+    );
+    let amended = sqlx::query_as::<_, BusinessYear>(&insert_sql)
+        .bind(original.customer_id)
+        .bind(original.year_label)
+        .bind(original.start_date)
+        .bind(original.end_date)
+        .bind(original.by_id)
+        .bind(amendment_sequence)
+        .bind(reason)
+        .bind(version_mode)
+        .fetch_one(pool)
+        .await
+        .context("failed to create amended business year")?;
+
+    clone_amendment_baseline(pool, tenant, original.by_id, amended.by_id).await?;
+    append_workflow_event(
+        pool,
+        tenant,
+        amended.by_id,
+        WorkflowEventRequest {
+            action: Some("START_AMENDMENT".to_string()),
+            actor: Some(actor.to_string()),
+            comment: Some(reason.to_string()),
+            to_status: Some("AMENDED".to_string()),
+            metadata: Some(json!({
+                "original_by_id": original.by_id,
+                "amendment_sequence": amendment_sequence,
+                "version_mode": version_mode
+            })),
+        },
+    )
+    .await?;
+    insert_audit_log(
+        pool,
+        tenant,
+        AuditLogEntry {
+            table_name: "business_years",
+            record_id: amended.by_id.to_string(),
+            action: "CREATE_AMENDMENT",
+            old_data: Some(json!({
+                "original_by_id": original.by_id,
+                "status": original.status,
+                "locked_at": original.locked_at
+            })),
+            new_data: json!({
+                "by_id": amended.by_id,
+                "status": amended.status,
+                "amendment_sequence": amendment_sequence,
+                "reason": reason,
+                "version_mode": version_mode
+            }),
+            changed_by: actor,
+        },
+    )
+    .await?;
+    Ok(amended)
+}
+
+async fn clone_amendment_baseline(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    source_by_id: i64,
+    target_by_id: i64,
+) -> Result<()> {
+    let snapshot = crate::tax::clone_law_snapshot(pool, tenant, source_by_id, target_by_id).await?;
+    let schema = quote_ident(&tenant.schema_name)?;
+    let copy_forms = format!(
+        r#"
+        INSERT INTO {schema}.form_data (
+            by_id, form_code, form_version_id, data_json, snapshot_id, status
+        )
+        SELECT $2, form_code, form_version_id,
+               jsonb_set(data_json, '{{snapshot_id}}', to_jsonb($3::BIGINT), true),
+               $3, status
+        FROM {schema}.form_data
+        WHERE by_id = $1
+        ON CONFLICT (by_id, form_code) DO NOTHING
+        "#
+    );
+    sqlx::query(&copy_forms)
+        .bind(source_by_id)
+        .bind(target_by_id)
+        .bind(snapshot.snapshot_id)
+        .execute(pool)
+        .await
+        .context("failed to copy amendment form baseline")?;
+
+    let copy_adjustments = format!(
+        r#"
+        INSERT INTO {schema}.tax_adjustments (
+            by_id, adj_category, adj_code, amount, direction, description, snapshot_id, metadata, status
+        )
+        SELECT $2, adj_category, adj_code, amount, direction, description, $3,
+               metadata || jsonb_build_object('amended_from_adjustment_id', adjustment_id),
+               status
+        FROM {schema}.tax_adjustments
+        WHERE by_id = $1
+        "#
+    );
+    sqlx::query(&copy_adjustments)
+        .bind(source_by_id)
+        .bind(target_by_id)
+        .bind(snapshot.snapshot_id)
+        .execute(pool)
+        .await
+        .context("failed to copy amendment adjustments")?;
+
+    let copy_items = format!(
+        r#"
+        INSERT INTO {schema}.adjustment_items (
+            by_id, adjustment_id, section, item_code, item_name, amount, direction,
+            disposition, source_module, law_ref, metadata
+        )
+        SELECT $2, NULL, section, item_code, item_name, amount, direction,
+               disposition, source_module, law_ref,
+               metadata || jsonb_build_object('amended_from_adjustment_item_id', adjustment_item_id)
+        FROM {schema}.adjustment_items
+        WHERE by_id = $1
+        "#
+    );
+    sqlx::query(&copy_items)
+        .bind(source_by_id)
+        .bind(target_by_id)
+        .execute(pool)
+        .await
+        .context("failed to copy amendment adjustment items")?;
+
+    let copy_reserves = format!(
+        r#"
+        INSERT INTO {schema}.reserves (
+            by_id, adjustment_id, reserve_code, amount, direction, carryforward_to, source_module
+        )
+        SELECT $2, NULL, reserve_code, amount, direction, carryforward_to, source_module
+        FROM {schema}.reserves
+        WHERE by_id = $1
+        "#
+    );
+    sqlx::query(&copy_reserves)
+        .bind(source_by_id)
+        .bind(target_by_id)
+        .execute(pool)
+        .await
+        .context("failed to copy amendment reserves")?;
+
+    let copy_assets = format!(
+        r#"
+        INSERT INTO {schema}.assets (
+            by_id, batch_id, asset_code, asset_name, asset_category, is_business_vehicle,
+            acquisition_date, acquisition_cost, useful_life_years
+        )
+        SELECT $2, NULL, asset_code, asset_name, asset_category, is_business_vehicle,
+               acquisition_date, acquisition_cost, useful_life_years
+        FROM {schema}.assets
+        WHERE by_id = $1
+        "#
+    );
+    sqlx::query(&copy_assets)
+        .bind(source_by_id)
+        .bind(target_by_id)
+        .execute(pool)
+        .await
+        .context("failed to copy amendment asset baseline")?;
+
+    let copy_transactions = format!(
+        r#"
+        INSERT INTO {schema}.transactions (
+            by_id, batch_id, tx_date, partner_name, category, account_code,
+            description, amount, evidence_type
+        )
+        SELECT $2, NULL, tx_date, partner_name, category, account_code,
+               description, amount, evidence_type
+        FROM {schema}.transactions
+        WHERE by_id = $1
+        "#
+    );
+    sqlx::query(&copy_transactions)
+        .bind(source_by_id)
+        .bind(target_by_id)
+        .execute(pool)
+        .await
+        .context("failed to copy amendment transaction baseline")?;
+
+    let copy_financial_statements = format!(
+        r#"
+        WITH source_fs AS (
+            SELECT fs_id, statement_type, currency
+            FROM {schema}.financial_statements
+            WHERE by_id = $1
+        ),
+        inserted_fs AS (
+            INSERT INTO {schema}.financial_statements (by_id, batch_id, statement_type, currency)
+            SELECT $2, NULL, statement_type, currency
+            FROM source_fs
+            RETURNING fs_id, statement_type
+        )
+        INSERT INTO {schema}.fs_lines (
+            fs_id, batch_id, row_no, account_code, account_name, standard_account_code,
+            standard_account_name, amount, debit_credit
+        )
+        SELECT inserted_fs.fs_id, NULL, lines.row_no, lines.account_code, lines.account_name,
+               lines.standard_account_code, lines.standard_account_name, lines.amount,
+               lines.debit_credit
+        FROM source_fs
+        JOIN {schema}.fs_lines lines ON lines.fs_id = source_fs.fs_id
+        JOIN inserted_fs ON inserted_fs.statement_type = source_fs.statement_type
+        "#
+    );
+    sqlx::query(&copy_financial_statements)
+        .bind(source_by_id)
+        .bind(target_by_id)
+        .execute(pool)
+        .await
+        .context("failed to copy amendment financial statement baseline")?;
+    Ok(())
+}
+
+async fn append_form_amendment_differences(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    original_by_id: i64,
+    current_by_id: i64,
+    differences: &mut Vec<AmendmentDiff>,
+) -> Result<()> {
+    let original_forms = form_payloads_by_code(pool, tenant, original_by_id).await?;
+    let current_forms = form_payloads_by_code(pool, tenant, current_by_id).await?;
+    for (form_code, current_data) in current_forms {
+        let Some(original_data) = original_forms.get(&form_code) else {
+            differences.push(AmendmentDiff {
+                area: "FORM".to_string(),
+                field: form_code,
+                original_value: Value::Null,
+                current_value: current_data,
+                description: "수정신고에서 새로 생성된 서식".to_string(),
+            });
+            continue;
+        };
+        let Some(current_object) = current_data.as_object() else {
+            continue;
+        };
+        let original_object = original_data.as_object();
+        for (field, current_value) in current_object {
+            if field == "_meta" || field == "snapshot_id" {
+                continue;
+            }
+            let original_value = original_object
+                .and_then(|object| object.get(field))
+                .cloned()
+                .unwrap_or(Value::Null);
+            if original_value != current_value.clone() {
+                differences.push(AmendmentDiff {
+                    area: "FORM".to_string(),
+                    field: format!("{form_code}.{field}"),
+                    original_value,
+                    current_value: current_value.clone(),
+                    description: "원신고 대비 수정신고 서식 값 변경".to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn form_payloads_by_code(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+) -> Result<HashMap<String, Value>> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        SELECT form_code, data_json
+        FROM {schema}.form_data
+        WHERE by_id = $1
+        "#
+    );
+    let rows = sqlx::query(&sql)
+        .bind(by_id)
+        .fetch_all(pool)
+        .await
+        .context("failed to load form payloads for amendment diff")?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.get::<String, _>("form_code"),
+                row.get::<Value, _>("data_json"),
+            )
+        })
+        .collect())
 }
 
 pub async fn get_business_year(

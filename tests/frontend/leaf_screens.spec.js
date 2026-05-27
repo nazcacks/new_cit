@@ -118,6 +118,8 @@ for (const needle of [
   "data-leaf-block=\"summary\"",
   "data-leaf-block=\"filters\"",
   "data-leaf-block=\"table\"",
+  "data-leaf-block=\"row-actions\"",
+  "data-leaf-block=\"toolbar\"",
   "data-typology=\"grid\"",
   "data-typology=\"grid-tree\"",
   "data-typology=\"dashboard\"",
@@ -148,7 +150,6 @@ for (const needle of [
   "data-leaf-action",
   "기능 실행",
   "leaf-row-actions-panel",
-  "data-leaf-block=\"row-actions\"",
 ]) {
   assert(!frontendSources.includes(needle), `${needle} must not be rendered on leaf or API response screens`);
 }

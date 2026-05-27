@@ -48,9 +48,9 @@ async fn deny_precedence_scope_masking_delegation_and_audit_verification_work() 
             "roles": ["ASSISTANT"],
             "customer_access": [{
                 "customer_id": first_id,
-                "access_level": "VIEWER",
+                "access_level": "ASSISTANT",
                 "is_primary": true,
-                "work_scopes": ["INFO", "ADJUST", "FORM", "VALIDATE", "PRINT"]
+                "work_scopes": ["INFO", "ADJUST", "FORM", "VALIDATE", "PRINT", "POST"]
             }]
         }),
         StatusCode::CREATED,
@@ -126,6 +126,35 @@ async fn deny_precedence_scope_masking_delegation_and_audit_verification_work() 
         .unwrap()
         .starts_with("***"));
 
+    let created_by_scoped = post_json(
+        &scoped_client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years"),
+        json!({
+            "customer_id": first_id,
+            "year_label": 2031,
+            "start_date": "2031-01-01",
+            "end_date": "2031-12-31",
+            "carry_forward_from_by_id": null
+        }),
+        StatusCode::CREATED,
+    )
+    .await;
+    assert_eq!(created_by_scoped["customer_id"], first_id);
+
+    post_json(
+        &scoped_client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years"),
+        json!({
+            "customer_id": second_id,
+            "year_label": 2031,
+            "start_date": "2031-01-01",
+            "end_date": "2031-12-31",
+            "carry_forward_from_by_id": null
+        }),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+
     post_json(
         &admin_client,
         &format!("{base_url}/api/tenants/{tenant_code}/access-delegations"),
@@ -147,6 +176,20 @@ async fn deny_precedence_scope_masking_delegation_and_audit_verification_work() 
     )
     .await;
     assert_eq!(delegated.as_array().unwrap().len(), 2);
+
+    post_json(
+        &scoped_client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years"),
+        json!({
+            "customer_id": second_id,
+            "year_label": 2032,
+            "start_date": "2032-01-01",
+            "end_date": "2032-12-31",
+            "carry_forward_from_by_id": null
+        }),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
 
     let function_codes = get_json(
         &admin_client,

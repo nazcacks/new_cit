@@ -40,7 +40,8 @@ for (const mapping of [
 }
 
 assert(screens.includes("panel-head-actions") && screens.includes("data-leaf-create"), "grid add button must be inline in the panel head");
+assert(screens.includes('data-leaf-block="row-actions"'), "row action block must identify the table action column");
+assert(screens.includes('data-leaf-block="toolbar"'), "toolbar block must identify the inline panel-head controls");
 assert(!screens.includes("leaf-row-actions-panel"), "separate row action panel must not exist");
-assert(!screens.includes('data-leaf-block="row-actions"'), "row action block must not render");
 
 console.log("frontend typology.spec.js passed");

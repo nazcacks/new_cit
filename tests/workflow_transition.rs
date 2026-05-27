@@ -66,6 +66,25 @@ async fn workflow_queue_events_and_unlock_follow_phase2_contract() {
     .await;
     let by_id = by["by_id"].as_i64().unwrap();
 
+    post_json(
+        &client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/adjustments"),
+        json!({
+            "accounting_income": 100_000_000_i64,
+            "gross_revenue": 1_000_000_000_i64,
+            "tax_credits": 1_000_000_i64
+        }),
+        StatusCode::OK,
+    )
+    .await;
+    let original_form = post_json(
+        &client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/forms/FORM3"),
+        json!({}),
+        StatusCode::OK,
+    )
+    .await;
+
     let rejected = post_json(
         &client,
         &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/status"),
@@ -130,7 +149,58 @@ async fn workflow_queue_events_and_unlock_follow_phase2_contract() {
     )
     .await;
     assert_eq!(unlocked["status"], "AMENDED");
+    assert_ne!(unlocked["by_id"], by_id);
     assert!(unlocked["locked_at"].is_null());
+    let amended_by_id = unlocked["by_id"].as_i64().unwrap();
+
+    let original_workflow = get_json(
+        &client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/workflow"),
+    )
+    .await;
+    assert_eq!(original_workflow["business_year"]["status"], "FILED");
+    let amendment_preview = get_json(
+        &client,
+        &format!(
+            "{base_url}/api/tenants/{tenant_code}/business-years/{}/amendment-preview",
+            amended_by_id
+        ),
+    )
+    .await;
+    assert_eq!(amendment_preview["original_by_id"].as_i64(), Some(by_id));
+    assert_eq!(amendment_preview["amendment_sequence"].as_i64(), Some(1));
+    let amended_form = get_json(
+        &client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{amended_by_id}/forms/FORM3"),
+    )
+    .await;
+    assert_eq!(
+        amended_form["data_json"]["total_tax_due"],
+        original_form["data_json"]["total_tax_due"]
+    );
+    put_json(
+        &client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{amended_by_id}/forms/FORM3"),
+        json!({
+            "fields": {"tax_credits": 123456_i64},
+            "reason": "amendment diff test",
+            "changed_by": "workflow-test"
+        }),
+        StatusCode::OK,
+    )
+    .await;
+    let changed_preview = get_json(
+        &client,
+        &format!(
+            "{base_url}/api/tenants/{tenant_code}/business-years/{amended_by_id}/amendment-preview"
+        ),
+    )
+    .await;
+    assert!(changed_preview["differences"]
+        .as_array()
+        .expect("amendment differences")
+        .iter()
+        .any(|diff| diff["field"] == "FORM3.tax_credits"));
 }
 
 async fn spawn_app() -> (String, AppState) {
@@ -162,6 +232,14 @@ async fn login(base_url: &str) -> String {
 
 async fn post_json(client: &Client, url: &str, body: Value, expected: StatusCode) -> Value {
     let response = client.post(url).json(&body).send().await.unwrap();
+    let status = response.status();
+    let text = response.text().await.unwrap();
+    assert_eq!(status, expected, "{text}");
+    serde_json::from_str(&text).unwrap()
+}
+
+async fn put_json(client: &Client, url: &str, body: Value, expected: StatusCode) -> Value {
+    let response = client.put(url).json(&body).send().await.unwrap();
     let status = response.status();
     let text = response.text().await.unwrap();
     assert_eq!(status, expected, "{text}");

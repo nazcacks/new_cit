@@ -633,6 +633,14 @@ td.row-actions {
   justify-content: flex-end;
 }
 
+.panel-head-actions [data-leaf-block="filters"] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: end;
+  justify-content: flex-end;
+}
+
 .panel-head-actions .inline-control {
   min-width: 120px;
   width: auto;
@@ -1718,6 +1726,10 @@ pre {
 
   .panel-head-actions {
     justify-content: stretch;
+  }
+
+  .panel-head-actions [data-leaf-block="filters"] {
+    width: 100%;
   }
 
   .panel-head-actions .inline-control,

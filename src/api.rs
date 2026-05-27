@@ -12,7 +12,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sqlx::Row;
+use sqlx::{PgPool, Row};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use uuid::Uuid;
 
@@ -527,6 +527,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/efilings/:efiling_id/submit",
             post(submit_efiling_v13),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/efilings/:efiling_id/file",
+            get(download_business_year_efiling_file),
         )
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/efilings/precheck",
@@ -1070,13 +1074,23 @@ async fn list_customers(
 
 async fn create_business_year(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path(tenant_code): Path<String>,
     Json(request): Json<CreateBusinessYearRequest>,
 ) -> AppResult<(StatusCode, Json<crate::domain::BusinessYear>)> {
+    let customer_id = request.customer_id;
     let carry_forward_from_by_id = request.carry_forward_from_by_id;
     let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
         .await
         .map_err(map_anyhow)?;
+    ensure_tenant_route_access(&user, &tenant_ref)?;
+    let can_create_for_customer =
+        permissions::has_customer_work_scope(&state.pool, &tenant_ref, &user, customer_id, "POST")
+            .await
+            .map_err(map_anyhow)?;
+    if !can_create_for_customer {
+        return Err(AppError::forbidden("customer POST scope is required"));
+    }
     let by = tenant::create_business_year(&state.pool, &tenant_ref, request)
         .await
         .map_err(map_anyhow)?;
@@ -1574,12 +1588,14 @@ async fn get_business_year_progress(
 
 async fn create_workflow_event(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path((tenant_code, by_id)): Path<(String, i64)>,
     Json(request): Json<WorkflowEventRequest>,
 ) -> AppResult<(StatusCode, Json<crate::domain::WorkflowEvent>)> {
     let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
         .await
         .map_err(map_anyhow)?;
+    ensure_tenant_route_access(&user, &tenant_ref)?;
     let event = tenant::append_workflow_event(&state.pool, &tenant_ref, by_id, request)
         .await
         .map_err(map_anyhow)?;
@@ -1588,11 +1604,13 @@ async fn create_workflow_event(
 
 async fn get_amendment_preview(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path((tenant_code, by_id)): Path<(String, i64)>,
 ) -> AppResult<Json<crate::domain::AmendmentPreview>> {
     let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
         .await
         .map_err(map_anyhow)?;
+    ensure_tenant_route_access(&user, &tenant_ref)?;
     let preview = tenant::preview_amendment(&state.pool, &tenant_ref, by_id)
         .await
         .map_err(map_anyhow)?;
@@ -1601,12 +1619,14 @@ async fn get_amendment_preview(
 
 async fn unlock_business_year(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path((tenant_code, by_id)): Path<(String, i64)>,
     Json(request): Json<UnlockBusinessYearRequest>,
 ) -> AppResult<Json<crate::domain::BusinessYear>> {
     let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
         .await
         .map_err(map_anyhow)?;
+    ensure_tenant_route_access(&user, &tenant_ref)?;
     let by = tenant::unlock_business_year(&state.pool, &tenant_ref, by_id, request)
         .await
         .map_err(map_anyhow)?;
@@ -2513,9 +2533,16 @@ async fn enqueue_efiling(
     headers: HeaderMap,
     Json(request): Json<EnqueueEfilingRequest>,
 ) -> AppResult<(StatusCode, Json<crate::domain::Job>)> {
-    tenant::resolve_tenant(&state.pool, &tenant_code)
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
         .await
         .map_err(map_anyhow)?;
+    let by =
+        ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "EFILE").await?;
+    if by.status == "FILED" {
+        return Err(AppError::Conflict(
+            "business year is locked after FILED status".to_string(),
+        ));
+    }
     let otp = request.otp.as_deref().or_else(|| {
         headers
             .get("x-cit-otp")
@@ -2538,11 +2565,13 @@ async fn enqueue_efiling(
 
 async fn list_efilings(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path((tenant_code, by_id)): Path<(String, i64)>,
 ) -> AppResult<Json<Vec<crate::domain::EfilingHistory>>> {
     let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
         .await
         .map_err(map_anyhow)?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "EFILE").await?;
     let histories = efiling::list_efilings(&state.pool, &tenant_ref, by_id)
         .await
         .map_err(map_anyhow)?;
@@ -2551,11 +2580,13 @@ async fn list_efilings(
 
 async fn precheck_efiling(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path((tenant_code, by_id)): Path<(String, i64)>,
 ) -> AppResult<Json<crate::domain::EfilingPrecheckResult>> {
     let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
         .await
         .map_err(map_anyhow)?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "EFILE").await?;
     let result = efiling::precheck_efiling(&state.pool, &tenant_ref, by_id)
         .await
         .map_err(map_anyhow)?;
@@ -2564,11 +2595,13 @@ async fn precheck_efiling(
 
 async fn get_efiling_format_spec(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path((tenant_code, by_id)): Path<(String, i64)>,
 ) -> AppResult<Json<Vec<crate::domain::EfilingFormatField>>> {
     let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
         .await
         .map_err(map_anyhow)?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "EFILE").await?;
     let fields = efiling::list_format_spec(&state.pool, &tenant_ref, by_id)
         .await
         .map_err(map_anyhow)?;
@@ -2577,9 +2610,40 @@ async fn get_efiling_format_spec(
 
 async fn download_efiling_file(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path((tenant_code, efiling_id)): Path<(String, i64)>,
 ) -> AppResult<Response<Body>> {
     let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_tenant_route_access(&user, &tenant_ref)?;
+    let file = efiling::get_efiling_file(&state.pool, &tenant_ref, efiling_id)
+        .await
+        .map_err(map_anyhow)?;
+
+    let mut response = Response::new(Body::from(file.contents));
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=windows-949"),
+    );
+    response.headers_mut().insert(
+        CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("attachment; filename=\"{}\"", file.file_name))
+            .map_err(|error| AppError::bad_request(error.to_string()))?,
+    );
+    Ok(response)
+}
+
+async fn download_business_year_efiling_file(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path((tenant_code, by_id, efiling_id)): Path<(String, i64, i64)>,
+) -> AppResult<Response<Body>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "EFILE").await?;
+    efiling::get_efiling_history(&state.pool, &tenant_ref, by_id, efiling_id)
         .await
         .map_err(map_anyhow)?;
     let file = efiling::get_efiling_file(&state.pool, &tenant_ref, efiling_id)
@@ -3015,45 +3079,168 @@ async fn list_workflow_events_v13(
 }
 
 async fn list_business_year_workflow_events(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path((tenant_code, by_id)): Path<(String, i64)>,
-) -> Json<Value> {
-    Json(json!([
-        {"tenant_code": tenant_code, "by_id": by_id, "event": "REQUESTED", "actor": "admin"},
-        {"tenant_code": tenant_code, "by_id": by_id, "event": "APPROVED", "actor": "reviewer01"}
-    ]))
+) -> AppResult<Json<Vec<crate::domain::WorkflowEvent>>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_tenant_route_access(&user, &tenant_ref)?;
+    let events = tenant::list_workflow_events(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(events))
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowRequestPayload {
+    approvers: Option<Vec<String>>,
+    comment: Option<String>,
+    requested_by: Option<String>,
 }
 
 async fn request_business_year_workflow(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path((tenant_code, by_id)): Path<(String, i64)>,
-    Json(payload): Json<Value>,
-) -> Json<Value> {
-    Json(json!({"tenant_code": tenant_code, "by_id": by_id, "requested": true, "payload": payload}))
+    Json(payload): Json<WorkflowRequestPayload>,
+) -> AppResult<Json<crate::domain::BusinessYearWorkflow>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_tenant_route_access(&user, &tenant_ref)?;
+    let issues = validation_rules::list_issues(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    if issues
+        .iter()
+        .any(|issue| issue.status == "OPEN" && issue.severity == "ERROR")
+    {
+        return Err(AppError::forbidden(
+            "validation errors must be resolved before workflow request",
+        ));
+    }
+    tenant::update_business_year_status(
+        &state.pool,
+        &tenant_ref,
+        by_id,
+        UpdateBusinessYearStatusRequest {
+            status: "IN_REVIEW".to_string(),
+            actor: Some(
+                payload
+                    .requested_by
+                    .unwrap_or_else(|| user.login_id.clone()),
+            ),
+            approver: None,
+            approvers: payload.approvers,
+            comment: payload.comment,
+        },
+    )
+    .await
+    .map_err(map_anyhow)?;
+    let workflow = tenant::get_business_year_workflow(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(workflow))
 }
 
 async fn get_amendment_version_mode(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path((tenant_code, by_id)): Path<(String, i64)>,
-) -> Json<Value> {
-    Json(json!({
+) -> AppResult<Json<Value>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_tenant_route_access(&user, &tenant_ref)?;
+    let by = tenant::get_business_year(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    let amendment = tenant::business_year_amendment_metadata(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    let mode = amendment["version_mode"]
+        .as_str()
+        .unwrap_or(if by.status == "FILED" {
+            "FILED_VERSION"
+        } else {
+            "CURRENT"
+        });
+    Ok(Json(json!({
         "tenant_code": tenant_code,
         "by_id": by_id,
-        "mode": "AMENDMENT",
-        "versions": [{"version": 1, "label": "original"}, {"version": 2, "label": "latest"}]
-    }))
+        "mode": mode,
+        "current_status": by.status,
+        "locked": by.locked_at.is_some(),
+        "original_by_id": amendment["original_by_id"].clone(),
+        "amendment_sequence": amendment["amendment_sequence"].clone(),
+        "amendment_reason": amendment["amendment_reason"].clone(),
+        "version_mode": amendment["version_mode"].clone(),
+        "versions": [
+            {"version": 1, "label": "filed", "locked": true},
+            {"version": 2, "label": "current", "locked": by.locked_at.is_some()}
+        ]
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct ResubmitBusinessYearPayload {
+    actor: Option<String>,
+    reason: Option<String>,
+    version_mode: Option<String>,
+    approvers: Option<Vec<String>>,
 }
 
 async fn resubmit_business_year(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path((tenant_code, by_id)): Path<(String, i64)>,
-    Json(payload): Json<Value>,
-) -> Json<Value> {
-    Json(
-        json!({"tenant_code": tenant_code, "by_id": by_id, "resubmitted": true, "payload": payload}),
+    Json(payload): Json<ResubmitBusinessYearPayload>,
+) -> AppResult<Json<crate::domain::BusinessYearWorkflow>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_tenant_route_access(&user, &tenant_ref)?;
+    let comment = match (payload.reason, payload.version_mode) {
+        (Some(reason), Some(mode)) => Some(format!("{reason}; version_mode={mode}")),
+        (Some(reason), None) => Some(reason),
+        (None, Some(mode)) => Some(format!("version_mode={mode}")),
+        (None, None) => Some("amendment resubmission".to_string()),
+    };
+    tenant::update_business_year_status(
+        &state.pool,
+        &tenant_ref,
+        by_id,
+        UpdateBusinessYearStatusRequest {
+            status: "IN_REVIEW".to_string(),
+            actor: Some(payload.actor.unwrap_or_else(|| user.login_id.clone())),
+            approver: None,
+            approvers: payload.approvers,
+            comment,
+        },
     )
+    .await
+    .map_err(map_anyhow)?;
+    let workflow = tenant::get_business_year_workflow(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(workflow))
 }
 
-async fn list_validation_issues(Path((tenant_code, by_id)): Path<(String, i64)>) -> Json<Value> {
-    Json(json!([
-        {"tenant_code": tenant_code, "by_id": by_id, "issue_id": 1, "severity": "WARN", "message": "demo issue"}
-    ]))
+async fn list_validation_issues(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+) -> AppResult<Json<Vec<crate::domain::ValidationIssue>>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_tenant_route_access(&user, &tenant_ref)?;
+    let issues = validation_rules::list_issues(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(issues))
 }
 
 async fn list_print_history_v13(Path((tenant_code, by_id)): Path<(String, i64)>) -> Json<Value> {
@@ -3062,51 +3249,123 @@ async fn list_print_history_v13(Path((tenant_code, by_id)): Path<(String, i64)>)
     ]))
 }
 
-async fn get_forms_linkage_check(Path((tenant_code, by_id)): Path<(String, i64)>) -> Json<Value> {
-    Json(json!({
-        "tenant_code": tenant_code,
-        "by_id": by_id,
-        "balanced": true,
-        "differences": [
-            {"source": "FORM3.total_tax_due", "target": "FORM15.tax_due", "delta": 0}
-        ]
-    }))
+async fn get_forms_linkage_check(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+) -> AppResult<Json<Value>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_tenant_route_access(&user, &tenant_ref)?;
+    let result = tax::check_form_linkage(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(result))
 }
 
-async fn get_latest_efiling_v13(Path((tenant_code, by_id)): Path<(String, i64)>) -> Json<Value> {
-    Json(json!({
-        "tenant_code": tenant_code,
-        "by_id": by_id,
-        "efiling_id": 1,
-        "status": "ACCEPTED",
-        "receipt_no": "R-2026-0001"
-    }))
+async fn get_latest_efiling_v13(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+) -> AppResult<Json<crate::domain::EfilingHistory>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_tenant_route_access(&user, &tenant_ref)?;
+    let history = efiling::latest_efiling(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(history))
 }
 
 async fn get_efiling_v13(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path((tenant_code, by_id, efiling_id)): Path<(String, i64, i64)>,
-) -> Json<Value> {
-    Json(json!({
-        "tenant_code": tenant_code,
-        "by_id": by_id,
-        "efiling_id": efiling_id,
-        "status": "ACCEPTED",
-        "checksum": "demo-checksum"
-    }))
+) -> AppResult<Json<crate::domain::EfilingHistory>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_tenant_route_access(&user, &tenant_ref)?;
+    let history = efiling::get_efiling_history(&state.pool, &tenant_ref, by_id, efiling_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(history))
+}
+
+#[derive(Debug, Deserialize)]
+struct SubmitEfilingPayload {
+    otp: Option<String>,
+    actor: Option<String>,
+    receipt_no: Option<String>,
 }
 
 async fn submit_efiling_v13(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path((tenant_code, by_id, efiling_id)): Path<(String, i64, i64)>,
-    Json(payload): Json<Value>,
-) -> Json<Value> {
-    Json(json!({
-        "tenant_code": tenant_code,
-        "by_id": by_id,
-        "efiling_id": efiling_id,
-        "submitted": true,
-        "receipt_no": "R-2026-0001",
-        "payload": payload
-    }))
+    headers: HeaderMap,
+    Json(payload): Json<SubmitEfilingPayload>,
+) -> AppResult<Json<crate::domain::EfilingHistory>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_tenant_route_access(&user, &tenant_ref)?;
+    ensure_efiling_submit_role(&user)?;
+    let by =
+        ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "EFILE").await?;
+    if by.status == "FILED" {
+        return Err(AppError::Conflict(
+            "business year is locked after FILED status; e-filing submission is blocked"
+                .to_string(),
+        ));
+    }
+    if !matches!(by.status.as_str(), "APPROVED" | "AMENDED") {
+        return Err(AppError::forbidden(
+            "e-filing submission requires APPROVED or AMENDED status",
+        ));
+    }
+    let otp = payload.otp.as_deref().or_else(|| {
+        headers
+            .get("x-cit-otp")
+            .and_then(|value| value.to_str().ok())
+    });
+    auth::enforce_2fa_for_user(&state.pool, user.user_id, user.use_2fa, otp)
+        .await
+        .map_err(|error| AppError::forbidden(format!("{error:#}")))?;
+    let history = efiling::submit_efiling(
+        &state.pool,
+        &tenant_ref,
+        by_id,
+        efiling_id,
+        payload.receipt_no.as_deref(),
+    )
+    .await
+    .map_err(map_anyhow)?;
+    if by.status != "FILED" {
+        tenant::update_business_year_status(
+            &state.pool,
+            &tenant_ref,
+            by_id,
+            UpdateBusinessYearStatusRequest {
+                status: "FILED".to_string(),
+                actor: Some(payload.actor.unwrap_or_else(|| user.login_id.clone())),
+                approver: Some(user.login_id.clone()),
+                approvers: None,
+                comment: Some(format!(
+                    "e-filing accepted: {}",
+                    history.receipt_no.as_deref().unwrap_or("no receipt")
+                )),
+            },
+        )
+        .await
+        .map_err(map_anyhow)?;
+        tax::lock_law_snapshot(&state.pool, &tenant_ref, by_id)
+            .await
+            .map_err(map_anyhow)?;
+    }
+    Ok(Json(history))
 }
 
 #[derive(Deserialize)]
@@ -3193,6 +3452,45 @@ fn ensure_tenant_route_access(user: &AuthUser, tenant_ref: &TenantRef) -> AppRes
     }
 }
 
+async fn ensure_business_year_work_scope(
+    pool: &PgPool,
+    tenant_ref: &TenantRef,
+    user: &AuthUser,
+    by_id: i64,
+    work_scope: &str,
+) -> AppResult<crate::domain::BusinessYear> {
+    ensure_tenant_route_access(user, tenant_ref)?;
+    let by = tenant::get_business_year(pool, tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    let allowed =
+        permissions::has_customer_work_scope(pool, tenant_ref, user, by.customer_id, work_scope)
+            .await
+            .map_err(map_anyhow)?;
+    if allowed {
+        Ok(by)
+    } else {
+        Err(AppError::forbidden(format!(
+            "customer {work_scope} scope is required"
+        )))
+    }
+}
+
+fn ensure_efiling_submit_role(user: &AuthUser) -> AppResult<()> {
+    if user.roles.iter().any(|role| {
+        matches!(
+            role.as_str(),
+            "SUPER_ADMIN" | "TENANT_ADMIN" | "SYSTEM_ADMIN" | "TAX_EXPERT"
+        )
+    }) {
+        Ok(())
+    } else {
+        Err(AppError::forbidden(
+            "TAX_EXPERT or administrator role is required for e-filing submission",
+        ))
+    }
+}
+
 fn ensure_dashboard_kpi_access(user: &AuthUser) -> AppResult<()> {
     if user.roles.iter().any(|role| {
         matches!(
@@ -3218,6 +3516,7 @@ fn map_anyhow(error: anyhow::Error) -> AppError {
     } else if message.contains("duplicate key")
         || message.contains("unique constraint")
         || message.contains("blocked")
+        || message.contains("conflict")
         || message.contains("locked after FILED")
     {
         AppError::Conflict(message)

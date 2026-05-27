@@ -4671,6 +4671,13 @@ pub async fn update_form_data(
         Some(form) => form,
         None => generate_form(pool, tenant, by_id, form_code).await?,
     };
+    if let Some(expected_updated_at) = request.expected_updated_at.as_ref() {
+        if current.updated_at != *expected_updated_at {
+            return Err(anyhow!(
+                "updated_at conflict: form data was modified by another request"
+            ));
+        }
+    }
     let mut data_json = current.data_json.clone();
     let old_data = data_json.clone();
     let fields = request
@@ -4695,7 +4702,9 @@ pub async fn update_form_data(
         r#"
         UPDATE {schema}.form_data
         SET data_json = $3, status = 'MANUAL', updated_at = NOW()
-        WHERE by_id = $1 AND form_code = $2
+        WHERE by_id = $1
+          AND form_code = $2
+          AND ($4::timestamptz IS NULL OR updated_at = $4)
         RETURNING form_data_id, by_id, form_code, form_version_id, data_json,
                   snapshot_id, status, created_at, updated_at
         "#
@@ -4704,9 +4713,11 @@ pub async fn update_form_data(
         .bind(by_id)
         .bind(form_code)
         .bind(data_json)
-        .fetch_one(pool)
+        .bind(request.expected_updated_at)
+        .fetch_optional(pool)
         .await
-        .context("failed to update form data")?;
+        .context("failed to update form data")?
+        .ok_or_else(|| anyhow!("updated_at conflict: form data was modified by another request"))?;
     insert_form_data_history(
         pool,
         tenant,
@@ -4827,6 +4838,72 @@ pub async fn list_form_attachments(
         });
     }
     Ok(summaries)
+}
+
+pub async fn check_form_linkage(pool: &PgPool, tenant: &TenantRef, by_id: i64) -> Result<Value> {
+    let by = tenant::get_business_year(pool, tenant, by_id).await?;
+    let relationships = sqlx::query(
+        r#"
+        SELECT source_form, source_field, target_form, target_field, rule_json
+        FROM form_relationships
+        WHERE effective_from <= $1
+          AND (effective_to IS NULL OR effective_to >= $2)
+        ORDER BY relationship_id
+        "#,
+    )
+    .bind(by.end_date)
+    .bind(by.start_date)
+    .fetch_all(pool)
+    .await
+    .context("failed to load form linkage relationships")?;
+    let mut differences = Vec::new();
+    for relationship in relationships {
+        let source_form = relationship.get::<String, _>("source_form");
+        let source_field = relationship.get::<String, _>("source_field");
+        let target_form = relationship.get::<String, _>("target_form");
+        let target_field = relationship.get::<String, _>("target_field");
+        let Some(source) = load_form_optional(pool, tenant, by_id, &source_form).await? else {
+            differences.push(json!({
+                "source": format!("{source_form}.{source_field}"),
+                "target": format!("{target_form}.{target_field}"),
+                "issue": "MISSING_SOURCE_FORM"
+            }));
+            continue;
+        };
+        let Some(target) = load_form_optional(pool, tenant, by_id, &target_form).await? else {
+            differences.push(json!({
+                "source": format!("{source_form}.{source_field}"),
+                "target": format!("{target_form}.{target_field}"),
+                "issue": "MISSING_TARGET_FORM"
+            }));
+            continue;
+        };
+        let source_value = source
+            .data_json
+            .get(&source_field)
+            .cloned()
+            .unwrap_or(Value::Null);
+        let target_value = target
+            .data_json
+            .get(&target_field)
+            .cloned()
+            .unwrap_or(Value::Null);
+        if source_value != target_value {
+            differences.push(json!({
+                "source": format!("{source_form}.{source_field}"),
+                "target": format!("{target_form}.{target_field}"),
+                "source_value": source_value,
+                "target_value": target_value,
+                "issue": "VALUE_MISMATCH"
+            }));
+        }
+    }
+    Ok(json!({
+        "tenant_code": tenant.tenant_code.clone(),
+        "by_id": by_id,
+        "balanced": differences.is_empty(),
+        "differences": differences
+    }))
 }
 
 pub async fn generate_form_pdf(
@@ -5576,6 +5653,7 @@ fn form_field_label(field: &str) -> String {
 mod tests {
     use super::{calculate_corporate_tax, minimum_tax_extra_due};
     use crate::domain::TaxRate;
+    use chrono::NaiveDate;
     use serde_json::json;
 
     fn rate(from: i64, to: Option<i64>, bps: i32, deduction: i64) -> TaxRate {
