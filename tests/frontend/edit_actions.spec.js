@@ -30,7 +30,7 @@ for (const fn of [
 
 assert(screens.includes('method: "PATCH"'), "record edits must PATCH persistent leaf records");
 assert(screens.includes('method: "POST"'), "API row edits must POST through leaf action fallback");
-assert(screens.includes("message.textContent = error.message"), "edit failures must keep the form open and show the error");
+assert(screens.includes("message.textContent = localizeTextValue(error.message, env.locale)"), "edit failures must keep the form open and show the localized error");
 assert(screens.includes("form.querySelectorAll(\"[name]\")"), "edit forms must read named prefilled controls");
 assert(screens.includes("row[column.key]"), "edit modal must prefill values from the selected row");
 assert(screens.includes("state.rows[index] = row") || screens.includes("state.rows[index] ="), "saved edits must update the current row collection");

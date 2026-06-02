@@ -57,7 +57,15 @@ fn prototype_menu_tree_matches_phase2_information_architecture() {
 fn legacy_module_tree_is_kept_as_audit_route_payload() {
     let legacy = legacy_module_tree();
     assert_eq!(legacy["code"], "cit-system-legacy");
+    assert_eq!(legacy["label"], "법인세 시스템 레거시 모듈 트리");
+    assert_eq!(legacy["labels"]["en"], "CIT System Legacy Module Tree");
     assert_eq!(legacy["children"].as_array().unwrap().len(), 10);
+
+    let first = &legacy["children"][0];
+    assert_eq!(first["label"], "법령/세율 버전 관리");
+    assert_eq!(first["label_en"], "Law/rate versioning");
+    assert_eq!(first["display_name"], "0. 법령/세율 버전 관리");
+    assert_eq!(first["display_name_en"], "0. Law/rate versioning");
 }
 
 fn leaf_count(node: &serde_json::Value) -> usize {

@@ -531,20 +531,14 @@ async fn dashboard_inline_approval_actions_update_queue_status_and_notifications
         .iter()
         .filter_map(|item| item["title"].as_str())
         .collect::<Vec<_>>();
-    assert!(
-        titles.contains(&"Approval completed"),
-        "{notification_summary}"
-    );
-    assert!(
-        titles.contains(&"Approval returned"),
-        "{notification_summary}"
-    );
+    assert!(titles.contains(&"결재 완료"), "{notification_summary}");
+    assert!(titles.contains(&"결재 반려"), "{notification_summary}");
 }
 
 #[tokio::test]
 async fn dashboard_recent_activities_returns_latest_15_read_only_with_labels_and_routes() {
     let _guard = TEST_LOCK.lock().await;
-    let (base_url, _state) = spawn_seeded_app().await;
+    let (base_url, state) = spawn_seeded_app().await;
     let token = login(&base_url).await;
     let client = authenticated_client(&token);
 
@@ -597,6 +591,22 @@ async fn dashboard_recent_activities_returns_latest_15_read_only_with_labels_and
             .await,
         );
     }
+    let schema_name: String =
+        sqlx::query_scalar("SELECT schema_name FROM public.tenants WHERE tenant_code = $1")
+            .bind(&tenant_code)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+    let schema = db::quote_ident(&schema_name).unwrap();
+    sqlx::query(&format!(
+        r#"
+        INSERT INTO {schema}.audit_logs (table_name, record_id, action, old_data, new_data, changed_by)
+        VALUES ('menu_nodes', '3-5', 'UPDATE', '{{}}'::jsonb, '{{"label":"non numeric menu"}}'::jsonb, 'admin')
+        "#
+    ))
+    .execute(&state.pool)
+    .await
+    .unwrap();
     update_status(
         &client,
         &base_url,
@@ -653,6 +663,11 @@ async fn dashboard_recent_activities_returns_latest_15_read_only_with_labels_and
         item["activityType"] == "BUSINESS_YEAR_CREATED"
             && item["typeLabel"] == "사업연도 생성"
             && item["routeKey"] == "ws/start:snapshot"
+    }));
+    assert!(activities.iter().any(|item| {
+        item["recordId"] == "3-5"
+            && item["activityType"] == "AUDIT_EVENT"
+            && item["routeKey"] == "admin/audit:events"
     }));
 }
 
@@ -864,7 +879,7 @@ async fn dashboard_industry_distribution_and_loss_expiry_kpis_use_customer_and_l
         .iter()
         .find(|item| item["industryCode"] == "62010")
         .unwrap();
-    assert_eq!(software["industryName"], "Software development");
+    assert_eq!(software["industryName"], "소프트웨어 개발");
     assert_eq!(software["customerCount"], 2);
     assert_eq!(software["percentageBps"], 5000);
     assert_eq!(software["percentagePct"], 50.0);

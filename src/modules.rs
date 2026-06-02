@@ -37,19 +37,21 @@ pub fn prototype_menu_tree() -> Value {
     let defs = prototype_menu_defs();
     json!({
         "code": "cit-system",
-        "name": "CIT System",
+        "name": "법인세 세무조정계산서 시스템",
         "label": "법인세 세무조정계산서 시스템",
-        "display_name": "CIT System",
+        "display_name": "법인세 세무조정계산서 시스템",
         "label_ko": "법인세 세무조정계산서 시스템",
         "label_en": "CIT System",
         "labels": {
             "ko": "법인세 세무조정계산서 시스템",
             "en": "CIT System",
         },
-        "description": "Corporate income tax workspace menu",
+        "description": "법인세 신고 작업 메뉴",
+        "description_ko": "법인세 신고 작업 메뉴",
+        "description_en": "Corporate income tax workspace menu",
         "path": "#/dashboard/overview",
         "implemented": true,
-            "version": "v1.4",
+        "version": "v1.4",
         "children": children_for(&defs, None),
     })
 }
@@ -57,29 +59,31 @@ pub fn prototype_menu_tree() -> Value {
 pub fn legacy_module_tree() -> Value {
     json!({
         "code": "cit-system-legacy",
-        "name": "CIT System Legacy Module Tree",
-        "label": "CIT System Legacy Module Tree",
-        "display_name": "CIT System Legacy Module Tree",
-        "label_ko": "CIT System Legacy Module Tree",
+        "name": "법인세 시스템 레거시 모듈 트리",
+        "label": "법인세 시스템 레거시 모듈 트리",
+        "display_name": "법인세 시스템 레거시 모듈 트리",
+        "label_ko": "법인세 시스템 레거시 모듈 트리",
         "label_en": "CIT System Legacy Module Tree",
         "labels": {
-            "ko": "CIT System Legacy Module Tree",
+            "ko": "법인세 시스템 레거시 모듈 트리",
             "en": "CIT System Legacy Module Tree",
         },
-        "description": "Phase 1 module-number menu retained for audit and development",
+        "description": "감사와 개발 추적을 위해 유지하는 1단계 모듈 번호 메뉴",
+        "description_ko": "감사와 개발 추적을 위해 유지하는 1단계 모듈 번호 메뉴",
+        "description_en": "Phase 1 module-number menu retained for audit and development",
         "path": "/modules",
         "implemented": true,
         "children": [
-            legacy_node("law-versioning", "0", "Law/rate versioning", "/modules/law-versioning"),
-            legacy_node("auth", "1", "Authentication/accounts", "/modules/auth"),
-            legacy_node("admin", "2", "System administration", "/modules/admin"),
-            legacy_node("customer", "3", "Customer management", "/modules/customer"),
-            legacy_node("tax-data", "4", "Tax data input", "/modules/tax-data"),
-            legacy_node("adjustment", "5", "Tax adjustments", "/modules/adjustment"),
-            legacy_node("forms", "6", "Tax forms", "/modules/forms"),
-            legacy_node("print", "7", "Print/output", "/modules/print"),
-            legacy_node("efiling", "8", "Electronic filing", "/modules/efiling"),
-            legacy_node("reports", "9", "Analytics/reports", "/modules/reports"),
+            legacy_node("law-versioning", "0", "법령/세율 버전 관리", "Law/rate versioning", "/modules/law-versioning"),
+            legacy_node("auth", "1", "인증/계정", "Authentication/accounts", "/modules/auth"),
+            legacy_node("admin", "2", "시스템 관리", "System administration", "/modules/admin"),
+            legacy_node("customer", "3", "고객사 관리", "Customer management", "/modules/customer"),
+            legacy_node("tax-data", "4", "세무정보 입력", "Tax data input", "/modules/tax-data"),
+            legacy_node("adjustment", "5", "세무조정", "Tax adjustments", "/modules/adjustment"),
+            legacy_node("forms", "6", "세무 서식", "Tax forms", "/modules/forms"),
+            legacy_node("print", "7", "출력", "Print/output", "/modules/print"),
+            legacy_node("efiling", "8", "전자신고", "Electronic filing", "/modules/efiling"),
+            legacy_node("reports", "9", "분석/보고서", "Analytics/reports", "/modules/reports"),
         ]
     })
 }
@@ -687,12 +691,12 @@ fn post_defs() -> Vec<MenuDef> {
 
 fn report_defs() -> Vec<MenuDef> {
     [
-        ("year-compare", "Year comparison"),
-        ("tax-burden", "Tax burden"),
-        ("reserve-trend", "Reserve trend"),
-        ("loss-expiry", "Loss expiry"),
-        ("industry-stats", "Industry stats"),
-        ("custom", "Custom report"),
+        ("year-compare", "사업연도 비교"),
+        ("tax-burden", "세부담 분석"),
+        ("reserve-trend", "유보 추이"),
+        ("loss-expiry", "결손금 만료"),
+        ("industry-stats", "업종별 통계"),
+        ("custom", "사용자 정의 리포트"),
     ]
     .into_iter()
     .enumerate()
@@ -925,19 +929,21 @@ fn node(def: &MenuDef, children: Vec<Value>) -> Value {
     })
 }
 
-fn legacy_node(code: &str, number: &str, label: &str, path: &str) -> Value {
+fn legacy_node(code: &str, number: &str, label_ko: &str, label_en: &str, path: &str) -> Value {
     json!({
         "code": code,
         "number": number,
-        "name": label,
-        "label": label,
-        "label_ko": label,
-        "label_en": label,
+        "name": label_ko,
+        "label": label_ko,
+        "label_ko": label_ko,
+        "label_en": label_en,
         "labels": {
-            "ko": label,
-            "en": label,
+            "ko": label_ko,
+            "en": label_en,
         },
-        "display_name": format!("{number}. {label}"),
+        "display_name": format!("{number}. {label_ko}"),
+        "display_name_ko": format!("{number}. {label_ko}"),
+        "display_name_en": format!("{number}. {label_en}"),
         "path": path,
         "implemented": true,
         "children": [],

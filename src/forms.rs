@@ -88,7 +88,7 @@ pub async fn create_form_version(
             form_code: form_code.clone(),
             form_name: form_name.clone(),
             form_group: Some("CIT".to_string()),
-            description: Some("created from form version".to_string()),
+            description: Some("서식 버전에서 생성됨".to_string()),
             active: Some(true),
         },
     )
@@ -288,9 +288,9 @@ pub async fn dry_run_migration(
         common_fields,
         executable,
         message: if executable {
-            "migration can be executed".to_string()
+            "마이그레이션을 실행할 수 있습니다.".to_string()
         } else {
-            "target form version is not active".to_string()
+            "대상 서식 버전이 활성 상태가 아닙니다.".to_string()
         },
     })
 }
@@ -333,7 +333,7 @@ pub async fn execute_migration(
 
     Ok(FormMigrationResult {
         mode: "EXECUTE".to_string(),
-        message: "migration executed".to_string(),
+        message: "마이그레이션이 실행되었습니다.".to_string(),
         ..dry_run
     })
 }
@@ -401,7 +401,7 @@ pub async fn rollback_migration(
         removed_fields: Vec::new(),
         common_fields: Vec::new(),
         executable: true,
-        message: "migration rolled back".to_string(),
+        message: "마이그레이션이 롤백되었습니다.".to_string(),
     })
 }
 

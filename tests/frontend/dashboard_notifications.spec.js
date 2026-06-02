@@ -18,7 +18,7 @@ for (const snippet of [
   'body: JSON.stringify({ status: "READ" })',
   "dashboardNotifications.find",
   "await refreshContextFromBy(env, {",
-  'env.navigate(item.routeKey || "rp-alerts")',
+  'env.navigate(item.routeKey || "dashboard:inbox")',
 ]) {
   assert(screens.includes(snippet), `dashboard notification UI must include ${snippet}`);
 }

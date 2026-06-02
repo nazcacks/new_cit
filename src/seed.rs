@@ -161,7 +161,7 @@ async fn ensure_demo_tenant(pool: &PgPool, tenant_code: &str) -> Result<TenantRe
             tenant_code, tenant_name, biz_reg_no, contract_start,
             contract_end, schema_name, max_users, status
         )
-        VALUES ($1, 'Demo Corporate Tax Workspace', '1108112345', DATE '2026-01-01',
+        VALUES ($1, '데모 법인세 신고 작업장', '1108112345', DATE '2026-01-01',
                 NULL, $2, 20, 'ACTIVE')
         ON CONFLICT (tenant_code) DO UPDATE
         SET tenant_name = EXCLUDED.tenant_name,
@@ -187,7 +187,7 @@ async fn ensure_sample_tenant(pool: &PgPool) -> Result<()> {
             tenant_code, tenant_name, biz_reg_no, contract_start,
             contract_end, schema_name, max_users, status
         )
-        VALUES ('samplefirm', 'Sample Advisory Firm', '2208112345', DATE '2026-01-01',
+        VALUES ('samplefirm', '샘플 세무법인', '2208112345', DATE '2026-01-01',
                 NULL, 'tenant_samplefirm', 10, 'ACTIVE')
         ON CONFLICT (tenant_code) DO UPDATE
         SET tenant_name = EXCLUDED.tenant_name,
@@ -240,11 +240,11 @@ async fn ensure_seed_roles(pool: &PgPool) -> Result<()> {
         r#"
         INSERT INTO roles (role_code, role_name, description, system_role)
         VALUES
-            ('TAX_WRITER', 'Tax Writer', 'Demo data entry and form writer', TRUE),
-            ('TAX_REVIEWER', 'Tax Reviewer', 'Demo reviewer and approver', TRUE),
-            ('TAX_EXPERT', 'Tax Expert', 'Demo tax adjustment expert', TRUE),
-            ('TENANT_ADMIN', 'Tenant Admin', 'Demo tenant administrator', TRUE),
-            ('SUPER_ADMIN', 'Super Admin', 'Demo super administrator', TRUE)
+            ('TAX_WRITER', '작성 담당자', '데모 자료 입력 및 서식 작성 담당자', TRUE),
+            ('TAX_REVIEWER', '검토 담당자', '데모 검토 및 승인 담당자', TRUE),
+            ('TAX_EXPERT', '세무조정 전문가', '데모 세무조정 전문가', TRUE),
+            ('TENANT_ADMIN', '테넌트 관리자', '데모 테넌트 관리자', TRUE),
+            ('SUPER_ADMIN', '슈퍼 관리자', '데모 전체 관리자', TRUE)
         ON CONFLICT (role_code) DO UPDATE
         SET role_name = EXCLUDED.role_name,
             description = EXCLUDED.description,
@@ -300,28 +300,28 @@ async fn ensure_seed_users(
     let user_seeds = [
         (
             "admin",
-            "Demo Admin",
+            "데모 관리자",
             "admin.demo@example.test",
             admin_password,
             vec!["SUPER_ADMIN", "TENANT_ADMIN"],
         ),
         (
             "writer01",
-            "Demo Writer",
+            "데모 작성자",
             "writer01.demo@example.test",
             DEMO_PASSWORD,
             vec!["TAX_WRITER", "TAX_EXPERT"],
         ),
         (
             "reviewer01",
-            "Demo Reviewer",
+            "데모 검토자",
             "reviewer01.demo@example.test",
             DEMO_PASSWORD,
             vec!["TAX_REVIEWER"],
         ),
         (
             "tax01",
-            "Demo Tax Expert",
+            "데모 세무전문가",
             "tax01.demo@example.test",
             DEMO_PASSWORD,
             vec!["TAX_EXPERT"],
@@ -388,7 +388,7 @@ async fn ensure_seed_customers(
     let customer_seeds = [
         (
             "CUST01",
-            "Alpha Manufacturing Co.",
+            "알파 제조 주식회사",
             "1208111111",
             "1101111111111",
             "C25999",
@@ -396,7 +396,7 @@ async fn ensure_seed_customers(
         ),
         (
             "CUST02",
-            "Beta Platform Services",
+            "베타 플랫폼 서비스",
             "2208122222",
             "2202222222222",
             "J58222",
@@ -404,7 +404,7 @@ async fn ensure_seed_customers(
         ),
         (
             "CUST03",
-            "Gamma Bio Labs",
+            "감마 바이오 연구소",
             "3208133333",
             "3303333333333",
             "M70113",
@@ -734,28 +734,28 @@ async fn run_adjustment_suite(pool: &PgPool, tenant_ref: &TenantRef, by_id: i64)
                 income_item(
                     "GROSS_INCLUSION",
                     "B1_BONUS_ACCRUAL",
-                    "Accrued officer bonus",
+                    "임원 상여 미지급액",
                     18_000_000,
                     true,
                 ),
                 income_item(
                     "LOSS_DISALLOWANCE",
                     "B1_NONBUSINESS_EXPENSE",
-                    "Non-business expense",
+                    "업무무관 비용",
                     7_500_000,
                     false,
                 ),
                 income_item(
                     "GROSS_EXCLUSION",
                     "B1_TAX_EXEMPT_INCOME",
-                    "Tax-exempt interest income",
+                    "비과세 이자수익",
                     3_000_000,
                     false,
                 ),
                 income_item(
                     "LOSS_INCLUSION",
                     "B1_PRIOR_RESERVE_REVERSAL",
-                    "Prior reserve reversal",
+                    "전기 유보 환입",
                     4_000_000,
                     false,
                 ),
@@ -834,7 +834,7 @@ async fn run_adjustment_suite(pool: &PgPool, tenant_ref: &TenantRef, by_id: i64)
         EvaluationAdjustmentRequest {
             positions: Some(vec![ValuationPositionInput {
                 item_code: "USD_AR".to_string(),
-                item_name: "USD accounts receivable".to_string(),
+                item_name: "USD 매출채권".to_string(),
                 position_type: Some("RECEIVABLE".to_string()),
                 monetary: Some(true),
                 valuation_method: Some("CLOSING_RATE".to_string()),
@@ -858,7 +858,7 @@ async fn run_adjustment_suite(pool: &PgPool, tenant_ref: &TenantRef, by_id: i64)
         EvaluationAdjustmentRequest {
             positions: Some(vec![ValuationPositionInput {
                 item_code: "INV_OBS".to_string(),
-                item_name: "Inventory valuation reserve".to_string(),
+                item_name: "재고평가충당금".to_string(),
                 position_type: Some("INVENTORY".to_string()),
                 monetary: Some(false),
                 valuation_method: Some("LOWER_OF_COST_OR_MARKET".to_string()),
@@ -986,13 +986,13 @@ async fn run_adjustment_suite(pool: &PgPool, tenant_ref: &TenantRef, by_id: i64)
                     change_date: date("2026-03-31")?,
                     change_type: "PAID_IN_CAPITAL".to_string(),
                     amount: 150_000_000,
-                    description: Some("New preferred share issuance".to_string()),
+                    description: Some("신종 우선주 발행".to_string()),
                 },
                 CapitalChangeInput {
                     change_date: date("2026-04-30")?,
                     change_type: "TREASURY_STOCK".to_string(),
                     amount: 35_000_000,
-                    description: Some("Treasury stock acquisition".to_string()),
+                    description: Some("자기주식 취득".to_string()),
                 },
             ]),
         },
@@ -1026,14 +1026,14 @@ async fn run_adjustment_suite(pool: &PgPool, tenant_ref: &TenantRef, by_id: i64)
             consolidated_entities: Some(vec![
                 ConsolidatedEntityInput {
                     entity_code: "ALPHA".to_string(),
-                    entity_name: "Alpha Manufacturing Co.".to_string(),
+                    entity_name: "알파 제조 주식회사".to_string(),
                     ownership_bps: 10_000,
                     taxable_income: 360_000_000,
                     standalone_tax: Some(48_400_000),
                 },
                 ConsolidatedEntityInput {
                     entity_code: "ALPHA_RND".to_string(),
-                    entity_name: "Alpha R&D Subsidiary".to_string(),
+                    entity_name: "알파 연구개발 자회사".to_string(),
                     ownership_bps: 10_000,
                     taxable_income: 110_000_000,
                     standalone_tax: Some(18_900_000),
@@ -1043,7 +1043,7 @@ async fn run_adjustment_suite(pool: &PgPool, tenant_ref: &TenantRef, by_id: i64)
                 elimination_type: "INTERCOMPANY_PROFIT".to_string(),
                 amount: 25_000_000,
                 direction: "DEDUCT".to_string(),
-                description: Some("Inventory profit elimination".to_string()),
+                description: Some("재고 내부이익 제거".to_string()),
             }]),
         },
     )
@@ -1114,7 +1114,7 @@ async fn seed_workflow(
             "IN_REVIEW",
             "SUBMIT_REVIEW",
             "writer01",
-            "Demo package submitted for review",
+            "데모 신고 패키지 검토 요청",
         ),
         (
             filed_by_id,
@@ -1122,7 +1122,7 @@ async fn seed_workflow(
             "IN_REVIEW",
             "SUBMIT_REVIEW",
             "writer01",
-            "Prior year review request",
+            "전년도 신고 검토 요청",
         ),
         (
             filed_by_id,
@@ -1130,7 +1130,7 @@ async fn seed_workflow(
             "APPROVED",
             "APPROVE",
             "reviewer01",
-            "Prior year approved",
+            "전년도 신고 승인",
         ),
         (
             filed_by_id,
@@ -1138,7 +1138,7 @@ async fn seed_workflow(
             "FILED",
             "FILE",
             "tax01",
-            "Prior year filed",
+            "전년도 신고 제출 완료",
         ),
     ] {
         sqlx::query(&format!(
@@ -1163,7 +1163,7 @@ async fn seed_workflow(
     sqlx::query(&format!(
         r#"
         INSERT INTO {schema}.approval_lines (by_id, step_order, approver_login_id, status, comment)
-        VALUES ($1, 1, 'reviewer01', 'PENDING', 'Demo review queue')
+        VALUES ($1, 1, 'reviewer01', 'PENDING', '데모 검토 대기')
         "#
     ))
     .bind(main_by_id)
@@ -1175,7 +1175,7 @@ async fn seed_workflow(
         INSERT INTO {schema}.approval_lines (
             by_id, step_order, approver_login_id, status, acted_at, comment
         )
-        VALUES ($1, 1, 'reviewer01', 'APPROVED', NOW(), 'Prior year approval')
+        VALUES ($1, 1, 'reviewer01', 'APPROVED', NOW(), '전년도 신고 승인')
         "#
     ))
     .bind(filed_by_id)
@@ -1195,26 +1195,26 @@ async fn seed_notifications(
     for (by_id, title, message, severity) in [
         (
             Some(main_by_id),
-            "Review package submitted",
-            "Reviewer action is required.",
+            "검토 패키지 제출",
+            "검토 담당자 처리가 필요합니다.",
             "INFO",
         ),
         (
             Some(main_by_id),
-            "Filing due soon",
-            "The demo 2026 filing closes within 30 days.",
+            "신고 마감 임박",
+            "데모 2026 신고 마감이 30일 이내입니다.",
             "WARN",
         ),
         (
             Some(filed_by_id),
-            "Filed return locked",
-            "Prior year return is locked for amendment preview.",
+            "신고 완료본 잠금",
+            "전년도 신고서는 수정신고 미리보기를 위해 잠겨 있습니다.",
             "INFO",
         ),
         (
             None,
-            "Menu smoke dataset ready",
-            "All prototype menus have demo data.",
+            "메뉴 점검 데이터 준비",
+            "전체 프로토타입 메뉴에 데모 데이터가 준비되었습니다.",
             "WARN",
         ),
     ] {
@@ -1282,7 +1282,7 @@ fn income_item(
         amount,
         disposition: None,
         temporary: Some(temporary),
-        law_ref: Some("Demo seed".to_string()),
+        law_ref: Some("데모 시드".to_string()),
         metadata: Some(json!({ "seed": true })),
     }
 }
@@ -1307,36 +1307,36 @@ fn date(value: &str) -> Result<NaiveDate> {
 fn financial_statement_csv() -> String {
     [
         "statement_type,account_code,account_name,debit,credit,standard_account_code,standard_account_name",
-        "BS,10100,Cash,350000000,0,STD_CASH,Cash",
-        "BS,10200,Accounts receivable,420000000,0,STD_AR,Accounts receivable",
-        "BS,10300,Inventory,180000000,0,STD_INVENTORY,Inventory",
-        "BS,10400,Prepaid expense,125000000,0,STD_PREPAID,Prepaid expense",
-        "BS,11100,Land,300000000,0,STD_LAND,Land",
-        "BS,11200,Buildings,900000000,0,STD_BUILDING,Buildings",
-        "BS,11300,Vehicles,120000000,0,STD_VEHICLE,Vehicles",
-        "BS,11400,Machinery,650000000,0,STD_MACHINERY,Machinery",
-        "BS,11500,Software,90000000,0,STD_SOFTWARE,Software",
-        "IS,50100,Cost of goods sold,1100000000,0,STD_COGS,Cost of goods sold",
-        "IS,51100,Salaries,360000000,0,STD_SALARY,Salaries",
-        "IS,52100,Rent,95000000,0,STD_RENT,Rent",
-        "IS,53100,Donations,28000000,0,STD_DONATION,Donations",
-        "IS,53200,Entertainment,35000000,0,STD_ENTERTAINMENT,Entertainment",
-        "IS,53300,Interest expense,42000000,0,STD_INTEREST_EXPENSE,Interest expense",
-        "IS,54100,Depreciation,160000000,0,STD_DEPRECIATION,Depreciation",
-        "IS,55100,R&D expense,80000000,0,STD_RND,R&D expense",
-        "IS,55200,Foreign service expense,26000000,0,STD_FOREIGN_EXPENSE,Foreign service expense",
-        "IS,55300,Tax expense,70000000,0,STD_TAX_EXPENSE,Tax expense",
-        "BS,20100,Accounts payable,0,270000000,STD_AP,Accounts payable",
-        "BS,20200,Bank loans,0,480000000,STD_LOAN,Bank loans",
-        "BS,20300,Tax payable,0,30000000,STD_TAX_PAYABLE,Tax payable",
-        "BS,20400,Accrued expense,0,95000000,STD_ACCRUAL,Accrued expense",
-        "BS,30100,Capital stock,0,1000000000,STD_CAPITAL,Capital stock",
-        "BS,30200,Retained earnings,0,650000000,STD_RETAINED_EARNINGS,Retained earnings",
-        "IS,40100,Product revenue,0,1800000000,STD_PRODUCT_REVENUE,Product revenue",
-        "IS,40200,Service revenue,0,620000000,STD_SERVICE_REVENUE,Service revenue",
-        "IS,40300,Interest income,0,25000000,STD_INTEREST_INCOME,Interest income",
-        "IS,40400,FX gain,0,18000000,STD_FX_GAIN,FX gain",
-        "IS,NET_INCOME,Net income,0,143000000,ACCOUNTING_INCOME,Accounting income",
+        "BS,10100,현금,350000000,0,STD_CASH,현금",
+        "BS,10200,매출채권,420000000,0,STD_AR,매출채권",
+        "BS,10300,재고자산,180000000,0,STD_INVENTORY,재고자산",
+        "BS,10400,선급비용,125000000,0,STD_PREPAID,선급비용",
+        "BS,11100,토지,300000000,0,STD_LAND,토지",
+        "BS,11200,건물,900000000,0,STD_BUILDING,건물",
+        "BS,11300,차량운반구,120000000,0,STD_VEHICLE,차량운반구",
+        "BS,11400,기계장치,650000000,0,STD_MACHINERY,기계장치",
+        "BS,11500,소프트웨어,90000000,0,STD_SOFTWARE,소프트웨어",
+        "IS,50100,매출원가,1100000000,0,STD_COGS,매출원가",
+        "IS,51100,급여,360000000,0,STD_SALARY,급여",
+        "IS,52100,임차료,95000000,0,STD_RENT,임차료",
+        "IS,53100,기부금,28000000,0,STD_DONATION,기부금",
+        "IS,53200,접대비,35000000,0,STD_ENTERTAINMENT,접대비",
+        "IS,53300,이자비용,42000000,0,STD_INTEREST_EXPENSE,이자비용",
+        "IS,54100,감가상각비,160000000,0,STD_DEPRECIATION,감가상각비",
+        "IS,55100,연구개발비,80000000,0,STD_RND,연구개발비",
+        "IS,55200,해외용역비,26000000,0,STD_FOREIGN_EXPENSE,해외용역비",
+        "IS,55300,법인세비용,70000000,0,STD_TAX_EXPENSE,법인세비용",
+        "BS,20100,매입채무,0,270000000,STD_AP,매입채무",
+        "BS,20200,은행차입금,0,480000000,STD_LOAN,은행차입금",
+        "BS,20300,미지급세금,0,30000000,STD_TAX_PAYABLE,미지급세금",
+        "BS,20400,미지급비용,0,95000000,STD_ACCRUAL,미지급비용",
+        "BS,30100,자본금,0,1000000000,STD_CAPITAL,자본금",
+        "BS,30200,이익잉여금,0,650000000,STD_RETAINED_EARNINGS,이익잉여금",
+        "IS,40100,제품매출,0,1800000000,STD_PRODUCT_REVENUE,제품매출",
+        "IS,40200,용역매출,0,620000000,STD_SERVICE_REVENUE,용역매출",
+        "IS,40300,이자수익,0,25000000,STD_INTEREST_INCOME,이자수익",
+        "IS,40400,외환차익,0,18000000,STD_FX_GAIN,외환차익",
+        "IS,NET_INCOME,당기순이익,0,143000000,ACCOUNTING_INCOME,회계상 소득",
     ]
     .join("\n")
 }
@@ -1344,14 +1344,14 @@ fn financial_statement_csv() -> String {
 fn asset_csv() -> String {
     [
         "asset_code,asset_name,asset_category,acquisition_date,acquisition_cost,useful_life_years",
-        "CAR001,Executive vehicle,VEHICLE,2026-01-10,85000000,3",
-        "CAR002,Sales vehicle,VEHICLE,2026-02-14,72000000,4",
-        "CAR003,Service van,VEHICLE,2026-03-05,68000000,4",
-        "MACH001,CNC machine,MACHINERY,2026-01-20,480000000,4",
-        "MACH002,Packaging line,MACHINERY,2026-02-15,240000000,4",
-        "SW001,ERP software,SOFTWARE,2026-01-01,120000000,3",
-        "BLD001,Factory building,BUILDING,2026-01-01,900000000,20",
-        "FIX001,Office fixtures,GENERAL,2026-04-01,50000000,4",
+        "CAR001,임원 업무용 차량,VEHICLE,2026-01-10,85000000,3",
+        "CAR002,영업 업무용 차량,VEHICLE,2026-02-14,72000000,4",
+        "CAR003,서비스 밴,VEHICLE,2026-03-05,68000000,4",
+        "MACH001,CNC 기계,MACHINERY,2026-01-20,480000000,4",
+        "MACH002,포장 라인,MACHINERY,2026-02-15,240000000,4",
+        "SW001,ERP 소프트웨어,SOFTWARE,2026-01-01,120000000,3",
+        "BLD001,공장 건물,BUILDING,2026-01-01,900000000,20",
+        "FIX001,사무 집기,GENERAL,2026-04-01,50000000,4",
     ]
     .join("\n")
 }
@@ -1359,16 +1359,16 @@ fn asset_csv() -> String {
 fn transaction_csv() -> String {
     [
         "tx_date,partner_name,category,account_code,description,amount,evidence_type",
-        "2026-02-03,National Relief Fund,DONATION,53100,special statutory donation,42000000,RECEIPT",
-        "2026-03-18,Local Community Fund,DONATION,53100,general donation,16000000,RECEIPT",
-        "2026-01-22,Client Dinner A,ENTERTAINMENT,53200,client dinner with card,25000000,CARD",
-        "2026-02-10,Client Event B,ENTERTAINMENT,53200,cash entertainment without qualified evidence,20000000,CASH",
-        "2026-04-11,Partner Workshop,ENTERTAINMENT,53200,workshop meal with receipt,30000000,RECEIPT",
-        "2026-03-01,Unknown Creditor,INTEREST,53300,unidentified creditor short term interest,12000000,TRANSFER",
-        "2026-03-29,Unknown Recipient,INTEREST,53300,unidentified recipient interest,9000000,TRANSFER",
-        "2026-04-15,Construction Bank,INTEREST,53300,construction financing interest,21000000,TRANSFER",
-        "2026-05-02,Office Supplier,OTHER,54000,office supplies,7000000,CARD",
-        "2026-05-17,Foreign Vendor,OTHER,55200,foreign service fee,19000000,INVOICE",
+        "2026-02-03,국민구호기금,DONATION,53100,특례 법정기부금,42000000,RECEIPT",
+        "2026-03-18,지역공동체기금,DONATION,53100,일반기부금,16000000,RECEIPT",
+        "2026-01-22,거래처 만찬 A,ENTERTAINMENT,53200,카드 사용 접대 식사,25000000,CARD",
+        "2026-02-10,거래처 행사 B,ENTERTAINMENT,53200,적격증빙 없는 현금 접대비,20000000,CASH",
+        "2026-04-11,협력사 워크숍,ENTERTAINMENT,53200,영수증 있는 워크숍 식사,30000000,RECEIPT",
+        "2026-03-01,불명 채권자,INTEREST,53300,채권자 불분명 단기이자,12000000,TRANSFER",
+        "2026-03-29,불명 수령자,INTEREST,53300,수령자 불분명 이자,9000000,TRANSFER",
+        "2026-04-15,건설은행,INTEREST,53300,건설자금 이자,21000000,TRANSFER",
+        "2026-05-02,사무용품 공급사,OTHER,54000,사무용품 구입,7000000,CARD",
+        "2026-05-17,해외 공급사,OTHER,55200,해외 용역 수수료,19000000,INVOICE",
     ]
     .join("\n")
 }

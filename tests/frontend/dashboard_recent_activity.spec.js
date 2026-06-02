@@ -13,14 +13,14 @@ for (const snippet of [
   'data-activity-audit="${escapeHtml(item.auditId)}"',
   'data-open-activity="${escapeHtml(item.auditId)}"',
   "item.typeLabel || item.activityType",
-  "item.routeKey || \"ad-audit\"",
+  "item.routeKey || \"admin/audit:events\"",
   "const openActivity = async (auditId) =>",
   "recentActivities.find",
   "await refreshContextFromBy(env, {",
   "by_id: item.byId",
   "customer_id: item.customerId",
   "year_label: item.fiscalYear",
-  "env.navigate(item.routeKey || \"ad-audit\")",
+  "env.navigate(item.routeKey || \"admin/audit:events\")",
   "dashboard/recent-activities?limit=15",
 ]) {
   assert(screens.includes(snippet), `dashboard recent activity UI must include ${snippet}`);

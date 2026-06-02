@@ -13,6 +13,37 @@ const workspaceSteps = [
   "ws-file",
 ];
 
+const DEFAULT_TEXT_TRANSLATIONS = Object.freeze([
+  ["Demo Corporate Tax Workspace", "데모 법인세 신고 작업장"],
+  ["Demo Tax Firm", "샘플 세무법인"],
+  ["Alpha Manufacturing Co.", "알파 제조 주식회사"],
+  ["Beta Platform Services", "베타 플랫폼 서비스"],
+  ["Gamma Bio Research", "감마 바이오 연구소"],
+  ["Dashboard Work Status", "대시보드 작업 상태"],
+  ["Dashboard Recent Activity", "대시보드 최근 활동"],
+  ["Dashboard Deadlines", "대시보드 마감 현황"],
+  ["Dashboard Notifications", "대시보드 알림"],
+  ["Dashboard Approval Actions", "대시보드 결재 작업"],
+  ["Dashboard KPI Tax Burden", "대시보드 KPI 세부담"],
+  ["Dashboard KPI Industry Loss", "대시보드 KPI 업종 결손"],
+  ["Dashboard Customer", "대시보드 고객사"],
+  ["Deadline Customer", "마감 관리 고객사"],
+  ["Notification Customer", "알림 고객사"],
+  ["Approval Action Customer", "결재 작업 고객사"],
+  ["Activity Customer", "활동 이력 고객사"],
+  ["KPI Customer", "KPI 고객사"],
+]);
+
+export function displayText(value, locale = "ko") {
+  let text = String(value ?? "");
+  for (const [en, ko] of DEFAULT_TEXT_TRANSLATIONS) {
+    const source = locale === "en" ? ko : en;
+    const target = locale === "en" ? en : ko;
+    text = text.split(source).join(target);
+  }
+  return text;
+}
+
 export function renderMenu(container, tree, context, activeKey, navigate, locale = "ko", auth = null) {
   const roots = Array.isArray(tree?.children) ? tree.children : [];
   container.innerHTML = roots
@@ -37,7 +68,7 @@ export function renderTenantSwitcher(container, auth, onSwitch, locale = "ko") {
   const canSwitch = tenants.length >= 2 || auth?.user?.roles?.includes("SUPER_ADMIN");
   if (!container) return;
   if (!canSwitch) {
-    container.innerHTML = `<span class="tenant-label">${escapeHtml(current.tenant_name || "-")} / ${escapeHtml(current.tenant_code || "-")}</span>`;
+    container.innerHTML = `<span class="tenant-label">${escapeHtml(displayText(current.tenant_name || "-", locale))} / ${escapeHtml(current.tenant_code || "-")}</span>`;
     return;
   }
   container.innerHTML = `
@@ -46,7 +77,7 @@ export function renderTenantSwitcher(container, auth, onSwitch, locale = "ko") {
       <select id="tenantSwitchSelect" aria-label="${escapeHtml(t(locale, "tenant.switch"))}">
         ${tenants.map((tenant) => `
           <option value="${escapeHtml(tenant.tenant_code)}" ${tenant.current ? "selected" : ""}>
-            ${escapeHtml(tenant.tenant_name)} / ${escapeHtml(tenant.tenant_code)} / ${escapeHtml(tenant.role)}
+            ${escapeHtml(displayText(tenant.tenant_name, locale))} / ${escapeHtml(tenant.tenant_code)} / ${escapeHtml(tenant.role)}
           </option>`).join("")}
       </select>
     </label>`;
@@ -59,7 +90,7 @@ export function renderContextBadge(container, context, locale = "ko") {
   const ready = hasWorkContext(context);
   container.innerHTML = ready
     ? `
-      <strong>${escapeHtml(context.customerName || "-")}</strong>
+      <strong>${escapeHtml(displayText(context.customerName || "-", locale))}</strong>
       <span>${escapeHtml(context.fy || "-")} / ${escapeHtml(statusLabel(context.status || "DRAFT", locale))}</span>
       <div class="bar-track"><span style="width:${Number(context.progress || 0)}%"></span></div>
       <span>${context.lockMode === "LOCKED" ? t(locale, "context.locked") : t(locale, "context.editable")}</span>

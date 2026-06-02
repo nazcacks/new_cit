@@ -389,15 +389,15 @@ pub async fn validation_summary(
 pub fn template_csv(data_type: &str) -> Result<String> {
     match normalize_data_type(data_type)?.as_str() {
         "FINANCIAL_STATEMENT" => Ok(
-            "statement_type,account_code,account_name,debit,credit,standard_account_code,standard_account_name\nBS,10100,Cash,1000000,0,STD_CASH,Cash\nBS,20100,Accounts payable,0,1000000,STD_PAYABLE,Accounts payable\n"
+            "statement_type,account_code,account_name,debit,credit,standard_account_code,standard_account_name\nBS,10100,현금,1000000,0,STD_CASH,현금\nBS,20100,미지급금,0,1000000,STD_PAYABLE,미지급금\n"
                 .to_string(),
         ),
         "ASSET" => Ok(
-            "asset_code,asset_name,asset_category,acquisition_date,acquisition_cost,useful_life_years\nCAR001,Company sedan,VEHICLE,2026-01-10,55000000,5\nMACH001,CNC machine,MACHINERY,2026-02-01,120000000,8\n"
+            "asset_code,asset_name,asset_category,acquisition_date,acquisition_cost,useful_life_years\nCAR001,업무용 승용차,VEHICLE,2026-01-10,55000000,5\nMACH001,CNC 장비,MACHINERY,2026-02-01,120000000,8\n"
                 .to_string(),
         ),
         "TRANSACTION" => Ok(
-            "tx_date,partner_name,category,account_code,description,amount,evidence_type\n2026-03-01,Good Charity,DONATION,53100,Donation receipt,3000000,RECEIPT\n2026-04-05,Client Dinner,ENTERTAINMENT,53200,Dinner meeting,700000,CARD\n"
+            "tx_date,partner_name,category,account_code,description,amount,evidence_type\n2026-03-01,좋은나눔재단,DONATION,53100,기부금 영수증,3000000,RECEIPT\n2026-04-05,거래처 만찬,ENTERTAINMENT,53200,저녁 회의,700000,CARD\n"
                 .to_string(),
         ),
         _ => Err(anyhow!("unsupported tax-data type")),
@@ -450,7 +450,7 @@ async fn import_financial_statements(
             row_no: 0,
             field_name: Some("debit_credit".to_string()),
             message: format!(
-                "debit total {debit_total} does not match credit total {credit_total}"
+                "차변 합계 {debit_total}와 대변 합계 {credit_total}가 일치하지 않습니다."
             ),
             raw_row: json!({
                 "debit_total": debit_total,

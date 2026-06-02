@@ -1030,7 +1030,7 @@ pub async fn calculate_transaction_based_adjustment(
             },
             amount: addbacks - deductions,
             direction: "INFO",
-            description: "Transaction based tax adjustment",
+            description: "거래 기반 세무조정",
             snapshot_id: snapshot.snapshot_id,
             metadata: json!({
                 "module": module_code,
@@ -1195,7 +1195,7 @@ pub async fn calculate_evaluation_adjustment(
             },
             amount: summary_amount,
             direction: "INFO",
-            description: "Evaluation and carryforward adjustment",
+            description: "평가 및 이월 세무조정",
             snapshot_id: snapshot.snapshot_id,
             metadata: json!({
                 "module": module_code,
@@ -1321,7 +1321,7 @@ pub async fn calculate_tax_amount_adjustment(
             },
             amount: determined_tax,
             direction: "INFO",
-            description: "Tax amount adjustment",
+            description: "세액 조정",
             snapshot_id: snapshot.snapshot_id,
             metadata: json!({
                 "module": module_code,
@@ -1419,7 +1419,7 @@ pub async fn calculate_special_tax_adjustment(
             },
             amount: taxable_income,
             direction: "INFO",
-            description: "Special tax adjustment",
+            description: "특수 세무조정",
             snapshot_id: snapshot.snapshot_id,
             metadata: json!({
                 "module": module_code,
@@ -1801,7 +1801,7 @@ async fn depreciation_items(
             items.push(PreparedIncomeItem {
                 section: "LOSS_DISALLOWANCE".to_string(),
                 item_code: format!("B4_{asset_code}"),
-                item_name: format!("{asset_name} depreciation limit excess"),
+                item_name: format!("{asset_name} 감가상각 한도초과"),
                 amount: addback,
                 direction: "ADD".to_string(),
                 disposition: "RESERVE".to_string(),
@@ -1834,7 +1834,7 @@ fn retirement_items(request: AssetBasedAdjustmentRequest) -> (Vec<PreparedIncome
             }
             .to_string(),
             item_code: "B5_RETIREMENT_LIMIT".to_string(),
-            item_name: "Retirement reserve limit adjustment".to_string(),
+            item_name: "퇴직급여충당금 한도 조정".to_string(),
             amount,
             direction: direction.to_string(),
             disposition: "RESERVE".to_string(),
@@ -1861,7 +1861,7 @@ fn bad_debt_items(request: AssetBasedAdjustmentRequest) -> (Vec<PreparedIncomeIt
         vec![PreparedIncomeItem {
             section: "LOSS_DISALLOWANCE".to_string(),
             item_code: "B6_BAD_DEBT_LIMIT".to_string(),
-            item_name: "Bad debt reserve limit excess".to_string(),
+            item_name: "대손충당금 한도초과".to_string(),
             amount: addback,
             direction: "ADD".to_string(),
             disposition: "RESERVE".to_string(),
@@ -1926,7 +1926,7 @@ async fn business_vehicle_items(
             items.push(PreparedIncomeItem {
                 section: "LOSS_DISALLOWANCE".to_string(),
                 item_code: format!("B10_{asset_code}"),
-                item_name: format!("{asset_name} business vehicle limit excess"),
+                item_name: format!("{asset_name} 업무용승용차 한도초과"),
                 amount: addback,
                 direction: "ADD".to_string(),
                 disposition: "RESERVE".to_string(),
@@ -2047,11 +2047,11 @@ async fn donation_adjustment_items(
         items.push(PreparedIncomeItem {
             section: "LOSS_DISALLOWANCE".to_string(),
             item_code: "B2_SPECIAL_DONATION_EXCESS".to_string(),
-            item_name: "Special donation limit excess".to_string(),
+            item_name: "특례기부금 한도초과".to_string(),
             amount: special_excess,
             direction: "ADD".to_string(),
             disposition: "RESERVE".to_string(),
-            law_ref: Some("CIT donation limit".to_string()),
+            law_ref: Some("법인세법 기부금 한도".to_string()),
             metadata: json!({
                 "carryforward_donation_type": "SPECIAL",
                 "carryforward_years": carryforward_years
@@ -2062,11 +2062,11 @@ async fn donation_adjustment_items(
         items.push(PreparedIncomeItem {
             section: "LOSS_DISALLOWANCE".to_string(),
             item_code: "B2_GENERAL_DONATION_EXCESS".to_string(),
-            item_name: "General donation limit excess".to_string(),
+            item_name: "일반기부금 한도초과".to_string(),
             amount: general_excess,
             direction: "ADD".to_string(),
             disposition: "RESERVE".to_string(),
-            law_ref: Some("CIT donation limit".to_string()),
+            law_ref: Some("법인세법 기부금 한도".to_string()),
             metadata: json!({
                 "carryforward_donation_type": "GENERAL",
                 "carryforward_years": carryforward_years
@@ -2077,11 +2077,11 @@ async fn donation_adjustment_items(
         items.push(PreparedIncomeItem {
             section: "LOSS_INCLUSION".to_string(),
             item_code: "B2_PRIOR_CARRYFORWARD_USED".to_string(),
-            item_name: "Prior donation carryforward used".to_string(),
+            item_name: "전기 이월기부금 사용".to_string(),
             amount: special_prior_used + general_prior_used,
             direction: "DEDUCT".to_string(),
             disposition: "OTHER".to_string(),
-            law_ref: Some("CIT donation carryforward".to_string()),
+            law_ref: Some("법인세법 기부금 이월공제".to_string()),
             metadata: json!({
                 "special_used": special_prior_used,
                 "general_used": general_prior_used
@@ -2161,11 +2161,11 @@ async fn entertainment_adjustment_items(
         items.push(PreparedIncomeItem {
             section: "LOSS_DISALLOWANCE".to_string(),
             item_code: "B3_NO_CARD_DISALLOWANCE".to_string(),
-            item_name: "Entertainment expense without qualified evidence".to_string(),
+            item_name: "적격증빙 없는 접대비".to_string(),
             amount: no_card_disallowed,
             direction: "ADD".to_string(),
             disposition: "OUTFLOW".to_string(),
-            law_ref: Some("CIT entertainment evidence rule".to_string()),
+            law_ref: Some("법인세법 접대비 증빙 규정".to_string()),
             metadata: json!({ "non_card_amount": non_card, "disallow_bps": no_card_bps }),
         });
     }
@@ -2173,11 +2173,11 @@ async fn entertainment_adjustment_items(
         items.push(PreparedIncomeItem {
             section: "LOSS_DISALLOWANCE".to_string(),
             item_code: "B3_ENTERTAINMENT_LIMIT_EXCESS".to_string(),
-            item_name: "Entertainment expense limit excess".to_string(),
+            item_name: "접대비 한도초과".to_string(),
             amount: limit_excess,
             direction: "ADD".to_string(),
             disposition: "OUTFLOW".to_string(),
-            law_ref: Some("CIT entertainment limit".to_string()),
+            law_ref: Some("법인세법 접대비 한도".to_string()),
             metadata: json!({ "tax_limit": tax_limit }),
         });
     }
@@ -2237,37 +2237,37 @@ async fn interest_adjustment_items(
     let buckets = [
         (
             "B9_UNKNOWN_CREDITOR",
-            "Interest paid to unidentified creditor",
+            "채권자 불분명 지급이자",
             unknown_creditor,
             "UNKNOWN_CREDITOR",
         ),
         (
             "B9_UNKNOWN_RECIPIENT",
-            "Interest paid to unidentified recipient",
+            "수령자 불분명 지급이자",
             unknown_recipient,
             "UNKNOWN_RECIPIENT",
         ),
         (
             "B9_CONSTRUCTION_INTEREST",
-            "Construction financing interest",
+            "건설자금이자",
             construction,
             "CONSTRUCTION",
         ),
         (
             "B9_NON_BUSINESS_INTEREST",
-            "Non-business asset related interest",
+            "업무무관자산 관련 지급이자",
             non_business,
             "NON_BUSINESS",
         ),
         (
             "B9_DEEMED_LOAN_INTEREST",
-            "Deemed interest from weighted loan balance",
+            "가중평균 차입금 인정이자",
             deemed_interest,
             "WEIGHTED_AVERAGE_LOAN",
         ),
         (
             "B9_MANUAL_DISALLOWANCE",
-            "Manual interest disallowance",
+            "수동 지급이자 손금불산입",
             manual,
             "MANUAL",
         ),
@@ -2282,7 +2282,7 @@ async fn interest_adjustment_items(
             amount,
             direction: "ADD".to_string(),
             disposition: "OUTFLOW".to_string(),
-            law_ref: Some("CIT interest expense disallowance".to_string()),
+            law_ref: Some("법인세법 지급이자 손금불산입".to_string()),
             metadata: json!({ "interest_type": interest_type }),
         })
         .collect::<Vec<_>>();
@@ -2378,7 +2378,7 @@ async fn valuation_adjustment_items(
                 amount: adjustment.abs(),
                 direction: direction.to_string(),
                 disposition: "RESERVE".to_string(),
-                law_ref: Some("CIT valuation rule".to_string()),
+                law_ref: Some("법인세법 평가 규정".to_string()),
                 metadata: json!({
                     "valuation_method": method,
                     "monetary": monetary,
@@ -2447,11 +2447,11 @@ async fn loss_carryforward_items(
         vec![PreparedIncomeItem {
             section: "LOSS_INCLUSION".to_string(),
             item_code: "B11_LOSS_CARRYFORWARD_DEDUCTION".to_string(),
-            item_name: "Loss carryforward deduction".to_string(),
+            item_name: "이월결손금 공제".to_string(),
             amount: deducted,
             direction: "DEDUCT".to_string(),
             disposition: "OTHER".to_string(),
-            law_ref: Some("CIT loss carryforward rule".to_string()),
+            law_ref: Some("법인세법 이월결손금 공제 규정".to_string()),
             metadata: json!({ "allocations": allocations }),
         }]
     } else {
@@ -2498,7 +2498,7 @@ async fn capital_reserve_items(
                     .unwrap_or("RESERVE")
             ),
             item_name: format!(
-                "{} reserve rollforward",
+                "{} 유보 변동",
                 row.get("source_module")
                     .and_then(Value::as_str)
                     .unwrap_or("MODULE")
@@ -2506,7 +2506,7 @@ async fn capital_reserve_items(
             amount: row.get("amount").and_then(Value::as_i64).unwrap_or(0),
             direction: "INFO".to_string(),
             disposition: "INTERNAL".to_string(),
-            law_ref: Some("Capital and reserve schedule".to_string()),
+            law_ref: Some("자본금과 적립금 조정명세".to_string()),
             metadata: row.clone(),
         })
         .collect::<Vec<_>>();
@@ -2518,7 +2518,7 @@ async fn capital_reserve_items(
             amount: change.amount,
             direction: "INFO".to_string(),
             disposition: "INTERNAL".to_string(),
-            law_ref: Some("Capital change".to_string()),
+            law_ref: Some("자본 변동".to_string()),
             metadata: json!({
                 "change_date": change.change_date,
                 "description": change.description
@@ -2585,11 +2585,11 @@ async fn tax_credit_items(
             items.push(PreparedIncomeItem {
                 section: "TAX_CREDIT".to_string(),
                 item_code: format!("B12_{credit_type}"),
-                item_name: format!("{credit_type} tax credit"),
+                item_name: format!("{credit_type} 세액공제"),
                 amount: allowed,
                 direction: "DEDUCT".to_string(),
                 disposition: "OTHER".to_string(),
-                law_ref: Some("CIT tax credit rule".to_string()),
+                law_ref: Some("법인세법 세액공제 규정".to_string()),
                 metadata: json!({ "requested_amount": requested, "rate_bps": rate_bps }),
             });
         }
@@ -2646,11 +2646,11 @@ async fn minimum_tax_items(
         vec![PreparedIncomeItem {
             section: "MINIMUM_TAX".to_string(),
             item_code: "B13_MINIMUM_TAX_ADDITIONAL".to_string(),
-            item_name: "Minimum tax additional amount".to_string(),
+            item_name: "최저한세 추가세액".to_string(),
             amount: additional_tax,
             direction: "ADD".to_string(),
             disposition: "OTHER".to_string(),
-            law_ref: Some("CIT minimum tax rule".to_string()),
+            law_ref: Some("법인세법 최저한세 규정".to_string()),
             metadata: json!({ "minimum_tax": minimum_tax, "regular_tax": regular_tax }),
         }]
     } else {
@@ -2699,11 +2699,11 @@ async fn penalty_tax_items(
             items.push(PreparedIncomeItem {
                 section: "PENALTY_TAX".to_string(),
                 item_code: format!("B14_{penalty_type}"),
-                item_name: format!("{penalty_type} penalty tax"),
+                item_name: format!("{penalty_type} 가산세"),
                 amount,
                 direction: "ADD".to_string(),
                 disposition: "OTHER".to_string(),
-                law_ref: Some("Penalty tax rule".to_string()),
+                law_ref: Some("가산세 규정".to_string()),
                 metadata: json!({ "reduction_bps": reduction_bps }),
             });
         }
@@ -2766,11 +2766,11 @@ async fn foreign_corporation_items(
         items.push(PreparedIncomeItem {
             section: "FOREIGN_CORPORATION".to_string(),
             item_code: "B16_DOMESTIC_SOURCE_INCOME".to_string(),
-            item_name: "Domestic source income allocated to PE".to_string(),
+            item_name: "국내사업장 귀속 국내원천소득".to_string(),
             amount: taxable_income,
             direction: "ADD".to_string(),
             disposition: "OTHER".to_string(),
-            law_ref: Some("Foreign corporation domestic source income".to_string()),
+            law_ref: Some("외국법인 국내원천소득 규정".to_string()),
             metadata: json!({ "income_count": details.len() }),
         });
     }
@@ -2844,11 +2844,11 @@ async fn consolidated_tax_items(
     let items = vec![PreparedIncomeItem {
         section: "CONSOLIDATED_TAX".to_string(),
         item_code: "B17_CONSOLIDATED_TAX_BASE".to_string(),
-        item_name: "Consolidated tax base after eliminations".to_string(),
+        item_name: "내부거래 제거 후 연결 과세표준".to_string(),
         amount: consolidated_tax_base,
         direction: "INFO".to_string(),
         disposition: "INTERNAL".to_string(),
-        law_ref: Some("Consolidated tax rule".to_string()),
+        law_ref: Some("연결납세 규정".to_string()),
         metadata: json!({ "entity_count": entities.len(), "elimination_total": elimination_total }),
     }];
     Ok((
@@ -4628,7 +4628,7 @@ pub async fn generate_form(
             old_data,
             new_data: form.data_json.clone(),
             changed_by: "system",
-            reason: Some("form engine generation"),
+            reason: Some("서식 엔진 생성"),
         },
     )
     .await?;
@@ -4693,7 +4693,7 @@ pub async fn update_form_data(
             &mut data_json,
             field,
             "manual",
-            Some("user override".to_string()),
+            Some("사용자 수동 수정".to_string()),
             true,
         )?;
     }
@@ -4920,24 +4920,25 @@ pub async fn generate_form_pdf(
         "AMENDED" => "AMENDED",
         _ => "DRAFT",
     };
-    let title = format!("CIT {form_code} {}", preview.form.form_code);
+    let watermark_label = pdf_status_label(watermark);
+    let title = format!("{} ({form_code})", form_display_name(form_code));
     let mut lines = vec![
-        format!("Tenant: {}", tenant.tenant_code),
-        format!("Business year id: {by_id}"),
-        format!("Status: {}", preview.form.status),
-        format!("Watermark: {watermark}"),
-        format!("Seal: CIT-{watermark}-{}", tenant.tenant_code),
+        format!("테넌트: {}", tenant.tenant_code),
+        format!("사업연도 ID: {by_id}"),
+        format!("상태: {}", pdf_status_label(&preview.form.status)),
+        format!("워터마크: {watermark_label}"),
+        format!("직인: CIT-{watermark}-{}", tenant.tenant_code),
     ];
     for field in &preview.fields {
         lines.push(format!(
-            "{} = {} [{}]",
+            "{} = {} [원천: {}]",
             field.label,
             pdf_value(&field.value),
             field.source
         ));
     }
     if !preview.validations.is_empty() {
-        lines.push("Validation issues:".to_string());
+        lines.push("검증 이슈:".to_string());
         for issue in &preview.validations {
             lines.push(format!(
                 "{} {} {}",
@@ -5101,22 +5102,44 @@ fn print_history_json(row: sqlx::postgres::PgRow) -> Value {
 
 fn form_attachment_catalog() -> &'static [(&'static str, &'static str)] {
     &[
-        ("FORM3", "Corporate tax base and tax adjustment"),
-        ("FORM15", "Income adjustment statement"),
-        ("FORM22", "Donation adjustment statement"),
-        ("FORM32", "Reserve rollforward statement"),
-        ("FORM50", "E-filing summary statement"),
-        ("ATT01", "Financial statement attachment"),
-        ("ATT02", "Asset register attachment"),
-        ("ATT03", "Transaction detail attachment"),
-        ("ATT04", "Vehicle usage attachment"),
-        ("ATT05", "Workflow approval attachment"),
-        ("ATT06", "Validation result attachment"),
-        ("ATT07", "Tax credit attachment"),
-        ("ATT08", "Loss carryforward attachment"),
-        ("ATT09", "Foreign income attachment"),
-        ("ATT10", "Consolidated tax attachment"),
+        ("FORM3", "법인세 과세표준 및 세액조정계산서"),
+        ("FORM15", "소득금액조정명세서"),
+        ("FORM22", "기부금 조정명세서"),
+        ("FORM32", "유보 변동 명세서"),
+        ("FORM50", "전자신고 요약 명세서"),
+        ("ATT01", "재무제표 첨부서식"),
+        ("ATT02", "자산대장 첨부서식"),
+        ("ATT03", "거래명세 첨부서식"),
+        ("ATT04", "업무용승용차 첨부서식"),
+        ("ATT05", "결재 승인 첨부서식"),
+        ("ATT06", "검증 결과 첨부서식"),
+        ("ATT07", "세액공제 첨부서식"),
+        ("ATT08", "이월결손금 첨부서식"),
+        ("ATT09", "국외소득 첨부서식"),
+        ("ATT10", "연결납세 첨부서식"),
     ]
+}
+
+fn form_display_name(form_code: &str) -> String {
+    form_attachment_catalog()
+        .iter()
+        .find_map(|(code, name)| (*code == form_code).then(|| (*name).to_string()))
+        .unwrap_or_else(|| form_code.to_string())
+}
+
+fn pdf_status_label(status: &str) -> &'static str {
+    match status {
+        "FILED" => "신고완료",
+        "APPROVED" => "승인완료",
+        "AMENDED" => "수정신고",
+        "REVIEWED" => "검토완료",
+        "IN_REVIEW" => "검토중",
+        "DRAFT" => "초안",
+        "ERROR" => "오류",
+        "WARN" => "경고",
+        "INFO" => "정보",
+        _ => "미정",
+    }
 }
 
 fn form_total_amount(data_json: &Value) -> i64 {
@@ -5168,31 +5191,40 @@ fn pdf_value(value: &Value) -> String {
 }
 
 fn render_simple_pdf(title: &str, lines: &[String], watermark: &str) -> Vec<u8> {
+    let watermark_label = pdf_status_label(watermark);
     let mut content_lines = vec![
         "BT".to_string(),
         "/F1 18 Tf".to_string(),
         "50 792 Td".to_string(),
-        format!("({}) Tj", escape_pdf_text(title)),
+        format!("<{}> Tj", pdf_text_hex(title)),
         "/F1 10 Tf".to_string(),
         "0 -18 Td".to_string(),
-        format!("(Watermark: {}) Tj", escape_pdf_text(watermark)),
+        format!(
+            "<{}> Tj",
+            pdf_text_hex(&format!("워터마크: {watermark_label}"))
+        ),
     ];
     let max_lines = 48;
     for line in lines.iter().take(max_lines) {
         content_lines.push("0 -14 Td".to_string());
-        content_lines.push(format!("({}) Tj", escape_pdf_text(line)));
+        content_lines.push(format!("<{}> Tj", pdf_text_hex(line)));
     }
     if lines.len() > max_lines {
         content_lines.push("0 -14 Td".to_string());
-        content_lines.push(format!("(... {} more lines) Tj", lines.len() - max_lines));
+        content_lines.push(format!(
+            "<{}> Tj",
+            pdf_text_hex(&format!("외 {}행 더 있음", lines.len() - max_lines))
+        ));
     }
     content_lines.push("ET".to_string());
     let content = content_lines.join("\n");
     let objects = [
         "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".to_string(),
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 7 0 R >>".to_string(),
+        "<< /Type /Font /Subtype /Type0 /BaseFont /HYGoThic-Medium /Encoding /UniKS-UCS2-H /DescendantFonts [5 0 R] >>".to_string(),
+        "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /HYGoThic-Medium /CIDSystemInfo << /Registry (Adobe) /Ordering (Korea1) /Supplement 2 >> /FontDescriptor 6 0 R >>".to_string(),
+        "<< /Type /FontDescriptor /FontName /HYGoThic-Medium /Flags 4 /FontBBox [0 -120 1000 880] /ItalicAngle 0 /Ascent 880 /Descent -120 /CapHeight 880 /StemV 80 >>".to_string(),
         format!(
             "<< /Length {} >>\nstream\n{}\nendstream",
             content.len(),
@@ -5224,20 +5256,16 @@ fn render_simple_pdf(title: &str, lines: &[String], watermark: &str) -> Vec<u8> 
     bytes
 }
 
-fn escape_pdf_text(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_graphic() || character == ' ' {
-                character
-            } else {
-                '?'
-            }
-        })
-        .flat_map(|character| match character {
-            '(' | ')' | '\\' => vec!['\\', character],
-            _ => vec![character],
-        })
+fn pdf_text_hex(value: &str) -> String {
+    let mut bytes = Vec::with_capacity(2 + value.len() * 2);
+    bytes.extend_from_slice(&[0xFE, 0xFF]);
+    for unit in value.encode_utf16() {
+        bytes.push((unit >> 8) as u8);
+        bytes.push(unit as u8);
+    }
+    bytes
+        .into_iter()
+        .map(|byte| format!("{byte:02X}"))
         .collect()
 }
 
@@ -5331,7 +5359,7 @@ fn build_form_payload(form_code: &str, summary: &Value, snapshot_id: i64) -> Res
                 &mut payload,
                 field,
                 "auto",
-                Some("tax adjustment summary".to_string()),
+                Some("세무조정 요약".to_string()),
                 true,
             )?;
         }
@@ -5651,7 +5679,7 @@ fn form_field_label(field: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{calculate_corporate_tax, minimum_tax_extra_due};
+    use super::{calculate_corporate_tax, minimum_tax_extra_due, pdf_text_hex, render_simple_pdf};
     use crate::domain::TaxRate;
     use chrono::NaiveDate;
     use serde_json::json;
@@ -5694,5 +5722,18 @@ mod tests {
         for (regular_tax, tax_base, bps, expected) in cases {
             assert_eq!(minimum_tax_extra_due(regular_tax, tax_base, bps), expected);
         }
+    }
+
+    #[test]
+    fn simple_pdf_preserves_korean_text_with_cid_font() {
+        let pdf = render_simple_pdf(
+            "법인세 서식",
+            &["과세표준 = 100000000".to_string()],
+            "DRAFT",
+        );
+        let rendered = String::from_utf8_lossy(&pdf);
+        assert!(rendered.contains("/UniKS-UCS2-H"));
+        assert!(rendered.contains(&format!("<{}> Tj", pdf_text_hex("법인세 서식"))));
+        assert!(rendered.contains(&format!("<{}> Tj", pdf_text_hex("과세표준 = 100000000"))));
     }
 }

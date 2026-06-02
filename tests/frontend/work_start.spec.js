@@ -11,13 +11,24 @@ function bodyOf(name) {
   return screens.slice(start, next > start ? next : undefined);
 }
 
-const workStart = bodyOf("renderWorkStart");
+const customerPick = bodyOf("renderWorkStartCustomerPick");
+const businessYearPick = bodyOf("renderWorkStartBusinessYearPick");
+const snapshotPick = bodyOf("renderWorkStartSnapshot");
+const workStartLoader = screens.slice(screens.indexOf("async function loadWorkStartData(env)"), screens.indexOf("\nfunction renderWorkStartHeader", screens.indexOf("async function loadWorkStartData(env)")));
+const workStartCombined = `${workStartLoader}\n${customerPick}\n${businessYearPick}\n${snapshotPick}`;
 
 for (const snippet of [
   'data-stage="work-start"',
+  'data-work-start-stage="customer-pick"',
+  'data-work-start-stage="business-year-pick"',
+  'data-work-start-stage="snapshot"',
+  'data-leaf-key="ws/start:customer-pick"',
+  'data-leaf-key="ws/start:by-pick"',
+  'data-leaf-key="ws/start:snapshot"',
   'request(`${root}/customers`)',
   'request(`${root}/business-years`)',
   'id="workStartSearch"',
+  'data-select-customer',
   'data-select-by',
   'id="customerForm"',
   'request(`${root}/customers`, {',
@@ -26,9 +37,11 @@ for (const snippet of [
   'id="byCarryForwardSource"',
   'id="snapshotPreview"',
   "refreshContextFromBy(env, by, customer)",
-  'env.navigate("ws-info"',
+  'env.navigate("ws/start:by-pick"',
+  'env.navigate("ws/start:snapshot"',
+  'data-next-leaf="ws/info:fs"',
 ]) {
-  assert(workStart.includes(snippet), `renderWorkStart must include ${snippet}`);
+  assert(workStartCombined.includes(snippet), `work-start screens must include ${snippet}`);
 }
 
 assert(screens.includes("syncCarryForwardOptions()"), "work-start screen must synchronize carryforward candidates");
@@ -49,10 +62,10 @@ for (const key of [
 }
 
 assert(
-  screens.includes('"ws/start:customer-pick": (env) => renderWorkStartLeaf(env)') &&
-    screens.includes('"ws/start:by-pick": (env) => renderWorkStartLeaf(env)') &&
-    screens.includes('"ws/start:snapshot": (env) => renderWorkStartLeaf(env)'),
-  "all work-start active routes must dispatch to the work-start renderer"
+  screens.includes('"ws/start:customer-pick": (env) => renderWorkStartCustomerPick(env)') &&
+    screens.includes('"ws/start:by-pick": (env) => renderWorkStartBusinessYearPick(env)') &&
+    screens.includes('"ws/start:snapshot": (env) => renderWorkStartSnapshot(env)'),
+  "all work-start active routes must dispatch to dedicated work-start screens"
 );
 
 console.log("frontend work_start.spec.js passed");

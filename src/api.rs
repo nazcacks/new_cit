@@ -2665,15 +2665,15 @@ async fn download_business_year_efiling_file(
 
 async fn list_admin_functions_v13() -> Json<Value> {
     Json(json!([
-        {"function_code": "READ", "label": "Read", "enabled": true},
-        {"function_code": "CREATE", "label": "Create", "enabled": true},
-        {"function_code": "UPDATE", "label": "Update", "enabled": true},
-        {"function_code": "CALCULATE", "label": "Calculate", "enabled": true},
-        {"function_code": "APPROVE", "label": "Approve", "enabled": true},
-        {"function_code": "PRINT", "label": "Print", "enabled": true},
-        {"function_code": "EFILE", "label": "E-file", "enabled": true},
-        {"function_code": "MASK_OFF", "label": "Mask off", "enabled": true},
-        {"function_code": "DELEGATE", "label": "Delegate", "enabled": true}
+        {"function_code": "READ", "label": "조회", "label_en": "Read", "enabled": true},
+        {"function_code": "CREATE", "label": "생성", "label_en": "Create", "enabled": true},
+        {"function_code": "UPDATE", "label": "수정", "label_en": "Update", "enabled": true},
+        {"function_code": "CALCULATE", "label": "계산", "label_en": "Calculate", "enabled": true},
+        {"function_code": "APPROVE", "label": "승인", "label_en": "Approve", "enabled": true},
+        {"function_code": "PRINT", "label": "출력", "label_en": "Print", "enabled": true},
+        {"function_code": "EFILE", "label": "전자신고", "label_en": "E-file", "enabled": true},
+        {"function_code": "MASK_OFF", "label": "마스킹 해제", "label_en": "Mask off", "enabled": true},
+        {"function_code": "DELEGATE", "label": "위임", "label_en": "Delegate", "enabled": true}
     ]))
 }
 
@@ -2685,7 +2685,9 @@ async fn get_field_masking_policies() -> Json<Value> {
 }
 
 async fn update_field_masking_policies(Json(payload): Json<Value>) -> Json<Value> {
-    Json(json!({"updated": true, "resource": "field-masking", "payload": payload}))
+    Json(
+        json!({"updated": true, "resource": "필드 마스킹", "resource_en": "field-masking", "payload": payload}),
+    )
 }
 
 async fn get_data_scope_policies() -> Json<Value> {
@@ -2696,7 +2698,9 @@ async fn get_data_scope_policies() -> Json<Value> {
 }
 
 async fn update_data_scope_policies(Json(payload): Json<Value>) -> Json<Value> {
-    Json(json!({"updated": true, "resource": "data-scope", "payload": payload}))
+    Json(
+        json!({"updated": true, "resource": "데이터 범위", "resource_en": "data-scope", "payload": payload}),
+    )
 }
 
 async fn list_customer_groups() -> Json<Value> {
@@ -2712,8 +2716,8 @@ async fn save_customer_group(Json(payload): Json<Value>) -> Json<Value> {
 
 async fn list_customer_rules() -> Json<Value> {
     Json(json!([
-        {"rule_id": 1, "condition": "industry_code starts 62", "access_level": "EDITOR"},
-        {"rule_id": 2, "condition": "region = Seoul", "access_level": "REVIEWER"}
+        {"rule_id": 1, "condition": "업종코드가 62로 시작", "condition_en": "industry_code starts 62", "access_level": "EDITOR"},
+        {"rule_id": 2, "condition": "지역 = 서울", "condition_en": "region = Seoul", "access_level": "REVIEWER"}
     ]))
 }
 
@@ -2733,7 +2737,7 @@ async fn save_admin_access_delegation(Json(payload): Json<Value>) -> Json<Value>
 
 async fn list_customer_access_overrides() -> Json<Value> {
     Json(json!([
-        {"override_id": 1, "customer_code": "CUST001", "access_level": "OWNER", "reason": "demo"}
+        {"override_id": 1, "customer_code": "CUST001", "access_level": "OWNER", "reason": "데모 사유", "reason_en": "demo"}
     ]))
 }
 
@@ -2757,7 +2761,7 @@ async fn list_permission_change_history_v13() -> Json<Value> {
 async fn list_system_settings_v13() -> Json<Value> {
     Json(json!([
         {"setting_key": "session_timeout_minutes", "setting_value": "60"},
-        {"setting_key": "efile_step_up", "setting_value": "enabled"}
+        {"setting_key": "efile_step_up", "setting_value": "사용", "setting_value_en": "enabled"}
     ]))
 }
 
@@ -2819,7 +2823,7 @@ async fn simulate_form_versioning_impact(Json(payload): Json<Value>) -> Json<Val
 
 async fn list_tax_agents(Path(tenant_code): Path<String>) -> Json<Value> {
     Json(json!([
-        {"tenant_code": tenant_code, "agent_id": 1, "agent_name": "EY Tax Agent", "status": "ACTIVE"}
+        {"tenant_code": tenant_code, "agent_id": 1, "agent_name": "EY 세무대리인", "status": "ACTIVE"}
     ]))
 }
 
@@ -2839,8 +2843,8 @@ async fn list_codes_v13(
         .cloned()
         .unwrap_or_else(|| "ALL".to_string());
     Json(json!([
-        {"tenant_code": tenant_code, "group": group, "code": "62010", "label": "Software development"},
-        {"tenant_code": tenant_code, "group": group, "code": "101", "label": "Cash"}
+        {"tenant_code": tenant_code, "group": group, "code": "62010", "label": "소프트웨어 개발"},
+        {"tenant_code": tenant_code, "group": group, "code": "101", "label": "현금"}
     ]))
 }
 
@@ -2865,7 +2869,8 @@ async fn run_leaf_action(
         "tenant_code": tenant_code,
         "leaf_key": payload.get("leaf_key").cloned().unwrap_or(Value::Null),
         "status": "OK",
-        "action": "executed",
+        "action": "실행됨",
+        "action_en": "executed",
         "payload": payload
     }))
 }
@@ -3064,8 +3069,8 @@ async fn get_custom_report_v13(Path((tenant_code, report_id)): Path<(String, i64
     Json(json!({
         "tenant_code": tenant_code,
         "report_id": report_id,
-        "columns": ["customer", "year", "tax_due"],
-        "rows": [{"customer": "Demo Corp", "year": 2026, "tax_due": 12000000}]
+        "columns": ["고객사", "연도", "납부세액"],
+        "rows": [{"customer": "데모 법인", "year": 2026, "tax_due": 12000000}]
     }))
 }
 
@@ -3178,8 +3183,8 @@ async fn get_amendment_version_mode(
         "amendment_reason": amendment["amendment_reason"].clone(),
         "version_mode": amendment["version_mode"].clone(),
         "versions": [
-            {"version": 1, "label": "filed", "locked": true},
-            {"version": 2, "label": "current", "locked": by.locked_at.is_some()}
+            {"version": 1, "label": "신고본", "label_en": "filed", "locked": true},
+            {"version": 2, "label": "현재본", "label_en": "current", "locked": by.locked_at.is_some()}
         ]
     })))
 }

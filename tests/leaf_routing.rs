@@ -70,6 +70,14 @@ async fn v13_leaf_routes_and_new_backend_routes_are_reachable() {
             body
         );
     }
+
+    let admin_functions = get_json(&client, &format!("{base_url}/api/admin/functions")).await;
+    assert_eq!(admin_functions[0]["label"], "조회");
+    assert_eq!(admin_functions[0]["label_en"], "Read");
+
+    let customer_rules = get_json(&client, &format!("{base_url}/api/admin/customer-rules")).await;
+    assert_eq!(customer_rules[0]["condition"], "업종코드가 62로 시작");
+    assert_eq!(customer_rules[0]["condition_en"], "industry_code starts 62");
 }
 
 struct RouteCase {

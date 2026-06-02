@@ -1,9 +1,9 @@
 import { escapeHtml, request, setTokenGetter, setUnauthorizedHandler } from "/app/api.js";
 import { clearContext, loadContext, saveContext } from "/app/context.js";
 import { loadLocale, routeLabelsFromMenu, saveLocale, t } from "/app/i18n.js";
-import { renderMenu, renderContextBadge, renderStateBadge, renderStepper, renderTenantSwitcher } from "/app/menu.js";
+import { displayText, renderMenu, renderContextBadge, renderStateBadge, renderStepper, renderTenantSwitcher } from "/app/menu.js";
 import { currentKey, navigate, onRouteChange } from "/app/router.js";
-import { routeMeta, renderScreen, refreshHealth } from "/app/screens.js";
+import { localizeTextValue, routeMeta, renderScreen, refreshHealth } from "/app/screens.js";
 
 applySmokeBootstrapFromQuery();
 
@@ -72,7 +72,7 @@ function showApp(auth) {
   renderStaticShell(state.locale);
   $("loginView").classList.add("hidden");
   $("appView").classList.remove("hidden");
-  $("signedTenant").textContent = `${auth.user.tenant_name} / ${auth.user.tenant_code}`;
+  renderSignedTenant();
   syncLanguageSelect();
   syncHealthLabel();
   renderTenantSwitcher($("tenantSwitcher"), state.auth, switchTenant, state.locale);
@@ -226,7 +226,7 @@ function syncTenantDatalist(extra = []) {
   const datalist = $("tenantSuggestions");
   if (datalist) {
     datalist.innerHTML = options
-      .map((item) => `<option value="${escapeHtml(item.tenant_code)}" label="${escapeHtml(item.tenant_name || item.tenant_code)}"></option>`)
+      .map((item) => `<option value="${escapeHtml(item.tenant_code)}" label="${escapeHtml(displayText(item.tenant_name || item.tenant_code, state.locale))}"></option>`)
       .join("");
   }
   const recent = $("recentTenants");
@@ -241,6 +241,13 @@ function syncTenantDatalist(extra = []) {
       });
     });
   }
+}
+
+function renderSignedTenant() {
+  const signedTenant = $("signedTenant");
+  if (!signedTenant || !state.auth?.user) return;
+  const user = state.auth.user;
+  signedTenant.textContent = `${displayText(user.tenant_name || "-", state.locale)} / ${user.tenant_code || "-"}`;
 }
 
 async function refreshTenantSuggestions() {
@@ -275,13 +282,15 @@ function applyLocale(locale) {
   renderStaticShell(state.locale);
   syncLanguageSelect();
   syncHealthLabel();
+  renderSignedTenant();
+  syncTenantDatalist();
   if (!state.auth) return;
   document.querySelector("[data-leaf-modal]")?.remove();
   renderTenantSwitcher($("tenantSwitcher"), state.auth, switchTenant, state.locale);
   renderStateBadge($("stateBadge"), state.workContext, state.locale);
   renderContextBadge($("contextBadge"), state.workContext, state.locale);
   renderRoute(currentKey()).catch((error) => {
-    $("cwk-route-outlet").innerHTML = `<section class="panel"><p class="empty">${error.message}</p></section>`;
+    $("cwk-route-outlet").innerHTML = `<section class="panel"><p class="empty">${escapeHtml(localizeTextValue(error.message, state.locale))}</p></section>`;
   });
 }
 
@@ -363,7 +372,7 @@ onRouteChange((key) => {
     return;
   }
   renderRoute(key).catch((error) => {
-    $("cwk-route-outlet").innerHTML = `<section class="panel"><p class="empty">${error.message}</p></section>`;
+    $("cwk-route-outlet").innerHTML = `<section class="panel"><p class="empty">${escapeHtml(localizeTextValue(error.message, state.locale))}</p></section>`;
   });
 });
 

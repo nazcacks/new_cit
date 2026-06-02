@@ -15,6 +15,16 @@ function bodyOf(name, prefix = "async function") {
 }
 
 const workInfo = bodyOf("renderWorkInfo(env)");
+const dedicatedTaxData = [
+  "renderWorkInfoFinancialStatements",
+  "renderWorkInfoAccountMapping",
+  "renderWorkInfoAssets",
+  "renderWorkInfoTransactions",
+  "renderWorkInfoVehicleUsage",
+  "renderWorkInfoConsistency",
+].map((name) => bodyOf(`${name}(env)`)).join("\n");
+const taxDataSupport = `${bodyOf("taxDataHeader(env, activeLeaf, title, description, validation)", "function")}\n${bodyOf("taxDataRouteForSource(source)", "function")}`;
+const dedicatedTaxDataAndSupport = `${dedicatedTaxData}\n${taxDataSupport}`;
 
 for (const snippet of [
   'data-workbench="tax-data"',
@@ -44,6 +54,36 @@ for (const snippet of [
 
 assert(screens.includes("function activateTaxDataTab(tab)"), "tax-data tabs must have an activation helper");
 assert(screens.includes("function sourceTabForIssue(issue)"), "validation issue source jump helper must exist");
+
+for (const snippet of [
+  'data-tax-data-stage="financial-statements"',
+  'data-tax-data-stage="account-mapping"',
+  'data-tax-data-stage="assets"',
+  'data-tax-data-stage="transactions"',
+  'data-tax-data-stage="vehicle-usage"',
+  'data-tax-data-stage="consistency"',
+  'data-leaf-key="ws/info:fs"',
+  'data-leaf-key="ws/info:mapping"',
+  'data-leaf-key="ws/info:assets"',
+  'data-leaf-key="ws/info:transactions"',
+  'data-leaf-key="ws/info:vehicle"',
+  'data-leaf-key="ws/info:consistency"',
+  'renderStageRouteButtons(activeLeaf, TAX_DATA_ROUTES, locale)',
+  'env.navigate(taxDataRouteForSource(button.dataset.sourceJump))',
+]) {
+  assert(dedicatedTaxDataAndSupport.includes(snippet), `dedicated tax-data screens must include ${snippet}`);
+}
+
+for (const dispatch of [
+  '"ws/info:fs": (env) => renderWorkInfoFinancialStatements(env)',
+  '"ws/info:mapping": (env) => renderWorkInfoAccountMapping(env)',
+  '"ws/info:assets": (env) => renderWorkInfoAssets(env)',
+  '"ws/info:transactions": (env) => renderWorkInfoTransactions(env)',
+  '"ws/info:vehicle": (env) => renderWorkInfoVehicleUsage(env)',
+  '"ws/info:consistency": (env) => renderWorkInfoConsistency(env)',
+]) {
+  assert(screens.includes(dispatch), `${dispatch} must dispatch to a dedicated tax-data screen`);
+}
 
 for (const key of [
   "taxData.title",

@@ -26,49 +26,60 @@ const workflowRendererContract = Object.fromEntries(
 );
 const dashboardRendererContract = {
   "dashboard:overview": "renderDashboard",
-  "dashboard:duesoon": "renderDashboard",
+  "dashboard:duesoon": "renderDashboardDueSoon",
+  "dashboard:inbox": "renderDashboardInbox",
+  "dashboard:recent": "renderDashboardRecent",
+  "dashboard:kpi-tax": "renderDashboardKpiTax",
+};
+const reportRendererContract = {
+  "report:year-compare": "renderYearCompare",
+  "report:tax-burden": "renderTaxBurden",
+  "report:reserve-trend": "renderReserveTrend",
+  "report:loss-expiry": "renderLossExpiryReport",
+  "report:industry-stats": "renderIndustryStatsReport",
+  "report:custom": "renderCustomReports",
 };
 const adminRendererContract = {
   "admin/tenant:list": "renderAdminTenantLeaf",
-  "admin/cust:list": "renderAdminCustomers",
-  "admin/cust:by-master": "renderAdminCustomers",
-  "admin/cust:agent": "renderAdminCustomers",
-  "admin/sec:users": "renderAdminRoles",
-  "admin/sec:roles": "renderAdminRoles",
-  "admin/sec:matrix": "renderAdminRoles",
-  "admin/sec:menus": "renderAdminMenus",
-  "admin/sec:functions": "renderAdminMenus",
-  "admin/sec:mask": "renderAdminRoles",
-  "admin/sec:scope": "renderAdminRoles",
-  "admin/cacc:assign": "renderAdminCustomerAccess",
-  "admin/cacc:groups": "renderAdminCustomerAccess",
-  "admin/cacc:rules": "renderAdminCustomerAccess",
-  "admin/cacc:delegate": "renderAdminCustomerAccess",
-  "admin/cacc:override": "renderAdminCustomerAccess",
-  "admin/law:master": "renderAdminLaw",
-  "admin/law:rates": "renderAdminLaw",
-  "admin/law:limits": "renderAdminLaw",
-  "admin/law:credits": "renderAdminLaw",
-  "admin/law:depr-lives": "renderAdminLaw",
-  "admin/law:sme": "renderAdminLaw",
-  "admin/law:loss-rule": "renderAdminLaw",
-  "admin/law:snapshots": "renderAdminLaw",
-  "admin/law:impact": "renderAdminLaw",
-  "admin/law:history": "renderAdminLaw",
-  "admin/form:master": "renderAdminForms",
-  "admin/form:versions": "renderAdminForms",
-  "admin/form:fields": "renderAdminForms",
-  "admin/form:validations": "renderAdminForms",
-  "admin/form:linkage-rule": "renderAdminForms",
-  "admin/form:migration": "renderAdminForms",
-  "admin/form:efile-map": "renderAdminForms",
-  "admin/form:by-set": "renderAdminForms",
-  "admin/form:impact": "renderAdminForms",
-  "admin/code:manage": "renderLeafScreen",
-  "admin/audit:events": "renderAdminAudit",
-  "admin/audit:login": "renderAdminAudit",
-  "admin/audit:perm": "renderAdminAudit",
-  "admin/audit:settings": "renderAdminAudit",
+  "admin/cust:list": "renderAdminCustomerList",
+  "admin/cust:by-master": "renderAdminBusinessYearMaster",
+  "admin/cust:agent": "renderAdminTaxAgentContracts",
+  "admin/sec:users": "renderAdminUsers",
+  "admin/sec:roles": "renderAdminRoleCatalog",
+  "admin/sec:matrix": "renderAdminPermissionMatrix",
+  "admin/sec:menus": "renderAdminMenuManagement",
+  "admin/sec:functions": "renderAdminFunctionCatalog",
+  "admin/sec:mask": "renderAdminFieldMasking",
+  "admin/sec:scope": "renderAdminDataScope",
+  "admin/cacc:assign": "renderAdminCustomerAssignment",
+  "admin/cacc:groups": "renderAdminCustomerGroups",
+  "admin/cacc:rules": "renderAdminCustomerRules",
+  "admin/cacc:delegate": "renderAdminCustomerDelegation",
+  "admin/cacc:override": "renderAdminCustomerOverrides",
+  "admin/law:master": "renderAdminLawMaster",
+  "admin/law:rates": "renderAdminTaxRates",
+  "admin/law:limits": "renderAdminLawLimits",
+  "admin/law:credits": "renderAdminLawCredits",
+  "admin/law:depr-lives": "renderAdminLawDepreciationLives",
+  "admin/law:sme": "renderAdminLawSmeCriteria",
+  "admin/law:loss-rule": "renderAdminLawLossRules",
+  "admin/law:snapshots": "renderAdminLawSnapshots",
+  "admin/law:impact": "renderAdminLawImpact",
+  "admin/law:history": "renderAdminLawHistory",
+  "admin/form:master": "renderAdminFormMaster",
+  "admin/form:versions": "renderAdminFormVersions",
+  "admin/form:fields": "renderAdminFormFields",
+  "admin/form:validations": "renderAdminFormValidations",
+  "admin/form:linkage-rule": "renderAdminFormLinkageRules",
+  "admin/form:migration": "renderAdminFormMigration",
+  "admin/form:efile-map": "renderAdminFormEfileMap",
+  "admin/form:by-set": "renderAdminFormBySet",
+  "admin/form:impact": "renderAdminFormImpact",
+  "admin/code:manage": "renderAdminCodes",
+  "admin/audit:events": "renderAdminAuditEvents",
+  "admin/audit:login": "renderAdminLoginHistory",
+  "admin/audit:perm": "renderAdminPermissionChangeHistory",
+  "admin/audit:settings": "renderAdminSystemSettingsAudit",
 };
 const screenKeys = [...objectBlock("screenByLeaf").matchAll(/^\s*"([^"]+)": \(env\) => (.+)$/gm)]
   .map((match) => {
@@ -84,19 +95,79 @@ const screenKeys = [...objectBlock("screenByLeaf").matchAll(/^\s*"([^"]+)": \(en
         `dashboard leaf ${match[1]} must use ${dashboardRendererContract[match[1]]}`
       );
       assert(!match[2].includes("renderLeafScreen"), `dashboard leaf ${match[1]} must not use generic renderer`);
+    } else if (reportRendererContract[match[1]]) {
+      assert(
+        match[2].includes(`${reportRendererContract[match[1]]}(env)`),
+        `report leaf ${match[1]} must use ${reportRendererContract[match[1]]}`
+      );
+      assert(!match[2].includes("renderLeafScreen"), `report leaf ${match[1]} must not use generic renderer`);
     } else if (adminRendererContract[match[1]] && adminRendererContract[match[1]] !== "renderLeafScreen") {
       assert(
         match[2].includes(`${adminRendererContract[match[1]]}(env)`),
         `admin leaf ${match[1]} must use ${adminRendererContract[match[1]]}`
       );
       assert(!match[2].includes("renderLeafScreen"), `admin leaf ${match[1]} must not use generic renderer`);
-    } else if (match[1] !== "admin/tenant:list") {
-      assert(match[2].includes(`renderLeafScreen(env, "${match[1]}")`), `screenByLeaf registration mismatch for ${match[1]}`);
     } else {
-      assert(match[2].includes("renderAdminTenantLeaf(env)"), "admin/tenant:list must use tenant CRUD renderer");
+      assert.fail(`leaf ${match[1]} must be assigned to a dedicated renderer`);
     }
     return match[1];
   });
+
+assert(!objectBlock("screenByLeaf").includes("renderLeafScreen"), "screenByLeaf must not dispatch active menu leaves to the generic renderer");
+
+for (const signature of [
+  'data-dashboard="duesoon"',
+  'data-dashboard="inbox"',
+  'data-dashboard="recent"',
+  'data-dashboard="kpi-tax"',
+  'data-admin-stage="security-users"',
+  'data-admin-stage="security-roles"',
+  'data-admin-stage="security-matrix"',
+  'data-admin-stage="security-mask"',
+  'data-admin-stage="security-scope"',
+  'data-admin-stage="customer-list"',
+  'data-admin-stage="business-year-master"',
+  'data-admin-stage="tax-agent-contracts"',
+  'data-admin-stage="menu-management"',
+  'data-admin-stage="function-catalog"',
+  'data-admin-stage="customer-access-assign"',
+  'data-admin-stage="customer-access-groups"',
+  'data-admin-stage="customer-access-rules"',
+  'data-admin-stage="customer-access-delegate"',
+  'data-admin-stage="customer-access-override"',
+  'data-admin-stage="law-master"',
+  'data-admin-stage="law-rates"',
+  'stage: "law-limits"',
+  'stage: "law-credits"',
+  'stage: "law-depr-lives"',
+  'stage: "law-sme"',
+  'stage: "law-loss-rule"',
+  'data-admin-stage="law-snapshots"',
+  'data-admin-stage="law-impact"',
+  'data-admin-stage="law-history"',
+  'data-admin-stage="form-master"',
+  'data-admin-stage="form-versions"',
+  'data-admin-stage="form-fields"',
+  'data-admin-stage="form-validations"',
+  'data-admin-stage="form-linkage-rule"',
+  'data-admin-stage="form-migration"',
+  'data-admin-stage="form-efile-map"',
+  'data-admin-stage="form-by-set"',
+  'data-admin-stage="form-impact"',
+  'data-admin-stage="audit-events"',
+  'data-admin-stage="audit-login"',
+  'data-admin-stage="audit-permission"',
+  'data-admin-stage="audit-settings"',
+  'data-report-leaf="year-compare"',
+  'data-report-leaf="tax-burden"',
+  'data-report-leaf="reserve-trend"',
+  'data-report-leaf="loss-expiry"',
+  'data-report-leaf="industry-stats"',
+  'data-report-leaf="custom"',
+  'data-admin-stage="codes"',
+]) {
+  assert(screens.includes(signature), `${signature} must identify a dedicated menu screen`);
+}
 
 assert.strictEqual(routes.length, 100, "leafRoutes must expose 100 active leaves");
 assert.strictEqual(specKeys.length, 100, "leafScreenSpecs must expose 100 active leaves");

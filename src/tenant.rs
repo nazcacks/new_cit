@@ -1346,29 +1346,17 @@ async fn insert_workflow_notification(
     actor: &str,
 ) -> Result<()> {
     let (title, message, severity) = match to_status {
-        "IN_REVIEW" => (
-            "Approval requested",
-            "A business year is waiting for approval",
-            "INFO",
-        ),
-        "APPROVED" => (
-            "Approval completed",
-            "All approval lines are approved",
-            "INFO",
-        ),
+        "IN_REVIEW" => ("결재 요청", "사업연도가 결재 대기 중입니다.", "INFO"),
+        "APPROVED" => ("결재 완료", "모든 결재선이 승인되었습니다.", "INFO"),
         "DRAFT" => (
-            "Approval returned",
-            "Approval was returned to draft",
+            "결재 반려",
+            "결재가 반려되어 작성 단계로 돌아갔습니다.",
             "WARN",
         ),
-        "FILED" => (
-            "Filing completed",
-            "The business year has been filed and locked",
-            "INFO",
-        ),
+        "FILED" => ("신고 완료", "사업연도 신고가 완료되어 잠겼습니다.", "INFO"),
         "AMENDED" => (
-            "Amendment opened",
-            "The filed business year was unlocked for amendment",
+            "수정신고 시작",
+            "신고 완료된 사업연도가 수정신고용으로 열렸습니다.",
             "WARN",
         ),
         _ => return Ok(()),
@@ -1549,18 +1537,15 @@ pub async fn dashboard_recent_activities(
              AND u.login_id = al.changed_by
             LEFT JOIN {schema}.business_years by_log
               ON al.table_name = 'business_years'
-             AND al.record_id ~ '^[0-9]+$'
-             AND by_log.by_id = al.record_id::BIGINT
+             AND by_log.by_id = CASE WHEN al.record_id ~ '^[0-9]+$' THEN al.record_id::BIGINT END
             LEFT JOIN {schema}.customers customer_by
               ON customer_by.customer_id = by_log.customer_id
             LEFT JOIN {schema}.customers customer_log
               ON al.table_name = 'customers'
-             AND al.record_id ~ '^[0-9]+$'
-             AND customer_log.customer_id = al.record_id::BIGINT
+             AND customer_log.customer_id = CASE WHEN al.record_id ~ '^[0-9]+$' THEN al.record_id::BIGINT END
             LEFT JOIN {schema}.notifications notification_log
               ON al.table_name = 'notifications'
-             AND al.record_id ~ '^[0-9]+$'
-             AND notification_log.notification_id = al.record_id::BIGINT
+             AND notification_log.notification_id = CASE WHEN al.record_id ~ '^[0-9]+$' THEN al.record_id::BIGINT END
             LEFT JOIN {schema}.business_years by_notification
               ON by_notification.by_id = notification_log.by_id
             LEFT JOIN {schema}.customers customer_notification
@@ -1732,13 +1717,13 @@ fn dashboard_activity_descriptor(
             "NOTIFICATION_UPDATED",
             "알림 변경",
             "알림 상태 변경",
-            "rp-alerts",
+            "dashboard:inbox",
         ),
         _ => activity_descriptor(
             "AUDIT_EVENT",
             "업무 변경",
             &format!("{} {}", table_name, action),
-            "ad-audit",
+            "admin/audit:events",
         ),
     }
 }
@@ -1956,7 +1941,7 @@ pub async fn dashboard_notifications(
             COALESCE(
                 n.metadata->>'route_key',
                 CASE
-                    WHEN n.by_id IS NULL THEN 'rp-alerts'
+                    WHEN n.by_id IS NULL THEN 'dashboard:inbox'
                     WHEN b.status = 'IN_REVIEW' AND EXISTS (
                         SELECT 1
                         FROM {schema}.approval_lines al
@@ -2953,10 +2938,10 @@ pub async fn dashboard_loss_expiry_kpi(
 
 fn industry_display_name(industry_code: &str) -> &'static str {
     match industry_code {
-        "62010" => "Software development",
-        "101" => "Cash",
-        "UNSPECIFIED" => "Unspecified",
-        _ => "Other",
+        "62010" => "소프트웨어 개발",
+        "101" => "현금",
+        "UNSPECIFIED" => "미지정",
+        _ => "기타",
     }
 }
 
@@ -3274,14 +3259,14 @@ pub async fn business_year_progress(
     let progress = progress_for_status(&by.status);
     let active_index = active_step_index(&by.status);
     let steps = [
-        ("ws-start", "0. Start", "ws/start:customer-pick", 0),
-        ("ws-info", "1. Input", "ws/info:fs", 20),
-        ("ws-adj", "2. Adjust", "ws/adj:B1", 45),
-        ("ws-form", "3. Forms", "ws/form:form3", 60),
-        ("ws-val", "4. Validate", "ws/val:run", 70),
-        ("ws-appr", "5. Approve", "ws/appr:request", 85),
-        ("ws-print", "6. Print", "ws/print:preview", 92),
-        ("ws-file", "7. E-file", "ws/file:precheck", 100),
+        ("ws-start", "0. 작업 시작", "ws/start:customer-pick", 0),
+        ("ws-info", "1. 세무정보 입력", "ws/info:fs", 20),
+        ("ws-adj", "2. 세무조정", "ws/adj:B1", 45),
+        ("ws-form", "3. 서식 작성", "ws/form:form3", 60),
+        ("ws-val", "4. 검증", "ws/val:run", 70),
+        ("ws-appr", "5. 결재", "ws/appr:request", 85),
+        ("ws-print", "6. 출력", "ws/print:preview", 92),
+        ("ws-file", "7. 전자신고", "ws/file:precheck", 100),
     ];
     let step_values = steps
         .iter()
@@ -3317,9 +3302,9 @@ pub async fn business_year_progress(
         "recommendations": [
             {
                 "leaf_key": next_leaf,
-                "label": "Next step",
+                "label": "다음 단계",
                 "enabled": by.status != "FILED",
-                "reason": if by.status == "FILED" { "Filed work is complete" } else { "Continue the filing workflow" }
+                "reason": if by.status == "FILED" { "신고 완료된 작업입니다." } else { "신고 작업을 계속 진행하세요." }
             }
         ],
         "workflow_event_count": events.len()

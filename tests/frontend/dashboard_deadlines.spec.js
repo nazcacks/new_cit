@@ -6,7 +6,7 @@ const css = fs.readFileSync("frontend/app.css", "utf8");
 
 for (const snippet of [
   '"/api/tenants/{tenant}/dashboard/filing-deadlines?withinDays=30"',
-  '"dashboard:duesoon": (env) => renderDashboard(env)',
+  '"dashboard:duesoon": (env) => renderDashboardDueSoon(env)',
   "function renderDashboardDeadlineTable",
   "formatDday(item.daysRemaining)",
   "deadlineUrgencyClass(item.urgencyLevel)",

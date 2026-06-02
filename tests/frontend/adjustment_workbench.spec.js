@@ -6,7 +6,10 @@ const screens = fs.readFileSync("frontend/app/screens.js", "utf8");
 for (const snippet of [
   'const adjustmentRunState = new Map();',
   'data-stage="adjustment"',
+  'data-adjustment-stage="${escapeHtml(selectedCode)}"',
   'data-module-code="${escapeHtml(selectedCode)}"',
+  'data-leaf-key="ws/adj:${escapeHtml(selectedCode)}"',
+  "renderAdjustmentModuleLeaf",
   "renderAdjustmentModuleNavigator(selectedCode, env.locale)",
   "renderAdjustmentModuleHighlights(selectedModule",
   "renderAdjustmentModuleForm(selectedModule",
@@ -27,6 +30,11 @@ for (const snippet of [
 
 for (const code of ["B2", "B3", "B5", "B6", "B7", "B8", "B9", "B10", "B11", "B12", "B13", "B14", "B16", "B17"]) {
   assert(screens.includes(`case "${code}":`), `collectAdjustmentPayload must support ${code}`);
+}
+
+for (let index = 1; index <= 17; index += 1) {
+  assert(screens.includes(`async function renderAdjustmentB${index}(env)`), `renderAdjustmentB${index} screen must exist`);
+  assert(screens.includes(`renderAdjustmentModuleLeaf(env, "B${index}")`), `renderAdjustmentB${index} must select B${index}`);
 }
 
 for (const inputId of [
