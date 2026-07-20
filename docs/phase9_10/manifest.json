@@ -1,27 +1,62 @@
 [
   {
+    "name": "dashboard_overview",
+    "selector": "[data-dashboard=\"overview\"]",
+    "file": "docs\\phase9_10\\dashboard_overview.png"
+  },
+  {
+    "name": "work_start",
+    "selector": "[data-work-start-stage=\"customer-pick\"]",
+    "file": "docs\\phase9_10\\work_start.png"
+  },
+  {
+    "name": "tax_data_fs",
+    "selector": "[data-tax-data-stage=\"financial-statements\"]",
+    "file": "docs\\phase9_10\\tax_data_fs.png"
+  },
+  {
+    "name": "std_fs_mapping",
+    "selector": "[data-std-fs-workbench]",
+    "file": "docs\\phase9_10\\std_fs_mapping.png"
+  },
+  {
+    "name": "tax_data_consistency",
+    "selector": "[data-tax-data-stage=\"consistency\"]",
+    "file": "docs\\phase9_10\\tax_data_consistency.png"
+  },
+  {
+    "name": "workflow_validation",
+    "selector": "[data-validation-stage=\"run\"]",
+    "file": "docs\\phase9_10\\workflow_validation.png"
+  },
+  {
+    "name": "efiling_precheck",
+    "selector": "[data-efile-stage=\"precheck\"]",
+    "file": "docs\\phase9_10\\efiling_precheck.png"
+  },
+  {
+    "name": "workflow_post_amend",
+    "selector": "[data-amend-stage=\"unlock\"]",
+    "file": "docs\\phase9_10\\workflow_post_amend.png"
+  },
+  {
     "name": "admin_security",
-    "selector": "[data-admin-stage=\"security\"]",
+    "selector": "[data-admin-stage=\"security-roles\"]",
     "file": "docs\\phase9_10\\admin_security.png"
   },
   {
     "name": "admin_law",
-    "selector": "[data-admin-stage=\"law\"]",
+    "selector": "[data-admin-stage=\"law-master\"]",
     "file": "docs\\phase9_10\\admin_law.png"
   },
   {
     "name": "admin_forms",
-    "selector": "[data-admin-stage=\"forms-admin\"]",
+    "selector": "[data-admin-stage=\"form-master\"]",
     "file": "docs\\phase9_10\\admin_forms.png"
   },
   {
-    "name": "workflow_validation",
-    "selector": "[data-stage=\"validation\"]",
-    "file": "docs\\phase9_10\\workflow_validation.png"
-  },
-  {
-    "name": "workflow_post_amend",
-    "selector": "[data-stage=\"post-amend\"]",
-    "file": "docs\\phase9_10\\workflow_post_amend.png"
+    "name": "admin_audit",
+    "selector": "[data-admin-stage=\"audit-events\"]",
+    "file": "docs\\phase9_10\\admin_audit.png"
   }
 ]

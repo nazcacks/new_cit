@@ -1556,6 +1556,8 @@ async function renderAdjustmentLeaf(env) {
 }
 
 async function renderAdjustmentModuleLeaf(env, moduleCode) {
+  if (!requireWorkContext(env)) return;
+  if (!(await ensurePhaseFAdjustmentGate(env, moduleCode))) return;
   await renderAdjustments({
     ...env,
     key: `ws/adj:${moduleCode}`,
@@ -3083,27 +3085,63 @@ function notificationSeverityClass(severity) {
   return "info";
 }
 
+function dashboardDeadlineBucket(daysRemaining) {
+  const days = Number(daysRemaining ?? 0);
+  if (days <= 0) return "dday";
+  if (days <= 7) return "d7";
+  return "d30";
+}
+
+function renderDashboardDeadlineRow(item, locale) {
+  const statusText = item.status === "DRAFT"
+    ? `${item.statusLabel || statusLabel(item.status, locale)} (${item.progressPct || 0}%)`
+    : item.statusLabel || statusLabel(item.status, locale);
+  return `
+    <tr class="deadline-row ${escapeHtml(deadlineUrgencyClass(item.urgencyLevel))}" data-deadline-by="${escapeHtml(item.businessYearId)}" tabindex="0">
+      <td><span class="badge ${item.urgencyLevel === "CRITICAL" ? "danger" : item.urgencyLevel === "WARNING" ? "warn" : "info"}">${escapeHtml(formatDday(item.daysRemaining))}</span></td>
+      <td>${escapeHtml(item.customerName)}</td>
+      <td>${escapeHtml(item.fiscalYear)}</td>
+      <td>${escapeHtml(item.filingDueDate)}</td>
+      <td>${pill(item.status, locale)} <span class="muted">${escapeHtml(statusText)}</span></td>
+    </tr>`;
+}
+
 function renderDashboardDeadlineTable(deadlines, locale = "ko") {
-  const rows = asArray(deadlines).map((item) => {
-    const statusText = item.status === "DRAFT"
-      ? `${item.statusLabel || statusLabel(item.status, locale)} (${item.progressPct || 0}%)`
-      : item.statusLabel || statusLabel(item.status, locale);
-    return `
-      <tr class="deadline-row ${escapeHtml(deadlineUrgencyClass(item.urgencyLevel))}" data-deadline-by="${escapeHtml(item.businessYearId)}" tabindex="0">
-        <td><span class="badge ${item.urgencyLevel === "CRITICAL" ? "danger" : item.urgencyLevel === "WARNING" ? "warn" : "info"}">${escapeHtml(formatDday(item.daysRemaining))}</span></td>
-        <td>${escapeHtml(item.customerName)}</td>
-        <td>${escapeHtml(item.fiscalYear)}</td>
-        <td>${escapeHtml(item.filingDueDate)}</td>
-        <td>${pill(item.status, locale)} <span class="muted">${escapeHtml(statusText)}</span></td>
-      </tr>`;
-  });
+  const items = asArray(deadlines);
+  const buckets = [
+    { key: "dday", labelKey: "dash.deadline.bucket.dday" },
+    { key: "d7", labelKey: "dash.deadline.bucket.d7" },
+    { key: "d30", labelKey: "dash.deadline.bucket.d30" },
+  ];
+  const body = items.length
+    ? buckets.map((bucket) => {
+        const rows = items.filter((item) => dashboardDeadlineBucket(item.daysRemaining) === bucket.key);
+        if (!rows.length) return "";
+        return `
+          <tr class="deadline-bucket-row deadline-bucket-${bucket.key}"><td colspan="5">${escapeHtml(t(locale, bucket.labelKey))} <span class="muted">${money.format(rows.length)}</span></td></tr>
+          ${rows.map((item) => renderDashboardDeadlineRow(item, locale)).join("")}`;
+      }).join("")
+    : `<tr><td colspan="5">${escapeHtml(t(locale, "grid.empty"))}</td></tr>`;
   return `
     <div class="table-wrap dashboard-deadlines" data-dashboard-section="filing-deadlines">
       <table>
         <thead><tr><th>긴급도</th><th>고객사</th><th>사업연도</th><th>마감일</th><th>상태</th></tr></thead>
-        <tbody>${rows.length ? rows.join("") : `<tr><td colspan="5">${escapeHtml(t(locale, "grid.empty"))}</td></tr>`}</tbody>
+        <tbody>${body}</tbody>
       </table>
     </div>`;
+}
+
+function dashboardToday(locale = "ko") {
+  try {
+    return new Intl.DateTimeFormat(locale === "en" ? "en-US" : "ko-KR", {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+      weekday: "short",
+    }).format(new Date());
+  } catch {
+    return new Date().toISOString().slice(0, 10);
+  }
 }
 
 function dashboardStatusRoute(status) {
@@ -3113,22 +3151,61 @@ function dashboardStatusRoute(status) {
     IN_REVIEW_APPROVAL: "ws/appr:inbox",
     APPROVED: "ws/print:preview",
     FILED: "post/hist:list",
+    REJECTED: "ws/start:customer-pick",
   }[status] || "dashboard:overview";
 }
 
-function renderDashboardWorkStatusCards(summary, locale = "ko") {
+const DASHBOARD_STATUS_ICON = Object.freeze({
+  DRAFT: "📝",
+  IN_REVIEW_VALIDATION: "🔍",
+  IN_REVIEW_APPROVAL: "⏳",
+  APPROVED: "✅",
+  FILED: "🏆",
+  REJECTED: "⚠️",
+});
+
+function dashboardStatusIcon(status) {
+  return DASHBOARD_STATUS_ICON[status] || "📄";
+}
+
+function renderDashboardWorkStatusCards(summary, locale = "ko", emphasis = new Set()) {
   const statuses = asArray(summary.workStatus);
+  const rejectedCount = Number(summary.rejectedCount || 0);
+  const rejectedCard = rejectedCount > 0
+    ? `<button class="dashboard-status-card rejected" type="button" data-work-status="REJECTED" style="--status-color: #EF4444">
+        <span class="status-accent" aria-hidden="true"></span>
+        <span class="status-icon" aria-hidden="true">${dashboardStatusIcon("REJECTED")}</span>
+        <span class="status-title">${escapeHtml(t(locale, "dash.rejected.title"))}</span>
+        <strong>${money.format(rejectedCount)}</strong>
+        <span class="status-meta">${escapeHtml(t(locale, "dash.rejected.meta"))}</span>
+        <span class="status-urgent">${escapeHtml(t(locale, "dash.rejected.action"))}</span>
+      </button>`
+    : "";
   return `
     <section class="dashboard-status-grid" data-dashboard-section="work-status" aria-label="업무현황">
+      ${rejectedCard}
       ${statuses.map((item) => `
-        <button class="dashboard-status-card" type="button" data-work-status="${escapeHtml(item.status)}" style="--status-color: ${escapeHtml(item.color || "#3B82F6")}">
+        <button class="dashboard-status-card${emphasis.has(item.status) ? " emphasized" : ""}" type="button" data-work-status="${escapeHtml(item.status)}" style="--status-color: ${escapeHtml(item.color || "#3B82F6")}">
           <span class="status-accent" aria-hidden="true"></span>
+          <span class="status-icon" aria-hidden="true">${dashboardStatusIcon(item.status)}</span>
           <span class="status-title">${escapeHtml(item.label || statusLabel(item.status, locale))}</span>
           <strong>${money.format(item.yearCount || 0)}</strong>
-          <span class="status-meta">고객사 ${money.format(item.customerCount || 0)}개</span>
-          ${Number(item.urgentCount || 0) > 0 ? `<span class="status-urgent">즉시 처리 필요 ${money.format(item.urgentCount)}건</span>` : `<span class="status-quiet">마감 안정</span>`}
+          <span class="status-meta">${escapeHtml(t(locale, "dash.status.customers", { count: money.format(item.customerCount || 0) }))}</span>
+          ${Number(item.urgentCount || 0) > 0 ? `<span class="status-urgent">${escapeHtml(t(locale, "dash.status.urgent", { count: money.format(item.urgentCount) }))}</span>` : `<span class="status-quiet">${escapeHtml(t(locale, "dash.status.quiet"))}</span>`}
         </button>`).join("")}
     </section>`;
+}
+
+function dashboardEmphasisStatuses(auth) {
+  const roles = dashboardRoles(auth);
+  const set = new Set();
+  if (roles.includes("TAX_REVIEWER")) set.add("IN_REVIEW_APPROVAL");
+  if (roles.includes("ASSISTANT") || roles.includes("TAX_EXPERT")) {
+    set.add("DRAFT");
+    set.add("IN_REVIEW_VALIDATION");
+  }
+  if (roles.includes("TAX_EXPERT")) set.add("APPROVED");
+  return set;
 }
 
 function renderDashboardNotificationPanel(notificationSummary, queue, locale = "ko", showApprovals = true) {
@@ -3653,18 +3730,19 @@ async function renderDashboard(env) {
   const dashboardNotifications = asArray(notificationSummary.notifications);
   const approvalQueue = asArray(queue);
   const recentActivities = asArray(recentSummary.activities);
+  const greetName = env.auth?.user?.user_name || env.auth?.user?.login_id || "";
+  const emphasis = dashboardEmphasisStatuses(env.auth);
   env.outlet.innerHTML = `
     <section class="dashboard-home" data-dashboard="overview" data-dashboard-cache-version="${dashboardCacheVersion}">
       <section class="panel dashboard-hero" data-dashboard-section="start">
         <div>
-          <span class="badge info">Dashboard</span>
-          <h2>신고 업무 현황</h2>
-          <p class="empty">작성, 검증, 결재, 승인, 신고 완료 상태를 확인하고 다음 작업으로 바로 이동합니다.</p>
+          <span class="badge info">Dashboard · ${escapeHtml(dashboardToday(env.locale))}</span>
+          <h2>${escapeHtml(t(env.locale, "dash.hero.greeting", { name: greetName }))}</h2>
+          <p class="empty">${escapeHtml(t(env.locale, "dash.hero.subtitle"))}</p>
         </div>
-        <button id="dashStartWork" class="primary-btn" type="button">신고 작업 시작</button>
+        <button id="dashStartWork" class="primary-btn" type="button">${escapeHtml(t(env.locale, "dash.hero.start"))} ▶</button>
       </section>
-      ${Number(summary.rejectedCount || 0) > 0 ? `<section class="dashboard-rejected-banner" data-dashboard-section="rejected">반려 ${money.format(summary.rejectedCount)}건 - 재작성 필요</section>` : ""}
-      ${renderDashboardWorkStatusCards(summary, env.locale)}
+      ${renderDashboardWorkStatusCards(summary, env.locale, emphasis)}
       <section class="dashboard-main-grid">
         <article class="panel dashboard-deadline-panel">
           <div class="panel-head"><h2>신고마감 임박</h2><button id="dashDueSoonAll" class="secondary-btn compact" type="button">전체 보기</button></div>
@@ -3672,7 +3750,7 @@ async function renderDashboard(env) {
         </article>
         ${renderDashboardNotificationPanel(notificationSummary, queue, env.locale, showApprovals)}
       </section>
-      <section class="dashboard-lower-grid">
+      <section class="dashboard-lower-grid${showKpi ? "" : " dashboard-lower-grid--single"}">
         ${renderDashboardRecentActivities(recentSummary, env.locale)}
         ${showKpi ? renderDashboardTaxBurdenKpi(kpiTaxBurden, kpiIndustryDistribution, kpiLossExpiry, env.locale) : ""}
       </section>
@@ -4133,10 +4211,38 @@ async function loadTaxDataWorkbenchData(env) {
     request(`${root}/tax-data/transactions`),
     request(`${root}/vehicle-usage-logs`),
     request(`${root}/tax-data/import-batches`),
-    request(`${routeRoot(env)}/customers/${encodeURIComponent(env.context.customerId)}/account-mappings`).catch(() => []),
+    request(`${root}/account-mappings`).catch(() => []),
     request(`${root}/validation/issues`).catch(() => []),
   ]);
   return { root, validation, fs, assets, transactions, vehicleLogs, batches, mappings, issues };
+}
+
+async function loadAssetPhaseCData(root) {
+  const [deprPreview, bsReconcile] = await Promise.all([
+    request(`${root}/tax-data/assets/depr-preview`).catch((error) => ({ error: error?.message || String(error) })),
+    request(`${root}/tax-data/assets/bs-reconcile`).catch((error) => ({ error: error?.message || String(error) })),
+  ]);
+  return {
+    deprPreview: deprPreview?.error ? null : deprPreview,
+    bsReconcile: bsReconcile?.error ? null : bsReconcile,
+    error: deprPreview?.error || bsReconcile?.error || null,
+  };
+}
+
+async function loadTransactionPhaseDData(root) {
+  const reconcile = await request(`${root}/tax-data/transactions/is-reconcile`).catch((error) => ({ error: error?.message || String(error) }));
+  return {
+    isReconcile: reconcile?.error ? null : reconcile,
+    error: reconcile?.error || null,
+  };
+}
+
+async function loadVehiclePhaseEData(root) {
+  const reconcile = await request(`${root}/vehicle-usage-logs/b10-reconcile`).catch((error) => ({ error: error?.message || String(error) }));
+  return {
+    b10Reconcile: reconcile?.error ? null : reconcile,
+    error: reconcile?.error || null,
+  };
 }
 
 function taxDataHeader(env, activeLeaf, title, description, validation) {
@@ -4222,10 +4328,275 @@ function bindTaxDataCommonActions(env, root, rerender) {
 }
 
 function taxDataRouteForSource(source) {
+  if (source === "std-fs") return "ws/info:mapping";
   if (source === "assets") return "ws/info:assets";
   if (source === "vehicle") return "ws/info:vehicle";
   if (source === "transactions") return "ws/info:transactions";
   return "ws/info:fs";
+}
+
+async function loadStdFsWorkbenchData(root) {
+  try {
+    const [mappings, bsStatements, isStatements, validation] = await Promise.all([
+      request(`${root}/std-fs/mappings`).catch(() => []),
+      request(`${root}/std-fs/statements?stmtType=STD_BS`).catch(() => []),
+      request(`${root}/std-fs/statements?stmtType=STD_IS`).catch(() => []),
+      request(`${root}/std-fs/validate`),
+    ]);
+    return {
+      mappings: asArray(mappings),
+      bsStatements: asArray(bsStatements),
+      isStatements: asArray(isStatements),
+      validation,
+      error: null,
+    };
+  } catch (error) {
+    return {
+      mappings: [],
+      bsStatements: [],
+      isStatements: [],
+      validation: null,
+      error: error.message,
+    };
+  }
+}
+
+function renderDualMappingTabs(locale, active = "tax") {
+  return `
+    <div class="tabs mapping-tabs" role="tablist" aria-label="${escapeHtml(t(locale, "taxData.mapping"))}">
+      <button class="tab ${active === "tax" ? "active" : ""}" type="button" role="tab" data-mapping-tab-button="tax">${escapeHtml(t(locale, "taxData.taxMappingTab"))}</button>
+      <button class="tab ${active === "std-fs" ? "active" : ""}" type="button" role="tab" data-mapping-tab-button="std-fs">${escapeHtml(t(locale, "taxData.stdFsMappingTab"))}</button>
+    </div>`;
+}
+
+function renderTaxAccountMappingPanel(data, locale, hidden = false) {
+  return `
+    <div data-mapping-tab="tax" class="${hidden ? "hidden" : ""}">
+      <section class="grid two">
+        <article class="panel">
+          <div class="panel-head"><h2>${escapeHtml(t(locale, "taxData.taxMappingTab"))}</h2><p>Map customer accounts to standard tax accounts used by adjustments and forms.</p></div>
+          <form id="mappingForm" class="stack">
+            <div class="form-grid">
+              <label>${escapeHtml(t(locale, "field.code"))} <input id="mapSourceCode" value="${escapeHtml(data.fs[0]?.account_code || "")}" /></label>
+              <label>${escapeHtml(t(locale, "field.name"))} <input id="mapSourceName" value="${escapeHtml(data.fs[0]?.account_name || "")}" /></label>
+              <label>Standard code <input id="mapStandardCode" value="${escapeHtml(data.fs[0]?.standard_account_code || "")}" /></label>
+              <label>Standard name <input id="mapStandardName" value="${escapeHtml(data.fs[0]?.standard_account_name || "")}" /></label>
+            </div>
+            <button class="primary-btn" type="submit">${escapeHtml(t(locale, "taxData.mappingRule"))}</button>
+          </form>
+        </article>
+        <article class="panel">
+          <div class="panel-head"><h2>Tax mapping rules</h2><p>Existing customer-to-standard account mappings.</p></div>
+          ${table([t(locale, "field.code"), t(locale, "field.name"), "Standard"], data.mappings.map((item) => row([
+            escapeHtml(item.source_account_code),
+            escapeHtml(item.source_account_name),
+            escapeHtml(item.standard_account_name || item.standard_account_code || "-"),
+          ])), t(locale, "grid.empty"))}
+        </article>
+      </section>
+    </div>`;
+}
+
+function renderStdFsMappingPanel(data, locale, hidden = true) {
+  const stdFs = data.stdFs || {};
+  const mappings = asArray(stdFs.mappings);
+  const first = mappings.find((item) => !item.std_fs_item_code) || mappings[0] || {};
+  if (stdFs.error) {
+    return `
+      <div data-mapping-tab="std-fs" class="${hidden ? "hidden" : ""}">
+        <article class="panel empty-state" data-std-fs-error>
+          <div class="panel-head"><h2>${escapeHtml(t(locale, "taxData.stdFsMappingTab"))}</h2><span class="badge error">ERROR</span></div>
+          <p class="empty">${escapeHtml(t(locale, "taxData.stdFsError"))}: ${escapeHtml(stdFs.error)}</p>
+        </article>
+      </div>`;
+  }
+  return `
+    <div data-mapping-tab="std-fs" class="${hidden ? "hidden" : ""}">
+      <section class="grid two">
+        <article class="panel">
+          <div class="panel-head"><h2>${escapeHtml(t(locale, "taxData.stdFsMappingTab"))}</h2><p>Map customer accounts to standard financial statement leaf items.</p></div>
+          <form id="stdFsMappingForm" class="stack">
+            <div class="form-grid">
+              <label>${escapeHtml(t(locale, "field.code"))} <input id="stdFsAccountCode" list="stdFsAccountCodes" value="${escapeHtml(first.account_code || data.fs[0]?.account_code || "")}" /></label>
+              <label>${escapeHtml(t(locale, "field.name"))} <input id="stdFsAccountName" value="${escapeHtml(first.account_name || data.fs[0]?.account_name || "")}" /></label>
+              <label>STD FS item code <input id="stdFsItemCode" value="${escapeHtml(first.std_fs_item_code || "")}" placeholder="1010" /></label>
+              <label>Mapped item <input value="${escapeHtml(first.std_fs_item_name || "-")}" readonly /></label>
+            </div>
+            <datalist id="stdFsAccountCodes">
+              ${mappings.map((item) => `<option value="${escapeHtml(item.account_code)}">${escapeHtml(item.account_name || "")}</option>`).join("")}
+            </datalist>
+            <button class="primary-btn" type="submit">${escapeHtml(t(locale, "taxData.mappingRule"))}</button>
+          </form>
+          <div id="stdFsMappingResult" class="empty" aria-live="polite">${escapeHtml(t(locale, "taxData.stdFsMappingHelp"))}</div>
+        </article>
+        <article class="panel">
+          <div class="panel-head"><h2>Standard FS mapping rows</h2><p>${escapeHtml(t(locale, "taxData.stdFsMappingHelp"))}</p></div>
+          ${table([t(locale, "field.code"), t(locale, "field.name"), "STD FS", t(locale, "common.value"), ""], mappings.map((item) => row([
+            escapeHtml(item.account_code),
+            escapeHtml(item.account_name),
+            escapeHtml(item.std_fs_item_name || item.std_fs_item_code || "-"),
+            money.format(item.amount || item.debit_total || item.credit_total || 0),
+            `<button class="secondary-btn compact" type="button" data-std-fs-map-account="${escapeHtml(item.account_code)}" data-std-fs-map-name="${escapeHtml(item.account_name)}" data-std-fs-map-item="${escapeHtml(item.std_fs_item_code || "")}">${escapeHtml(t(locale, "common.edit"))}</button>`,
+          ])), t(locale, "grid.empty"))}
+        </article>
+      </section>
+    </div>`;
+}
+
+function renderStdFsWorkbench(data, locale) {
+  const stdFs = data.stdFs || {};
+  if (stdFs.error) {
+    return `
+      <section class="grid two" data-std-fs-workbench>
+        <article class="panel empty-state" data-std-fs-error>
+          <div class="panel-head"><h2>${escapeHtml(t(locale, "taxData.stdFsTitle"))}</h2><span class="badge error">ERROR</span></div>
+          <p class="empty">${escapeHtml(t(locale, "taxData.stdFsError"))}: ${escapeHtml(stdFs.error)}</p>
+        </article>
+      </section>`;
+  }
+  return `
+    <section class="grid two" data-std-fs-workbench>
+      <article class="panel">
+        <div class="panel-head">
+          <div><h2>${escapeHtml(t(locale, "taxData.stdFsTitle"))}</h2><p>${escapeHtml(t(locale, "taxData.stdFsStatements"))}</p></div>
+          <div class="button-row">
+            <button class="secondary-btn compact" type="button" data-std-fs-action="aggregate">${escapeHtml(t(locale, "taxData.aggregateStdFs"))}</button>
+            <button class="primary-btn compact" type="button" data-std-fs-action="confirm">${escapeHtml(t(locale, "taxData.confirmStdFs"))}</button>
+          </div>
+        </div>
+        <div id="stdFsActionResult" class="empty compact" aria-live="polite">${escapeHtml(t(locale, "taxData.stdFsActionIdle"))}</div>
+        ${renderStdFsMetrics(stdFs, locale)}
+        ${renderStdFsStatementTabs(stdFs, locale)}
+      </article>
+      <article class="panel">
+        <div class="panel-head"><h2>${escapeHtml(t(locale, "taxData.stdFsValidation"))}</h2><p>${escapeHtml(t(locale, "taxData.stdFsValidationHelp"))}</p></div>
+        ${renderStdFsValidation(stdFs.validation, locale)}
+      </article>
+    </section>`;
+}
+
+function renderStdFsMetrics(stdFs, locale) {
+  const validation = stdFs.validation || {};
+  return metrics([
+    [t(locale, "taxData.stdFsValidation"), validation.valid ? t(locale, "status.ok") : t(locale, "status.warn")],
+    [t(locale, "taxData.unmapped"), money.format(validation.unmapped_count || 0)],
+    [t(locale, "status.error"), money.format(validation.error_count || 0)],
+    [t(locale, "taxData.confirmed"), validation.confirmed ? "Y" : "N"],
+  ]);
+}
+
+function renderStdFsStatementTabs(stdFs, locale) {
+  return `
+    <div class="tabs std-fs-tabs" role="tablist" aria-label="${escapeHtml(t(locale, "taxData.stdFsStatements"))}">
+      <button class="tab active" type="button" role="tab" data-std-fs-stmt-tab-button="STD_BS">${escapeHtml(t(locale, "taxData.stdBs"))}</button>
+      <button class="tab" type="button" role="tab" data-std-fs-stmt-tab-button="STD_IS">${escapeHtml(t(locale, "taxData.stdIs"))}</button>
+    </div>
+    <div data-std-fs-stmt-tab="STD_BS">${renderStdFsStatementTable(asArray(stdFs.bsStatements), locale, t(locale, "taxData.stdBs"))}</div>
+    <div class="hidden" data-std-fs-stmt-tab="STD_IS">${renderStdFsStatementTable(asArray(stdFs.isStatements), locale, t(locale, "taxData.stdIs"))}</div>`;
+}
+
+function renderStdFsStatementTable(lines, locale, label) {
+  const body = lines.map((line) => `
+    <tr class="${line.is_subtotal ? "std-fs-subtotal" : ""}">
+      <td>${escapeHtml(line.item_code)}</td>
+      <td>${escapeHtml(line.item_name)}</td>
+      <td class="amount-cell">${money.format(line.amount || 0)}</td>
+      <td>${line.confirmed ? `<span class="badge ok">${escapeHtml(t(locale, "taxData.confirmed"))}</span>` : `<span class="badge info">DRAFT</span>`}</td>
+      <td>${escapeHtml(asArray(line.source_line_ids).length)}</td>
+    </tr>`).join("");
+  return `
+    <div class="table-wrap std-fs-table">
+      <table>
+        <thead><tr><th>Code</th><th>${escapeHtml(label)}</th><th>${escapeHtml(t(locale, "field.amount"))}</th><th>${escapeHtml(t(locale, "field.status"))}</th><th>Lines</th></tr></thead>
+        <tbody>${body || `<tr><td colspan="5"><div class="empty" data-std-fs-empty>${escapeHtml(t(locale, "taxData.stdFsEmpty"))}</div></td></tr>`}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderStdFsValidation(validation, locale) {
+  if (!validation) {
+    return `<div class="empty" data-std-fs-validation-empty>${escapeHtml(t(locale, "taxData.stdFsValidationEmpty"))}</div>`;
+  }
+  return table(["Rule", t(locale, "field.status"), "Expected", "Actual", "Difference"], asArray(validation.issues).map((issue) => row([
+    escapeHtml(issue.rule_code),
+    issue.passed ? `<span class="badge ok">${escapeHtml(t(locale, "status.ok"))}</span>` : `<span class="badge ${issue.severity === "ERROR" ? "error" : "warn"}">${escapeHtml(issue.severity || "WARN")}</span>`,
+    money.format(issue.expected || 0),
+    money.format(issue.actual || 0),
+    money.format(issue.difference || 0),
+  ])), t(locale, "taxData.stdFsValidationEmpty"));
+}
+
+function bindDualMappingTabs(container = document) {
+  container.querySelectorAll("[data-mapping-tab-button]").forEach((button) => {
+    button.addEventListener("click", () => activateMappingTab(button.dataset.mappingTabButton, container));
+  });
+}
+
+function activateMappingTab(tab, container = document) {
+  container.querySelectorAll("[data-mapping-tab]").forEach((panel) => {
+    panel.classList.toggle("hidden", panel.dataset.mappingTab !== tab);
+  });
+  container.querySelectorAll("[data-mapping-tab-button]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.mappingTabButton === tab);
+    button.setAttribute("aria-selected", button.dataset.mappingTabButton === tab ? "true" : "false");
+  });
+}
+
+function activateStdFsStatementTab(stmtType, container = document) {
+  container.querySelectorAll("[data-std-fs-stmt-tab]").forEach((panel) => {
+    panel.classList.toggle("hidden", panel.dataset.stdFsStmtTab !== stmtType);
+  });
+  container.querySelectorAll("[data-std-fs-stmt-tab-button]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.stdFsStmtTabButton === stmtType);
+    button.setAttribute("aria-selected", button.dataset.stdFsStmtTabButton === stmtType ? "true" : "false");
+  });
+}
+
+function bindStdFsWorkbenchActions(env, data, rerender) {
+  const root = data.root;
+  const result = env.outlet.querySelector("#stdFsActionResult");
+  env.outlet.querySelectorAll("[data-std-fs-map-account]").forEach((button) => {
+    button.addEventListener("click", () => {
+      env.outlet.querySelector("#stdFsAccountCode").value = button.dataset.stdFsMapAccount || "";
+      env.outlet.querySelector("#stdFsAccountName").value = button.dataset.stdFsMapName || "";
+      env.outlet.querySelector("#stdFsItemCode").value = button.dataset.stdFsMapItem || "";
+      activateMappingTab("std-fs", env.outlet);
+    });
+  });
+  env.outlet.querySelector("#stdFsMappingForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const accountCode = env.outlet.querySelector("#stdFsAccountCode").value.trim();
+    const itemCode = env.outlet.querySelector("#stdFsItemCode").value.trim();
+    const accountName = env.outlet.querySelector("#stdFsAccountName").value.trim();
+    const message = env.outlet.querySelector("#stdFsMappingResult");
+    if (!accountCode) return;
+    try {
+      await request(`${root}/std-fs/mappings/${encodeURIComponent(accountCode)}`, {
+        method: "PUT",
+        body: JSON.stringify({ std_fs_item_code: itemCode || null, account_name: accountName || null }),
+      });
+      if (message) message.textContent = t(env.locale, "taxData.stdFsMappingSaved");
+      await rerender();
+    } catch (error) {
+      if (message) message.textContent = localizeTextValue(error.message, env.locale);
+    }
+  });
+  env.outlet.querySelectorAll("[data-std-fs-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const action = button.dataset.stdFsAction;
+      try {
+        if (result) result.textContent = t(env.locale, "taxData.stdFsActionRunning");
+        await request(`${root}/std-fs/${action}`, { method: "POST", body: "{}" });
+        if (result) result.textContent = action === "confirm" ? t(env.locale, "taxData.stdFsConfirmed") : t(env.locale, "taxData.stdFsAggregated");
+        await rerender();
+      } catch (error) {
+        if (result) result.textContent = localizeTextValue(error.message, env.locale);
+      }
+    });
+  });
+  env.outlet.querySelectorAll("[data-std-fs-stmt-tab-button]").forEach((button) => {
+    button.addEventListener("click", () => activateStdFsStatementTab(button.dataset.stdFsStmtTabButton, env.outlet));
+  });
 }
 
 async function renderWorkInfoFinancialStatements(env) {
@@ -4256,37 +4627,24 @@ async function renderWorkInfoAccountMapping(env) {
   if (!requireWorkContext(env)) return;
   const activeLeaf = env.routeKey || env.leafKey || env.key;
   const data = await loadTaxDataWorkbenchData(env);
+  data.stdFs = await loadStdFsWorkbenchData(data.root);
   const locale = env.locale;
   env.outlet.innerHTML = `
     <section class="leaf-workbench tax-data-workbench" data-stage="tax-data" data-tax-data-stage="account-mapping" data-leaf-key="ws/info:mapping">
       ${taxDataHeader(env, activeLeaf, t(locale, "route.ws.info.mapping"), t(locale, "taxData.mapping"), data.validation)}
-      <section class="grid two">
-        <article class="panel">
-          <div class="panel-head"><h2>${escapeHtml(t(locale, "taxData.mapping"))}</h2><p>Map customer accounts to standard accounts used by adjustment and forms.</p></div>
-          <form id="mappingForm" class="stack">
-            <div class="form-grid">
-              <label>${escapeHtml(t(locale, "field.code"))} <input id="mapSourceCode" value="${escapeHtml(data.fs[0]?.account_code || "")}" /></label>
-              <label>${escapeHtml(t(locale, "field.name"))} <input id="mapSourceName" value="${escapeHtml(data.fs[0]?.account_name || "")}" /></label>
-              <label>Standard code <input id="mapStandardCode" value="${escapeHtml(data.fs[0]?.standard_account_code || "")}" /></label>
-              <label>Standard name <input id="mapStandardName" value="${escapeHtml(data.fs[0]?.standard_account_name || "")}" /></label>
-            </div>
-            <button class="primary-btn" type="submit">${escapeHtml(t(locale, "taxData.mappingRule"))}</button>
-          </form>
-        </article>
-        <article class="panel">
-          <div class="panel-head"><h2>Mapping rules</h2><p>Existing customer-to-standard account mappings.</p></div>
-          ${table([t(locale, "field.code"), t(locale, "field.name"), "Standard"], data.mappings.map((item) => row([
-            escapeHtml(item.source_account_code),
-            escapeHtml(item.source_account_name),
-            escapeHtml(item.standard_account_name || item.standard_account_code || "-"),
-          ])), t(locale, "grid.empty"))}
-        </article>
+      <section class="panel" data-dual-mapping-tabs>
+        ${renderDualMappingTabs(locale)}
+        ${renderTaxAccountMappingPanel(data, locale)}
+        ${renderStdFsMappingPanel(data, locale)}
       </section>
+      ${renderStdFsWorkbench(data, locale)}
     </section>`;
   bindTaxDataCommonActions(env, data.root, () => renderWorkInfoAccountMapping(env));
+  bindDualMappingTabs(env.outlet);
+  bindStdFsWorkbenchActions(env, data, () => renderWorkInfoAccountMapping(env));
   env.outlet.querySelector("#mappingForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    await request(`${routeRoot(env)}/customers/${encodeURIComponent(env.context.customerId)}/account-mappings`, {
+    await request(`${data.root}/account-mappings`, {
       method: "POST",
       body: JSON.stringify({
         statement_type: "FS",
@@ -4304,55 +4662,349 @@ async function renderWorkInfoAssets(env) {
   if (!requireWorkContext(env)) return;
   const activeLeaf = env.routeKey || env.leafKey || env.key;
   const data = await loadTaxDataWorkbenchData(env);
+  const assetPhaseC = await loadAssetPhaseCData(data.root);
   const locale = env.locale;
+  const previewRows = assetPhaseC.deprPreview?.rows || [];
   env.outlet.innerHTML = `
     <section class="leaf-workbench tax-data-workbench" data-stage="tax-data" data-tax-data-stage="assets" data-leaf-key="ws/info:assets">
       ${taxDataHeader(env, activeLeaf, t(locale, "route.ws.info.assets"), t(locale, "taxData.assetTab"), data.validation)}
       <section class="grid two">
         <article class="panel">
-          <div class="panel-head"><h2>${escapeHtml(t(locale, "taxData.assetTab"))}</h2><p>Asset register, depreciation source rows, and business vehicle markers.</p></div>
-          ${table([t(locale, "field.code"), t(locale, "field.name"), t(locale, "common.category"), t(locale, "field.amount"), "Vehicle"], data.assets.slice(0, 40).map((item) => row([
+          <div class="panel-head">
+            <div><h2>${escapeHtml(t(locale, "taxData.assetTab"))}</h2><p>Asset register, carry-forward source, and tax depreciation fields.</p></div>
+            <div class="button-row">
+              <button class="secondary-btn compact" type="button" data-asset-action="carry-forward">Carry forward</button>
+              <button class="secondary-btn compact" type="button" data-asset-action="b4">B4</button>
+            </div>
+          </div>
+          ${data.assets.length ? table([t(locale, "field.code"), t(locale, "field.name"), t(locale, "common.category"), t(locale, "field.amount"), "Life", "Method", "Book dep", "Tax limit", "Excess", "Shortfall"], data.assets.slice(0, 40).map((item) => row([
             escapeHtml(item.asset_code),
             escapeHtml(item.asset_name),
             escapeHtml(item.asset_category),
             money.format(item.acquisition_cost),
-            item.is_business_vehicle ? "Y" : "N",
-          ])), t(locale, "grid.empty"))}
+            escapeHtml(item.useful_life_years || "-"),
+            escapeHtml(item.depr_method || "SL"),
+            money.format(item.acct_depr_current || 0),
+            money.format(item.tax_depr_limit || 0),
+            money.format(item.depr_excess || 0),
+            money.format(item.depr_shortfall || 0),
+          ])), t(locale, "grid.empty")) : `<p class="empty" data-asset-empty>${escapeHtml(t(locale, "grid.empty"))}</p>`}
         </article>
         ${taxDataImportPanel(env, data.root, data.batches, "assets", t(locale, "taxData.assetTab"))}
       </section>
+      <section class="grid two">
+        <article class="panel" data-asset-depr-preview>
+          <div class="panel-head"><h2>Tax depreciation preview</h2><p>${escapeHtml(assetPhaseC.deprPreview ? `${money.format(assetPhaseC.deprPreview.total_tax_limit || 0)} limit / ${money.format(assetPhaseC.deprPreview.total_excess || 0)} excess` : "Preview unavailable")}</p></div>
+          ${assetPhaseC.error ? `<p class="empty" data-asset-phasec-error>${escapeHtml(assetPhaseC.error)}</p>` : ""}
+          ${previewRows.length ? table(["Asset", "Method", "Months", "Tax life", "Rate", "Book", "Tax limit", "Excess", "Shortfall"], previewRows.slice(0, 40).map((item) => row([
+            `${escapeHtml(item.asset_code)} ${escapeHtml(item.asset_name)}`,
+            escapeHtml(item.depr_method || "SL"),
+            escapeHtml(item.use_months ?? "-"),
+            escapeHtml(item.tax_life_years ?? "-"),
+            item.tax_depr_rate_bps == null ? "-" : `${(item.tax_depr_rate_bps / 100).toFixed(2)}%`,
+            money.format(item.acct_depr_current || 0),
+            money.format(item.tax_depr_limit || 0),
+            money.format(item.depr_excess || 0),
+            money.format(item.depr_shortfall || 0),
+          ])), t(locale, "grid.empty")) : `<p class="empty" data-asset-depr-empty>${escapeHtml(t(locale, "grid.empty"))}</p>`}
+        </article>
+        <article class="panel" data-asset-bs-reconcile>
+          <div class="panel-head"><h2>BS reconciliation</h2><p>${escapeHtml(assetPhaseC.bsReconcile?.valid ? t(locale, "status.ok") : t(locale, "status.warn"))}</p></div>
+          ${assetPhaseC.bsReconcile ? renderAssetBsReconcile(assetPhaseC.bsReconcile, locale) : `<p class="empty" data-asset-reconcile-empty>${escapeHtml(t(locale, "grid.empty"))}</p>`}
+        </article>
+      </section>
     </section>`;
   bindTaxDataCommonActions(env, data.root, () => renderWorkInfoAssets(env));
+  bindAssetPhaseCActions(env, data.root);
+}
+
+function renderAssetBsReconcile(result, locale) {
+  const totals = result.totals || {};
+  const register = totals.asset_register || {};
+  const bs = totals.bs || {};
+  const stdBs = totals.std_bs || {};
+  return `
+    ${metrics([
+      ["Register PPE", money.format(register.ppe_cost || 0)],
+      ["BS PPE", money.format(bs.ppe_cost || 0)],
+      ["Std BS PPE", money.format(stdBs.ppe_cost || 0)],
+      ["Accum depr", money.format(register.accumulated_depr || 0)],
+    ])}
+    ${table(["Rule", "Status", "Register", "BS", "Diff"], (result.issues || []).map((issue) => row([
+      escapeHtml(issue.rule_code),
+      escapeHtml(issue.passed ? t(locale, "status.ok") : t(locale, "status.warn")),
+      money.format(issue.actual || 0),
+      money.format(issue.expected || 0),
+      money.format(issue.difference || 0),
+    ])), t(locale, "grid.empty"))}`;
+}
+
+function bindAssetPhaseCActions(env, root) {
+  env.outlet.querySelectorAll("[data-asset-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const action = button.dataset.assetAction;
+      if (action === "carry-forward") {
+        button.disabled = true;
+        try {
+          await request(`${root}/tax-data/assets/carry-forward`, {
+            method: "POST",
+            body: JSON.stringify({}),
+          });
+          await renderWorkInfoAssets(env);
+        } finally {
+          button.disabled = false;
+        }
+      }
+      if (action === "b4") {
+        env.navigate("ws/adj:B4");
+      }
+    });
+  });
+}
+
+const TRANSACTION_PHASE_D_TABS = [
+  { key: "DONATION", module: "B2", labelKo: "기부금", labelEn: "Donation" },
+  { key: "ENTERTAINMENT", module: "B3", labelKo: "접대비", labelEn: "Entertainment" },
+  { key: "RECEIVABLE", module: "B6", labelKo: "채권", labelEn: "Receivables" },
+  { key: "INTEREST", module: "B9", labelKo: "지급이자", labelEn: "Interest" },
+];
+
+function renderTransactionPhaseDTabs(transactions, locale) {
+  const tabButtons = TRANSACTION_PHASE_D_TABS.map((tab, index) => `
+    <button class="${index === 0 ? "active" : ""}" type="button" data-transaction-tab-button="${escapeHtml(tab.key)}">${escapeHtml(uiText(locale, tab.labelKo, tab.labelEn))}</button>`).join("");
+  const panels = TRANSACTION_PHASE_D_TABS.map((tab, index) => {
+    const rows = transactions.filter((item) => normalizeTransactionCategoryForUi(item.category) === tab.key);
+    return `
+      <div class="${index === 0 ? "" : "hidden"}" data-transaction-tab="${escapeHtml(tab.key)}">
+        <div class="button-row">
+          <button class="secondary-btn compact" type="button" data-transaction-action="${escapeHtml(tab.module)}">${escapeHtml(tab.module)}</button>
+        </div>
+        ${table(["Date", t(locale, "field.name"), t(locale, "common.category"), t(locale, "field.amount"), "Evidence"], rows.map((item) => row([
+          escapeHtml(item.tx_date),
+          escapeHtml(item.partner_name),
+          escapeHtml(item.category),
+          money.format(item.amount),
+          escapeHtml(item.evidence_type || "-"),
+        ])), t(locale, "grid.empty"))}
+      </div>`;
+  }).join("");
+  return `
+    <article class="panel" data-transaction-four-tabs>
+      <div class="panel-head"><h2>${escapeHtml(t(locale, "taxData.transactionTab"))}</h2><p>Donation, entertainment, receivable, and interest source rows.</p></div>
+      <div class="tabs" role="tablist">${tabButtons}</div>
+      ${panels}
+    </article>`;
+}
+
+function renderTransactionIsReconcile(result, locale) {
+  if (!result) {
+    return `<article class="panel" data-transaction-is-reconcile><div class="empty" data-transaction-reconcile-empty>${escapeHtml(t(locale, "grid.empty"))}</div></article>`;
+  }
+  return `
+    <article class="panel" data-transaction-is-reconcile>
+      <div class="panel-head"><h2>IS / STD_IS</h2><p>Transaction totals, source IS, and standard IS.</p></div>
+      ${table(["Rule", t(locale, "common.category"), "Transactions", "IS", "STD_IS", "Diff", t(locale, "field.status")], result.issues.map((issue) => row([
+        escapeHtml(issue.rule_code),
+        escapeHtml(issue.category),
+        money.format(issue.transaction_total),
+        money.format(issue.is_total),
+        money.format(issue.std_is_total),
+        money.format(Math.max(Math.abs(issue.transaction_is_difference || 0), Math.abs(issue.is_std_difference || 0))),
+        escapeHtml(issue.passed ? t(locale, "status.ok") : statusLabel(issue.severity || "WARN", locale)),
+      ])), t(locale, "grid.empty"))}
+    </article>`;
+}
+
+function bindTransactionPhaseDActions(env) {
+  env.outlet.querySelectorAll("[data-transaction-tab-button]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const tab = button.dataset.transactionTabButton;
+      env.outlet.querySelectorAll("[data-transaction-tab]").forEach((panel) => {
+        panel.classList.toggle("hidden", panel.dataset.transactionTab !== tab);
+      });
+      env.outlet.querySelectorAll("[data-transaction-tab-button]").forEach((candidate) => {
+        candidate.classList.toggle("active", candidate.dataset.transactionTabButton === tab);
+      });
+    });
+  });
+  env.outlet.querySelectorAll("[data-transaction-action]").forEach((button) => {
+    button.addEventListener("click", () => env.navigate(`ws/adj:${button.dataset.transactionAction}`));
+  });
+}
+
+function normalizeTransactionCategoryForUi(value) {
+  const normalized = String(value || "").trim().toUpperCase().replace(/[\s-]+/g, "_");
+  if (["DONATIONS", "GIFT", "CONTRIBUTION"].includes(normalized)) return "DONATION";
+  if (["ENTERTAIN", "CORP_CARD", "NO_RECEIPT", "CONDOLENCE"].includes(normalized)) return "ENTERTAINMENT";
+  if (["INTEREST_EXP", "INTEREST_EXPENSE", "LOAN_INTEREST"].includes(normalized)) return "INTEREST";
+  if (["RECEIVABLES", "AR", "BAD_DEBT", "BAD_DEBT_RESERVE", "BAD_DEBT_ALLOWANCE"].includes(normalized)) return "RECEIVABLE";
+  return normalized;
+}
+
+function phaseFStdFsIssueRows(result) {
+  return phaseFIssues(result).filter((issue) =>
+    ["CHK_STDBS_BALANCE", "CHK_STDBS_VS_FS", "CHK_STDIS_VS_FS", "CHK_STDFS_UNMAPPED", "CHK_STDFS_CONFIRMED"].includes(issue.rule_code)
+  );
+}
+
+function isPhaseFIssue(issue) {
+  const area = String(issue?.area || "").toLowerCase();
+  const ruleCode = String(issue?.rule_code || "");
+  return area === "tax-data" || area === "std-fs" || ruleCode.startsWith("TD_") || ruleCode.startsWith("CHK_");
+}
+
+function phaseFIssues(result) {
+  return asArray(result?.issues).filter(isPhaseFIssue);
+}
+
+function phaseFErrorCount(result) {
+  return phaseFIssues(result).filter((issue) => issue.severity === "ERROR").length;
+}
+
+function phaseFWarnCount(result) {
+  return phaseFIssues(result).filter((issue) => issue.severity === "WARN").length;
+}
+
+function renderPhaseFGateResult(result, locale) {
+  if (!result) {
+    return `<div class="empty" data-phase-f-empty>${escapeHtml(t(locale, "grid.empty"))}</div>`;
+  }
+  const errorCount = phaseFErrorCount(result);
+  const warnCount = phaseFWarnCount(result);
+  return `
+    <div data-phase-f-result>
+      ${metrics([
+        ["Phase F ERROR", money.format(errorCount)],
+        ["Phase F WARN", money.format(warnCount)],
+        ["All ERROR", money.format(result.error_count || 0)],
+        ["Gate", errorCount === 0 ? "OPEN" : "BLOCKED"],
+      ])}
+      ${table(["Rule", "Severity", "Message"], phaseFStdFsIssueRows(result).map((issue) => row([
+        escapeHtml(issue.rule_code),
+        escapeHtml(issue.severity),
+        escapeHtml(issue.message || "-"),
+      ])), "Standard FS checks passed.")}
+    </div>`;
+}
+
+async function runPhaseFValidationGate(env, root, { navigateOnPass = false } = {}) {
+  const result = await request(`${root}/validation/run`, { method: "POST", body: "{}" });
+  validationRunState.set(env.context?.byId || env.context?.businessYearId || "default", result);
+  if (phaseFErrorCount(result) === 0) {
+    if (navigateOnPass) env.navigate("ws/adj:B1");
+    return result;
+  }
+  await renderWorkInfoConsistency(env);
+  return result;
+}
+
+async function ensurePhaseFAdjustmentGate(env, moduleCode) {
+  const root = workRoot(env);
+  const result = await request(`${root}/validation/run`, { method: "POST", body: "{}" });
+  validationRunState.set(env.context?.byId || env.context?.businessYearId || "default", result);
+  if (phaseFErrorCount(result) === 0) return true;
+  env.outlet.innerHTML = renderPhaseFAdjustmentGate(env, moduleCode, result);
+  bindPhaseFAdjustmentGateActions(env, moduleCode);
+  return false;
+}
+
+function renderPhaseFAdjustmentGate(env, moduleCode, result) {
+  return `
+    <section class="leaf-workbench validation-workbench" data-stage="adjustment" data-adjustment-gated="phase-f" data-module-code="${escapeHtml(moduleCode)}">
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <span class="badge error">Validation blocked</span>
+            <h2>${escapeHtml(uiText(env.locale, "1-9 일관성 검증 필요", "Consistency validation required"))}</h2>
+            <p>${escapeHtml(uiText(env.locale, "ERROR 0건일 때만 단계 2 세무조정에 진입할 수 있습니다.", "Adjustment step opens only when validation has zero ERROR issues."))}</p>
+          </div>
+          <div class="button-row">
+            <button class="primary-btn compact" type="button" data-phase-f-action="run">${escapeHtml(t(env.locale, "common.run"))}</button>
+            <button class="secondary-btn compact" type="button" data-phase-f-action="consistency">${escapeHtml(t(env.locale, "taxData.consistency"))}</button>
+          </div>
+        </div>
+        ${renderPhaseFGateResult(result, env.locale)}
+      </article>
+    </section>`;
+}
+
+function bindPhaseFAdjustmentGateActions(env, moduleCode) {
+  env.outlet.querySelectorAll("[data-phase-f-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (button.dataset.phaseFAction === "consistency") {
+        env.navigate("ws/info:consistency");
+        return;
+      }
+      if (await ensurePhaseFAdjustmentGate(env, moduleCode)) {
+        await renderAdjustments({
+          ...env,
+          key: `ws/adj:${moduleCode}`,
+          routeKey: `ws/adj:${moduleCode}`,
+          leafKey: `ws/adj:${moduleCode}`,
+          leafSuffix: moduleCode,
+        });
+      }
+    });
+  });
+}
+
+function renderVehicleB10Reconcile(result, locale) {
+  if (!result) {
+    return `<article class="panel" data-vehicle-b10-reconcile><div class="empty" data-vehicle-b10-empty>${escapeHtml(t(locale, "grid.empty"))}</div></article>`;
+  }
+  return `
+    <article class="panel" data-vehicle-b10-reconcile>
+      <div class="panel-head">
+        <div><h2>B10</h2><p>${escapeHtml(result.valid ? t(locale, "status.ok") : t(locale, "status.warn"))}</p></div>
+        <button class="secondary-btn compact" type="button" data-vehicle-action="b10">B10</button>
+      </div>
+      ${table(["Asset", "Total km", "Business km", "%", "Source", "Tax limit", "Expected", "B10", t(locale, "field.status")], (result.rows || []).map((item) => row([
+        `${escapeHtml(item.asset_code)} ${escapeHtml(item.asset_name)}`,
+        escapeHtml(item.total_distance_km),
+        escapeHtml(item.business_distance_km),
+        `<span data-vehicle-usage-ratio="${escapeHtml(item.business_use_bps)}">${(item.business_use_bps / 100).toFixed(1)}%</span>`,
+        escapeHtml(item.business_use_source),
+        money.format(item.tax_limit || 0),
+        money.format(item.expected_addback || 0),
+        money.format(item.b10_item_amount || 0),
+        escapeHtml(item.linked ? t(locale, "status.ok") : t(locale, "status.warn")),
+      ])), t(locale, "grid.empty"))}
+    </article>`;
+}
+
+function bindVehiclePhaseEActions(env) {
+  env.outlet.querySelectorAll("[data-vehicle-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (button.dataset.vehicleAction === "b10") env.navigate("ws/adj:B10");
+    });
+  });
 }
 
 async function renderWorkInfoTransactions(env) {
   if (!requireWorkContext(env)) return;
   const activeLeaf = env.routeKey || env.leafKey || env.key;
   const data = await loadTaxDataWorkbenchData(env);
+  const phaseD = await loadTransactionPhaseDData(data.root);
   const locale = env.locale;
   env.outlet.innerHTML = `
     <section class="leaf-workbench tax-data-workbench" data-stage="tax-data" data-tax-data-stage="transactions" data-leaf-key="ws/info:transactions">
       ${taxDataHeader(env, activeLeaf, t(locale, "route.ws.info.transactions"), t(locale, "taxData.transactionTab"), data.validation)}
+      ${phaseD.error ? `<div class="empty" data-transaction-phase-error>${escapeHtml(phaseD.error)}</div>` : ""}
       <section class="grid two">
-        <article class="panel">
-          <div class="panel-head"><h2>${escapeHtml(t(locale, "taxData.transactionTab"))}</h2><p>Donation, entertainment, interest, and other adjustment source transactions.</p></div>
-          ${table(["Date", t(locale, "field.name"), t(locale, "common.category"), t(locale, "field.amount")], data.transactions.slice(0, 40).map((item) => row([
-            escapeHtml(item.tx_date),
-            escapeHtml(item.partner_name),
-            escapeHtml(item.category),
-            money.format(item.amount),
-          ])), t(locale, "grid.empty"))}
-        </article>
+        ${renderTransactionPhaseDTabs(data.transactions, locale)}
+        ${renderTransactionIsReconcile(phaseD.isReconcile, locale)}
         ${taxDataImportPanel(env, data.root, data.batches, "transactions", t(locale, "taxData.transactionTab"))}
       </section>
     </section>`;
   bindTaxDataCommonActions(env, data.root, () => renderWorkInfoTransactions(env));
+  bindTransactionPhaseDActions(env);
 }
 
 async function renderWorkInfoVehicleUsage(env) {
   if (!requireWorkContext(env)) return;
   const activeLeaf = env.routeKey || env.leafKey || env.key;
   const data = await loadTaxDataWorkbenchData(env);
+  const phaseE = await loadVehiclePhaseEData(data.root);
   const locale = env.locale;
   const vehicleAssetOptions = data.assets
     .filter((asset) => asset.is_business_vehicle)
@@ -4361,6 +5013,7 @@ async function renderWorkInfoVehicleUsage(env) {
   env.outlet.innerHTML = `
     <section class="leaf-workbench tax-data-workbench" data-stage="tax-data" data-tax-data-stage="vehicle-usage" data-leaf-key="ws/info:vehicle">
       ${taxDataHeader(env, activeLeaf, t(locale, "route.ws.info.vehicle"), t(locale, "taxData.vehicleTab"), data.validation)}
+      ${phaseE.error ? `<div class="empty" data-vehicle-phase-error>${escapeHtml(phaseE.error)}</div>` : ""}
       <section class="grid two">
         <article class="panel">
           <div class="panel-head"><h2>${escapeHtml(t(locale, "taxData.vehicleTab"))}</h2><p>Monthly business-use mileage used by business vehicle adjustment.</p></div>
@@ -4385,8 +5038,12 @@ async function renderWorkInfoVehicleUsage(env) {
           </form>
         </article>
       </section>
+      <section class="grid two">
+        ${renderVehicleB10Reconcile(phaseE.b10Reconcile, locale)}
+      </section>
     </section>`;
   bindTaxDataCommonActions(env, data.root, () => renderWorkInfoVehicleUsage(env));
+  bindVehiclePhaseEActions(env);
   env.outlet.querySelector("#vehicleLogForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     await request(`${data.root}/vehicle-usage-logs`, {
@@ -4407,17 +5064,22 @@ async function renderWorkInfoConsistency(env) {
   const activeLeaf = env.routeKey || env.leafKey || env.key;
   const data = await loadTaxDataWorkbenchData(env);
   const locale = env.locale;
+  const byId = env.context?.byId || env.context?.businessYearId || "default";
+  const lastResult = validationRunState.get(byId) || null;
   env.outlet.innerHTML = `
     <section class="leaf-workbench tax-data-workbench" data-stage="tax-data" data-tax-data-stage="consistency" data-leaf-key="ws/info:consistency">
       ${taxDataHeader(env, activeLeaf, t(locale, "route.ws.info.consistency"), t(locale, "taxData.consistency"), data.validation)}
       <section class="grid two">
-        <article class="panel">
+        <article class="panel" data-phase-f-gate>
           <div class="panel-head">
             <div><h2>${escapeHtml(t(locale, "taxData.consistency"))}</h2><p>${escapeHtml(t(locale, "taxData.sourceJump"))}</p></div>
             <button id="taxDataValidate" class="secondary-btn compact" type="button">${escapeHtml(t(locale, "common.run"))}</button>
           </div>
           ${renderTaxDataValidationSummary(data.validation)}
-          <div class="button-row"><button class="primary-btn" type="button" id="taxDataComplete">${escapeHtml(t(locale, "taxData.completeInput"))}</button></div>
+          ${renderPhaseFGateResult(lastResult, locale)}
+          <div class="button-row">
+            <button class="primary-btn" type="button" id="taxDataComplete" data-phase-f-enter-adjustment>${escapeHtml(t(locale, "taxData.completeInput"))}</button>
+          </div>
         </article>
         <article class="panel">
           <div class="panel-head"><h2>${escapeHtml(t(locale, "taxData.issueDrilldown"))}</h2><p>${escapeHtml(t(locale, "taxData.sourceJump"))}</p></div>
@@ -4431,13 +5093,16 @@ async function renderWorkInfoConsistency(env) {
     </section>`;
   bindTaxDataCommonActions(env, data.root, () => renderWorkInfoConsistency(env));
   env.outlet.querySelector("#taxDataValidate")?.addEventListener("click", async () => {
-    await request(`${data.root}/tax-data/validation`, { method: "POST", body: "{}" });
+    const result = await request(`${data.root}/validation/run`, { method: "POST", body: "{}" });
+    validationRunState.set(byId, result);
     await renderWorkInfoConsistency(env);
   });
   env.outlet.querySelectorAll("[data-source-jump]").forEach((button) => {
     button.addEventListener("click", () => env.navigate(taxDataRouteForSource(button.dataset.sourceJump)));
   });
-  env.outlet.querySelector("#taxDataComplete")?.addEventListener("click", () => env.navigate("ws/adj:B1"));
+  env.outlet.querySelector("#taxDataComplete")?.addEventListener("click", async () => {
+    await runPhaseFValidationGate(env, data.root, { navigateOnPass: true });
+  });
 }
 
 async function renderWorkInfo(env) {
@@ -4451,9 +5116,11 @@ async function renderWorkInfo(env) {
     request(`${root}/tax-data/transactions`),
     request(`${root}/vehicle-usage-logs`),
     request(`${root}/tax-data/import-batches`),
-    request(`${routeRoot(env)}/customers/${encodeURIComponent(env.context.customerId)}/account-mappings`).catch(() => []),
+    request(`${root}/account-mappings`).catch(() => []),
     request(`${root}/validation/issues`).catch(() => []),
   ]);
+  const stdFs = await loadStdFsWorkbenchData(root);
+  const mappingData = { root, validation, fs, assets, transactions, vehicleLogs, batches, mappings, issues, stdFs };
   const vehicleAssetOptions = assets
     .filter((asset) => asset.is_business_vehicle)
     .map((asset) => `<option value="${escapeHtml(asset.asset_id)}">${escapeHtml(asset.asset_name)} (${escapeHtml(asset.asset_code)})</option>`)
@@ -4538,20 +5205,13 @@ async function renderWorkInfo(env) {
           ${table(["Asset ID", "Month", "Total km", "Business km", "%"], vehicleLogs.map((item) => row([escapeHtml(item.asset_id), escapeHtml(item.usage_month), escapeHtml(item.total_distance_km), escapeHtml(item.business_distance_km), `${(item.business_use_bps / 100).toFixed(1)}%`])))}
         </div>
       </section>
+      <section class="panel" data-dual-mapping-tabs>
+        ${renderDualMappingTabs(locale)}
+        ${renderTaxAccountMappingPanel(mappingData, locale)}
+        ${renderStdFsMappingPanel(mappingData, locale)}
+      </section>
+      ${renderStdFsWorkbench(mappingData, locale)}
       <section class="grid two">
-        <article class="panel">
-          <div class="panel-head"><h2>${escapeHtml(t(locale, "taxData.mapping"))}</h2></div>
-          <form id="mappingForm" class="stack">
-            <div class="form-grid">
-              <label>${escapeHtml(t(locale, "field.code"))} <input id="mapSourceCode" value="${escapeHtml(fs[0]?.account_code || "")}" /></label>
-              <label>${escapeHtml(t(locale, "field.name"))} <input id="mapSourceName" value="${escapeHtml(fs[0]?.account_name || "")}" /></label>
-              <label>Standard code <input id="mapStandardCode" value="${escapeHtml(fs[0]?.standard_account_code || "")}" /></label>
-              <label>Standard name <input id="mapStandardName" value="${escapeHtml(fs[0]?.standard_account_name || "")}" /></label>
-            </div>
-            <button class="primary-btn" type="submit">${escapeHtml(t(locale, "taxData.mappingRule"))}</button>
-          </form>
-          ${table([t(locale, "field.code"), t(locale, "field.name"), "Standard"], mappings.slice(0, 8).map((item) => row([escapeHtml(item.source_account_code), escapeHtml(item.source_account_name), escapeHtml(item.standard_account_name)])))}
-        </article>
         <article class="panel">
           <div class="panel-head"><h2>${escapeHtml(t(locale, "taxData.vehicleEditor"))}</h2></div>
           <form id="vehicleLogForm" class="stack">
@@ -4570,6 +5230,8 @@ async function renderWorkInfo(env) {
       </div>
     </section>`;
 
+  bindDualMappingTabs(env.outlet);
+  bindStdFsWorkbenchActions(env, mappingData, () => renderWorkInfo(env));
   document.querySelectorAll("[data-tax-template]").forEach((button) => {
     button.addEventListener("click", () => {
       downloadBinary(`${routeRoot(env)}/tax-data/templates/${button.dataset.taxTemplate}`, `tax-data-${button.dataset.taxTemplate}-template.csv`);
@@ -4579,7 +5241,14 @@ async function renderWorkInfo(env) {
     button.addEventListener("click", () => activateTaxDataTab(button.dataset.taxTabButton));
   });
   document.querySelectorAll("[data-source-jump]").forEach((button) => {
-    button.addEventListener("click", () => activateTaxDataTab(button.dataset.sourceJump));
+    button.addEventListener("click", () => {
+      if (button.dataset.sourceJump === "std-fs") {
+        activateMappingTab("std-fs", env.outlet);
+        env.outlet.querySelector("[data-dual-mapping-tabs]")?.scrollIntoView({ block: "start" });
+        return;
+      }
+      activateTaxDataTab(button.dataset.sourceJump);
+    });
   });
   document.querySelectorAll("[data-import-errors]").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -4595,7 +5264,8 @@ async function renderWorkInfo(env) {
     });
   });
   document.getElementById("taxDataValidate").addEventListener("click", async () => {
-    const result = await request(`${root}/tax-data/validation`, { method: "POST", body: "{}" });
+    const result = await request(`${root}/validation/run`, { method: "POST", body: "{}" });
+    validationRunState.set(env.context?.byId || env.context?.businessYearId || "default", result);
     await renderWorkInfo(env);
     console.info(result);
   });
@@ -4614,7 +5284,7 @@ async function renderWorkInfo(env) {
   });
   document.getElementById("mappingForm").addEventListener("submit", async (event) => {
     event.preventDefault();
-    await request(`${routeRoot(env)}/customers/${encodeURIComponent(env.context.customerId)}/account-mappings`, {
+    await request(`${root}/account-mappings`, {
       method: "POST",
       body: JSON.stringify({
         statement_type: "FS",
@@ -4639,7 +5309,9 @@ async function renderWorkInfo(env) {
     });
     await renderWorkInfo(env);
   });
-  document.getElementById("taxDataComplete").addEventListener("click", () => env.navigate("ws/adj:B1"));
+  document.getElementById("taxDataComplete").addEventListener("click", async () => {
+    await runPhaseFValidationGate(env, root, { navigateOnPass: true });
+  });
 }
 
 function activateTaxDataTab(tab) {
@@ -4653,6 +5325,7 @@ function activateTaxDataTab(tab) {
 
 function sourceTabForIssue(issue) {
   const source = String(issue?.source || issue?.source_module || issue?.field_path || issue?.rule_code || "").toLowerCase();
+  if (source.includes("std_fs") || source.includes("stdfs") || source.includes("stdbs") || source.includes("stdis")) return "std-fs";
   if (source.includes("asset")) return "assets";
   if (source.includes("vehicle")) return "vehicle";
   if (source.includes("transaction") || source.includes("tx")) return "transactions";
@@ -5532,16 +6205,18 @@ function validationIssueLeaf(issue) {
 
 function efilingIssueLeaf(issue) {
   const target = String(issue?.field_path || issue?.message || "").toLowerCase();
+  if (target.includes("std_fs") || target.includes("std-fs") || target.includes("stdfs")) return "ws/info:mapping";
   if (target.includes("biz") || target.includes("corp")) return "ws/info:fs";
   if (target.includes("tax") || target.includes("form3")) return "ws/form:preview";
   return "ws/val:issues";
 }
 
 function validationCounts(issues) {
+  const openIssues = asArray(issues).filter((issue) => (issue.status || "OPEN") === "OPEN");
   return {
-    errors: issues.filter((issue) => issue.severity === "ERROR" && issue.status !== "DISMISSED").length,
-    warns: issues.filter((issue) => issue.severity === "WARN" && issue.status !== "DISMISSED").length,
-    infos: issues.filter((issue) => issue.severity === "INFO" && issue.status !== "DISMISSED").length,
+    errors: openIssues.filter((issue) => issue.severity === "ERROR").length,
+    warns: openIssues.filter((issue) => issue.severity === "WARN").length,
+    infos: openIssues.filter((issue) => issue.severity === "INFO").length,
   };
 }
 

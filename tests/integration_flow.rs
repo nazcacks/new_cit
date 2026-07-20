@@ -292,7 +292,10 @@ async fn api_flow_persists_to_postgres_generates_efiling_and_handles_dlq() {
         &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/efilings/precheck"),
     )
     .await;
-    assert_eq!(efile_precheck["record_count"], 3);
+    assert!(
+        efile_precheck["record_count"].as_i64().unwrap_or_default() > 3,
+        "{efile_precheck}"
+    );
     assert_eq!(
         efile_precheck["checksum_preview"]
             .as_str()
@@ -353,6 +356,9 @@ async fn api_flow_persists_to_postgres_generates_efiling_and_handles_dlq() {
         .expect("file bytes");
     assert!(bytes.starts_with(b"H"));
     assert!(bytes.windows(2).any(|window| window == b"\r\n"));
+    assert!(bytes
+        .windows(b"<stdFsRecord".len())
+        .any(|window| window == b"<stdFsRecord"));
 
     let poison = queue::enqueue(&state.pool, "unsupported_job", json!({"case":"dlq"}), 1)
         .await
@@ -972,6 +978,7 @@ BS,20100,Accounts payable,0,1000000,STD_PAYABLE,Accounts payable
     .await;
     assert_eq!(imported["batch"]["status"], "IMPORTED");
     assert_eq!(imported["batch"]["valid_count"], 2);
+    assert_eq!(imported["stdMapRate"], json!(1.0));
 
     let mappings = get_json(
         client,
@@ -979,6 +986,12 @@ BS,20100,Accounts payable,0,1000000,STD_PAYABLE,Accounts payable
     )
     .await;
     assert!(mappings.as_array().expect("mappings").len() >= 2);
+    assert!(mappings
+        .as_array()
+        .expect("mappings")
+        .iter()
+        .any(|row| row["std_account_code"] == "STD_CASH"
+            && row["standard_account_code"] == "STD_CASH"));
 
     let remap_csv = "\
 statement_type,account_code,account_name,debit,credit
@@ -994,12 +1007,14 @@ BS,20100,Accounts payable,0,2000000
     )
     .await;
     assert_eq!(remapped["batch"]["auto_mapped_count"], 2);
+    assert_eq!(remapped["stdMapRate"], json!(1.0));
     assert!(
         remapped["batch"]["metadata"]["mapping_rate"]
             .as_f64()
             .unwrap_or_default()
             >= 0.95
     );
+    assert_eq!(remapped["batch"]["metadata"]["stdMapRate"], json!(1.0));
 
     let pl_csv = "\
 statement_type,account_code,account_name,debit,credit,standard_account_code,standard_account_name
@@ -1017,6 +1032,14 @@ PL,EXP001,Temporary expense,500000000,0,STD_EXPENSE,Temporary expense
     assert_eq!(pl_imported["batch"]["status"], "IMPORTED");
 
     let lines = get_json(client, &format!("{import_url}/financial-statements")).await;
+    let line_count_before_failed_import = lines.as_array().expect("fs lines").len();
+    assert!(lines
+        .as_array()
+        .expect("fs lines")
+        .iter()
+        .any(|row| row["account_code"] == "10100"
+            && row["std_account_code"] == "STD_CASH"
+            && row["is_auto_mapped"] == true));
     assert!(lines
         .as_array()
         .expect("fs lines")
@@ -1099,7 +1122,66 @@ BS,20100,Accounts payable,0,900
         .as_array()
         .expect("import errors")
         .iter()
-        .any(|row| row["row_no"] == 0));
+        .any(|row| row["row_no"] == 0 && row["field_name"] == "BS.debit_credit"));
+
+    let lines_after_failed_bs =
+        get_json(client, &format!("{import_url}/financial-statements")).await;
+    assert_eq!(
+        lines_after_failed_bs.as_array().expect("fs lines").len(),
+        line_count_before_failed_import
+    );
+
+    let bad_is_csv = "\
+statement_type,account_code,account_name,debit,credit
+IS,40100,Revenue,0,1000
+IS,50100,Expense,900,0
+";
+    let failed_is = post_csv_file(
+        client,
+        &format!("{import_url}/financial-statements/import"),
+        "is-bad.csv",
+        bad_is_csv,
+        StatusCode::CREATED,
+    )
+    .await;
+    assert_eq!(failed_is["batch"]["status"], "VALIDATION_FAILED");
+    assert!(failed_is["errors"]
+        .as_array()
+        .expect("errors")
+        .iter()
+        .any(|row| row["row_no"] == 0 && row["field_name"] == "IS.debit_credit"));
+
+    let lines_after_failed_is =
+        get_json(client, &format!("{import_url}/financial-statements")).await;
+    assert_eq!(
+        lines_after_failed_is.as_array().expect("fs lines").len(),
+        line_count_before_failed_import
+    );
+
+    post_json(
+        client,
+        &format!(
+            "{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/std-fs/mappings/bulk"
+        ),
+        json!({
+            "mappings": [
+                {"account_code": "10100", "std_fs_item_code": "1010"},
+                {"account_code": "20100", "std_fs_item_code": "2010"},
+                {"account_code": "NETINC", "std_fs_item_code": "9000"},
+                {"account_code": "EXP001", "std_fs_item_code": "8500"}
+            ]
+        }),
+        StatusCode::OK,
+    )
+    .await;
+    let confirmed = post_json(
+        client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/std-fs/confirm"),
+        json!({}),
+        StatusCode::OK,
+    )
+    .await;
+    assert!(confirmed["confirmed_count"].as_u64().unwrap_or_default() > 0);
 }
 
 async fn assert_income_adjustment_engine_works(
@@ -1876,7 +1958,8 @@ async fn assert_cross_cutting_ops_work(
 
 fn assert_module_tree_matches_design(tree: &Value) {
     assert_eq!(tree["code"], "cit-system");
-    assert_eq!(tree["display_name"], "CIT System");
+    assert_eq!(tree["display_name"], "법인세 세무조정계산서 시스템");
+    assert_eq!(tree["label_en"], "CIT System");
 
     let modules = tree["children"].as_array().expect("module children");
     assert_eq!(modules.len(), 5);

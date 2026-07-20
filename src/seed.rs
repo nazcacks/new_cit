@@ -15,7 +15,7 @@ use crate::{
         SpecialTaxAdjustmentRequest, TaxAmountAdjustmentRequest, TaxCreditInput, TenantRef,
         TransactionBasedAdjustmentRequest, ValuationPositionInput,
     },
-    efiling, menu, tax, tax_data, tenant, validation_rules,
+    efiling, menu, std_fs, tax, tax_data, tenant, validation_rules,
 };
 
 const DEMO_PASSWORD: &str = "ChangeMe123!";
@@ -627,6 +627,7 @@ async fn clear_seeded_business_year_data(
         format!("DELETE FROM {schema}.depreciation WHERE by_id = ANY($1)"),
         format!("DELETE FROM {schema}.assets WHERE by_id = ANY($1)"),
         format!("DELETE FROM {schema}.transactions WHERE by_id = ANY($1)"),
+        format!("DELETE FROM {schema}.std_fs_statements WHERE business_year_id = ANY($1)"),
         format!("DELETE FROM {schema}.fs_lines WHERE fs_id IN (SELECT fs_id FROM {schema}.financial_statements WHERE by_id = ANY($1))"),
         format!("DELETE FROM {schema}.financial_statements WHERE by_id = ANY($1)"),
         format!("DELETE FROM {schema}.import_batches WHERE by_id = ANY($1)"),
@@ -698,6 +699,7 @@ async fn seed_tax_data(pool: &PgPool, tenant_ref: &TenantRef, by_id: i64) -> Res
             ));
         }
     }
+    seed_std_fs_fixture(pool, tenant_ref, by_id).await?;
 
     let vehicles = tax_data::list_assets(pool, tenant_ref, by_id)
         .await?
@@ -719,6 +721,105 @@ async fn seed_tax_data(pool: &PgPool, tenant_ref: &TenantRef, by_id: i64) -> Res
         )
         .await?;
     }
+    Ok(())
+}
+
+async fn seed_std_fs_fixture(pool: &PgPool, tenant_ref: &TenantRef, by_id: i64) -> Result<()> {
+    let snapshot = tax::ensure_law_snapshot(pool, tenant_ref, by_id).await?;
+    let Some(version_id) = snapshot.std_fs_version_id else {
+        return Ok(());
+    };
+    let schema = quote_ident(&tenant_ref.schema_name)?;
+    let customer_id = sqlx::query_scalar::<_, i64>(&format!(
+        "SELECT customer_id FROM {schema}.business_years WHERE by_id = $1"
+    ))
+    .bind(by_id)
+    .fetch_one(pool)
+    .await
+    .context("failed to resolve std fs fixture customer")?;
+
+    let update_lines = format!(
+        r#"
+        UPDATE {schema}.fs_lines l
+        SET std_fs_item_code = mapping.std_fs_item_code
+        FROM {schema}.financial_statements f,
+             (VALUES
+                ('10100', '1010'),
+                ('10200', '1030'),
+                ('10300', '1200'),
+                ('10400', '1050'),
+                ('11100', '1521'),
+                ('11200', '1522'),
+                ('11300', '1523'),
+                ('11400', '1524'),
+                ('11500', '1530'),
+                ('20100', '2010'),
+                ('20200', '2020'),
+                ('20300', '2030'),
+                ('20400', '2040'),
+                ('30100', '3010'),
+                ('30200', '3020'),
+                ('40100', '4010'),
+                ('40200', '4020'),
+                ('40300', '4030'),
+                ('40400', '4040'),
+                ('50100', '4510'),
+                ('51100', '5110'),
+                ('52100', '5120'),
+                ('53100', '5130'),
+                ('53200', '5140'),
+                ('53300', '5150'),
+                ('54100', '5170'),
+                ('55100', '5180'),
+                ('55200', '5190'),
+                ('55300', '8500'),
+                ('NET_INCOME', '9000')
+             ) AS mapping(account_code, std_fs_item_code)
+        WHERE f.fs_id = l.fs_id
+          AND f.by_id = $1
+          AND l.account_code = mapping.account_code
+        "#
+    );
+    sqlx::query(&update_lines)
+        .bind(by_id)
+        .execute(pool)
+        .await
+        .context("failed to seed std fs line mappings")?;
+
+    let insert_mappings = format!(
+        r#"
+        INSERT INTO {schema}.std_fs_mappings (
+            tenant_id, customer_id, version_id, account_code, account_name,
+            std_fs_item_code, is_auto_mapped, last_used_at
+        )
+        SELECT $1, $2, $3, l.account_code, MAX(l.account_name), l.std_fs_item_code,
+               TRUE, NOW()
+        FROM {schema}.financial_statements f
+        JOIN {schema}.fs_lines l ON l.fs_id = f.fs_id
+        WHERE f.by_id = $4
+          AND l.std_fs_item_code IS NOT NULL
+        GROUP BY l.account_code, l.std_fs_item_code
+        ON CONFLICT (customer_id, version_id, account_code) DO UPDATE
+        SET account_name = EXCLUDED.account_name,
+            std_fs_item_code = EXCLUDED.std_fs_item_code,
+            is_auto_mapped = TRUE,
+            usage_count = {schema}.std_fs_mappings.usage_count + 1,
+            last_used_at = NOW(),
+            updated_at = NOW()
+        "#
+    );
+    sqlx::query(&insert_mappings)
+        .bind(tenant_ref.tenant_id)
+        .bind(customer_id)
+        .bind(version_id)
+        .bind(by_id)
+        .execute(pool)
+        .await
+        .context("failed to seed std fs mappings")?;
+
+    std_fs::confirm_workspace_statements(pool, tenant_ref, by_id)
+        .await
+        .context("failed to seed confirmed std fs statements")?;
     Ok(())
 }
 
@@ -1254,7 +1355,8 @@ async fn seed_audit_logs(pool: &PgPool, tenant_ref: &TenantRef, by_id: i64) -> R
             )
             SELECT 'seed_demo', $1, 'CREATE', NULL, $2, 'seed-demo',
                    CURRENT_DATE, prev.hash_current,
-                   md5(COALESCE(prev.hash_current, '') || $1 || $2::text)
+                   md5(COALESCE(prev.hash_current, '') || 'seed_demo' || $1 || 'CREATE' ||
+                       COALESCE($2::jsonb::text, '') || 'seed-demo')
             FROM (SELECT 1) seed
             LEFT JOIN prev ON TRUE
             "#
@@ -1313,14 +1415,14 @@ fn financial_statement_csv() -> String {
         "BS,10400,선급비용,125000000,0,STD_PREPAID,선급비용",
         "BS,11100,토지,300000000,0,STD_LAND,토지",
         "BS,11200,건물,900000000,0,STD_BUILDING,건물",
-        "BS,11300,차량운반구,120000000,0,STD_VEHICLE,차량운반구",
-        "BS,11400,기계장치,650000000,0,STD_MACHINERY,기계장치",
-        "BS,11500,소프트웨어,90000000,0,STD_SOFTWARE,소프트웨어",
+        "BS,11300,차량운반구,225000000,0,STD_VEHICLE,차량운반구",
+        "BS,11400,기계장치,720000000,0,STD_MACHINERY,기계장치",
+        "BS,11500,소프트웨어,120000000,0,STD_INTANGIBLE,소프트웨어",
         "IS,50100,매출원가,1100000000,0,STD_COGS,매출원가",
         "IS,51100,급여,360000000,0,STD_SALARY,급여",
         "IS,52100,임차료,95000000,0,STD_RENT,임차료",
-        "IS,53100,기부금,28000000,0,STD_DONATION,기부금",
-        "IS,53200,접대비,35000000,0,STD_ENTERTAINMENT,접대비",
+        "IS,53100,기부금,58000000,0,STD_DONATION,기부금",
+        "IS,53200,접대비,75000000,0,STD_ENTERTAINMENT,접대비",
         "IS,53300,이자비용,42000000,0,STD_INTEREST_EXPENSE,이자비용",
         "IS,54100,감가상각비,160000000,0,STD_DEPRECIATION,감가상각비",
         "IS,55100,연구개발비,80000000,0,STD_RND,연구개발비",
@@ -1331,12 +1433,12 @@ fn financial_statement_csv() -> String {
         "BS,20300,미지급세금,0,30000000,STD_TAX_PAYABLE,미지급세금",
         "BS,20400,미지급비용,0,95000000,STD_ACCRUAL,미지급비용",
         "BS,30100,자본금,0,1000000000,STD_CAPITAL,자본금",
-        "BS,30200,이익잉여금,0,650000000,STD_RETAINED_EARNINGS,이익잉여금",
-        "IS,40100,제품매출,0,1800000000,STD_PRODUCT_REVENUE,제품매출",
+        "BS,30200,이익잉여금,0,1465000000,STD_RETAINED_EARNINGS,이익잉여금",
+        "IS,40100,제품매출,0,1190000000,STD_PRODUCT_REVENUE,제품매출",
         "IS,40200,용역매출,0,620000000,STD_SERVICE_REVENUE,용역매출",
         "IS,40300,이자수익,0,25000000,STD_INTEREST_INCOME,이자수익",
         "IS,40400,외환차익,0,18000000,STD_FX_GAIN,외환차익",
-        "IS,NET_INCOME,당기순이익,0,143000000,ACCOUNTING_INCOME,회계상 소득",
+        "IS,NET_INCOME,당기순이익,0,213000000,ACCOUNTING_INCOME,회계상 소득",
     ]
     .join("\n")
 }
@@ -1351,7 +1453,7 @@ fn asset_csv() -> String {
         "MACH002,포장 라인,MACHINERY,2026-02-15,240000000,4",
         "SW001,ERP 소프트웨어,SOFTWARE,2026-01-01,120000000,3",
         "BLD001,공장 건물,BUILDING,2026-01-01,900000000,20",
-        "FIX001,사무 집기,GENERAL,2026-04-01,50000000,4",
+        "LAND001,공장 토지,LAND,2026-01-01,300000000,99",
     ]
     .join("\n")
 }

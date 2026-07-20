@@ -9,11 +9,18 @@ const profileDir = process.env.EDGE_PROFILE || join(process.cwd(), ".tmp", `cit-
 const outputDir = process.env.CAPTURE_DIR || "docs/phase9_10";
 
 const shots = [
-  { name: "admin_security", hash: "#/admin/sec/roles", selector: '[data-admin-stage="security"]' },
-  { name: "admin_law", hash: "#/admin/law/master", selector: '[data-admin-stage="law"]' },
-  { name: "admin_forms", hash: "#/admin/form/master", selector: '[data-admin-stage="forms-admin"]' },
-  { name: "workflow_validation", hash: "#/workspace/ws/val/run", selector: '[data-stage="validation"]' },
-  { name: "workflow_post_amend", hash: "#/post/amend/unlock", selector: '[data-stage="post-amend"]' },
+  { name: "dashboard_overview", hash: "#/dashboard/overview", selector: '[data-dashboard="overview"]' },
+  { name: "work_start", hash: "#/workspace/ws/start/customer-pick", selector: '[data-work-start-stage="customer-pick"]' },
+  { name: "tax_data_fs", hash: "#/workspace/ws/info/fs", selector: '[data-tax-data-stage="financial-statements"]' },
+  { name: "std_fs_mapping", hash: "#/workspace/ws/info/mapping", selector: '[data-std-fs-workbench]' },
+  { name: "tax_data_consistency", hash: "#/workspace/ws/info/consistency", selector: '[data-tax-data-stage="consistency"]' },
+  { name: "workflow_validation", hash: "#/workspace/ws/val/run", selector: '[data-validation-stage="run"]' },
+  { name: "efiling_precheck", hash: "#/workspace/ws/file/precheck", selector: '[data-efile-stage="precheck"]' },
+  { name: "workflow_post_amend", hash: "#/post/amend/unlock", selector: '[data-amend-stage="unlock"]' },
+  { name: "admin_security", hash: "#/admin/sec/roles", selector: '[data-admin-stage="security-roles"]' },
+  { name: "admin_law", hash: "#/admin/law/master", selector: '[data-admin-stage="law-master"]' },
+  { name: "admin_forms", hash: "#/admin/form/master", selector: '[data-admin-stage="form-master"]' },
+  { name: "admin_audit", hash: "#/admin/audit/events", selector: '[data-admin-stage="audit-events"]' },
 ];
 
 class CdpClient {
@@ -22,6 +29,7 @@ class CdpClient {
     this.nextId = 1;
     this.pending = new Map();
     this.waiters = new Map();
+    this.errors = [];
     this.ws = new WebSocket(url);
     this.ws.addEventListener("message", (event) => this.onMessage(event));
   }
@@ -48,6 +56,25 @@ class CdpClient {
       this.waiters.delete(message.method);
       waiters.forEach((resolve) => resolve(message.params || {}));
     }
+    if (message.method === "Runtime.exceptionThrown") {
+      const details = message.params?.exceptionDetails;
+      this.errors.push({
+        method: message.method,
+        text: details?.exception?.description || details?.text || "runtime exception",
+      });
+    }
+    if (message.method === "Runtime.consoleAPICalled" && message.params?.type === "error") {
+      this.errors.push({
+        method: message.method,
+        text: (message.params.args || []).map((arg) => arg.value || arg.description || arg.type).join(" "),
+      });
+    }
+    if (message.method === "Log.entryAdded" && message.params?.entry?.level === "error") {
+      this.errors.push({
+        method: message.method,
+        text: message.params.entry.text,
+      });
+    }
   }
 
   send(method, params = {}) {
@@ -73,6 +100,12 @@ class CdpClient {
 
   close() {
     this.ws.close();
+  }
+
+  drainErrors() {
+    const errors = this.errors;
+    this.errors = [];
+    return errors;
   }
 }
 
@@ -156,7 +189,7 @@ async function loginAndContext() {
     fetch(`${baseUrl}/api/tenants/demo/business-years`, { headers }).then((response) => response.json()),
   ]);
   const customer = customers[0];
-  const by = years.find((item) => item.status === "FILED") || years[0];
+  const by = years.find((item) => item.status === "IN_REVIEW") || years.find((item) => item.status === "APPROVED") || years[0];
   return {
     token: auth.token,
     context: {
@@ -199,10 +232,12 @@ async function main() {
     await client.open();
     await client.send("Page.enable");
     await client.send("Runtime.enable");
+    await client.send("Log.enable");
     await client.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1200, deviceScaleFactor: 1, mobile: false });
 
     const manifest = [];
     for (const shot of shots) {
+      client.drainErrors();
       const url = `${baseUrl}/?cit_smoke_token=${encodeURIComponent(token)}&cit_smoke_context=${encodeURIComponent(JSON.stringify(context))}${shot.hash}`;
       await client.send("Page.navigate", { url });
       await waitForLoad(client);
@@ -213,6 +248,12 @@ async function main() {
         const diagnostic = await describeRoute(client);
         console.error(JSON.stringify({ shot: shot.name, selector: shot.selector, diagnostic }, null, 2));
         throw error;
+      }
+      const errors = client.drainErrors();
+      if (errors.length) {
+        const diagnostic = await describeRoute(client);
+        console.error(JSON.stringify({ shot: shot.name, errors, diagnostic }, null, 2));
+        throw new Error(`Browser console/runtime errors on ${shot.name}`);
       }
       const screenshot = await client.send("Page.captureScreenshot", {
         format: "png",

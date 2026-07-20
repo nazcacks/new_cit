@@ -1,16 +1,21 @@
-use std::io::{Cursor, Write};
+use std::{
+    collections::HashMap,
+    io::{Cursor, Write},
+};
 
 use anyhow::{anyhow, Context, Result};
-use chrono::Utc;
+use chrono::{Datelike, NaiveDate, Utc};
 use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
+use uuid::Uuid;
 
 use crate::{
     db::quote_ident,
     domain::{
         AdjustmentItem, AssetBasedAdjustmentRequest, AssetBasedAdjustmentResult,
-        CalculateAdjustmentRequest, CalculationResult, CapitalChange, CapitalChangeInput,
-        ConsolidatedEntityInput, ConsolidationEliminationInput, CreateAdjustmentAttachmentRequest,
+        AssetDepreciationPreviewResult, AssetDepreciationPreviewRow, CalculateAdjustmentRequest,
+        CalculationResult, CapitalChange, CapitalChangeInput, ConsolidatedEntityInput,
+        ConsolidationEliminationInput, CreateAdjustmentAttachmentRequest,
         CreateIncomeAdjustmentRequest, CreateLawAmendmentRequest, CreateTaxLawRequest,
         CreateTaxLimitRequest, CreateTaxRateRequest, CreateVehicleUsageLogRequest,
         DonationCarryforward, EvaluationAdjustmentRequest, EvaluationAdjustmentResult,
@@ -22,7 +27,8 @@ use crate::{
         TaxAdjustment, TaxAmountAdjustmentRequest, TaxAmountAdjustmentResult, TaxCreditInput,
         TaxLawVersion, TaxLimit, TaxRate, TenantRef, TransactionBasedAdjustmentRequest,
         TransactionBasedAdjustmentResult, UpdateFormDataRequest, UpdateTaxLawStatusRequest,
-        ValuationPositionInput, VehicleUsageLog,
+        ValuationPositionInput, VehicleB10ReconcileIssue, VehicleB10ReconcileResult,
+        VehicleB10ReconcileRow, VehicleUsageLog,
     },
     tenant,
 };
@@ -565,6 +571,15 @@ pub async fn ensure_law_snapshot(
             })
         })
         .collect::<Vec<_>>();
+    let std_fs_context = std_fs_selection_context(pool, tenant, by_id).await?;
+    let std_fs_version_id = resolve_std_fs_version_id(
+        pool,
+        by.start_date,
+        by.end_date,
+        &std_fs_context.industry_type,
+        &std_fs_context.corp_type,
+    )
+    .await?;
 
     let snapshot_data = json!({
         "business_year": {
@@ -581,20 +596,27 @@ pub async fn ensure_law_snapshot(
         "rate_ids": rate_ids,
         "limit_ids": limit_ids,
         "form_versions": form_versions,
-        "efile_masters": efile_master_ids
+        "efile_masters": efile_master_ids,
+        "std_fs": {
+            "version_id": std_fs_version_id,
+            "industry_type": std_fs_context.industry_type,
+            "corp_type": std_fs_context.corp_type
+        }
     });
 
     let schema = quote_ident(&tenant.schema_name)?;
     let sql = format!(
         r#"
         INSERT INTO {schema}.by_law_snapshot (
-            by_id, law_version_id, rate_version_ids, form_version_ids, efile_master_ids, snapshot_data
+            by_id, law_version_id, rate_version_ids, form_version_ids, efile_master_ids,
+            std_fs_version_id, snapshot_data
         )
-        VALUES ($1, $2, $3, $4, $5, $6)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (by_id)
         DO UPDATE SET snapshot_data = EXCLUDED.snapshot_data
         RETURNING snapshot_id, by_id, law_version_id, rate_version_ids,
-                  form_version_ids, efile_master_ids, snapshot_data, locked, created_at
+                  form_version_ids, efile_master_ids, std_fs_version_id, snapshot_data,
+                  locked, created_at
         "#
     );
 
@@ -604,10 +626,107 @@ pub async fn ensure_law_snapshot(
         .bind(json!(rate_ids))
         .bind(json!(form_versions))
         .bind(json!(efile_master_ids))
+        .bind(std_fs_version_id)
         .bind(snapshot_data)
         .fetch_one(pool)
         .await
         .context("failed to create law snapshot")
+}
+
+#[derive(Debug, Clone)]
+struct StdFsSelectionContext {
+    industry_type: String,
+    corp_type: String,
+}
+
+async fn std_fs_selection_context(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+) -> Result<StdFsSelectionContext> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let sql = format!(
+        r#"
+        SELECT c.industry_code,
+               COALESCE(NULLIF(TRIM(c.corp_type), ''), 'DOMESTIC') AS corp_type
+        FROM {schema}.business_years b
+        JOIN {schema}.customers c ON c.customer_id = b.customer_id
+        WHERE b.by_id = $1
+        "#
+    );
+    let row = sqlx::query(&sql)
+        .bind(by_id)
+        .fetch_one(pool)
+        .await
+        .context("failed to load standard financial statement selection context")?;
+    let industry_code = row.get::<Option<String>, _>("industry_code");
+    let corp_type = row.get::<String, _>("corp_type");
+    Ok(StdFsSelectionContext {
+        industry_type: industry_type_for_code(industry_code.as_deref()),
+        corp_type: normalize_std_fs_corp_type(&corp_type),
+    })
+}
+
+fn industry_type_for_code(industry_code: Option<&str>) -> String {
+    let Some(industry_code) = industry_code else {
+        return "GENERAL".to_string();
+    };
+    let digits = industry_code
+        .chars()
+        .filter(|ch| ch.is_ascii_digit())
+        .take(2)
+        .collect::<String>();
+    match digits.as_str() {
+        "41" | "42" => "CONSTRUCTION".to_string(),
+        "64" | "65" | "66" => "FINANCE".to_string(),
+        _ => "GENERAL".to_string(),
+    }
+}
+
+fn normalize_std_fs_corp_type(corp_type: &str) -> String {
+    match corp_type.trim().to_ascii_uppercase().as_str() {
+        "FOREIGN" => "FOREIGN".to_string(),
+        "CONSOLIDATED" => "CONSOLIDATED".to_string(),
+        _ => "DOMESTIC".to_string(),
+    }
+}
+
+async fn resolve_std_fs_version_id(
+    pool: &PgPool,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    industry_type: &str,
+    corp_type: &str,
+) -> Result<Option<Uuid>> {
+    sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT id
+        FROM std_fs_item_versions
+        WHERE status = 'ACTIVE'
+          AND effective_from <= $1
+          AND (effective_to IS NULL OR effective_to >= $2)
+          AND industry_type IN ($3, 'GENERAL')
+          AND corp_type IN ($4, 'DOMESTIC')
+        ORDER BY
+          CASE
+              WHEN industry_type = $3 AND corp_type = $4 THEN 0
+              WHEN industry_type = $3 AND corp_type = 'DOMESTIC' THEN 1
+              WHEN industry_type = 'GENERAL' AND corp_type = $4 THEN 2
+              WHEN industry_type = 'GENERAL' AND corp_type = 'DOMESTIC' THEN 3
+              ELSE 4
+          END,
+          effective_from DESC,
+          version_code DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(start_date)
+    .bind(end_date)
+    .bind(industry_type)
+    .bind(corp_type)
+    .fetch_optional(pool)
+    .await
+    .context("failed to resolve standard financial statement version")
 }
 
 pub async fn clone_law_snapshot(
@@ -643,18 +762,21 @@ pub async fn clone_law_snapshot(
     let sql = format!(
         r#"
         INSERT INTO {schema}.by_law_snapshot (
-            by_id, law_version_id, rate_version_ids, form_version_ids, efile_master_ids, snapshot_data
+            by_id, law_version_id, rate_version_ids, form_version_ids, efile_master_ids,
+            std_fs_version_id, snapshot_data
         )
-        VALUES ($1, $2, $3, $4, $5, $6)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (by_id)
         DO UPDATE SET
             law_version_id = EXCLUDED.law_version_id,
             rate_version_ids = EXCLUDED.rate_version_ids,
             form_version_ids = EXCLUDED.form_version_ids,
             efile_master_ids = EXCLUDED.efile_master_ids,
+            std_fs_version_id = EXCLUDED.std_fs_version_id,
             snapshot_data = EXCLUDED.snapshot_data
         RETURNING snapshot_id, by_id, law_version_id, rate_version_ids,
-                  form_version_ids, efile_master_ids, snapshot_data, locked, created_at
+                  form_version_ids, efile_master_ids, std_fs_version_id, snapshot_data,
+                  locked, created_at
         "#
     );
 
@@ -664,6 +786,7 @@ pub async fn clone_law_snapshot(
         .bind(source.rate_version_ids)
         .bind(source.form_version_ids)
         .bind(source.efile_master_ids)
+        .bind(source.std_fs_version_id)
         .bind(snapshot_data)
         .fetch_one(pool)
         .await
@@ -679,7 +802,7 @@ pub async fn get_law_snapshot(
     let sql = format!(
         r#"
         SELECT snapshot_id, by_id, law_version_id, rate_version_ids, form_version_ids,
-               efile_master_ids, snapshot_data, locked, created_at
+               efile_master_ids, std_fs_version_id, snapshot_data, locked, created_at
         FROM {schema}.by_law_snapshot
         WHERE by_id = $1
         "#
@@ -705,7 +828,8 @@ pub async fn lock_law_snapshot(
         SET locked = TRUE
         WHERE snapshot_id = $1
         RETURNING snapshot_id, by_id, law_version_id, rate_version_ids,
-                  form_version_ids, efile_master_ids, snapshot_data, locked, created_at
+                  form_version_ids, efile_master_ids, std_fs_version_id, snapshot_data,
+                  locked, created_at
         "#
     );
     sqlx::query_as::<_, LawSnapshot>(&sql)
@@ -780,7 +904,7 @@ pub async fn calculate_income_adjustment(
             code: "B1_ACCOUNTING_INCOME",
             amount: accounting_income,
             direction: "INFO",
-            description: "결산서상 당기순이익",
+            description: "Accounting income",
             snapshot_id: snapshot.snapshot_id,
             metadata: metadata.clone(),
         },
@@ -795,7 +919,7 @@ pub async fn calculate_income_adjustment(
             code: "B1_ADDBACKS",
             amount: addbacks,
             direction: "ADD",
-            description: "익금산입/손금불산입 합계",
+            description: "Addbacks",
             snapshot_id: snapshot.snapshot_id,
             metadata: metadata.clone(),
         },
@@ -810,7 +934,7 @@ pub async fn calculate_income_adjustment(
             code: "B1_DEDUCTIONS",
             amount: deductions,
             direction: "DEDUCT",
-            description: "익금불산입/손금산입 합계",
+            description: "Deductions",
             snapshot_id: snapshot.snapshot_id,
             metadata: metadata.clone(),
         },
@@ -825,7 +949,7 @@ pub async fn calculate_income_adjustment(
             code: "B1_TAXABLE_INCOME",
             amount: taxable_income,
             direction: "INFO",
-            description: "차가감 소득금액",
+            description: "Taxable income",
             snapshot_id: snapshot.snapshot_id,
             metadata: metadata.clone(),
         },
@@ -930,7 +1054,7 @@ pub async fn calculate_asset_based_adjustment(
             } else {
                 "DEDUCT"
             },
-            description: "자산 기반 세무조정",
+            description: "Asset based tax adjustment",
             snapshot_id: snapshot.snapshot_id,
             metadata: json!({
                 "module": module_code,
@@ -973,6 +1097,15 @@ pub async fn calculate_asset_based_adjustment(
         reserves_created,
         details,
     })
+}
+
+pub async fn preview_depreciation(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+) -> Result<AssetDepreciationPreviewResult> {
+    let snapshot = ensure_law_snapshot(pool, tenant, by_id).await?;
+    build_depreciation_preview(pool, tenant, by_id, snapshot.law_version_id).await
 }
 
 pub async fn calculate_transaction_based_adjustment(
@@ -1030,7 +1163,7 @@ pub async fn calculate_transaction_based_adjustment(
             },
             amount: addbacks - deductions,
             direction: "INFO",
-            description: "거래 기반 세무조정",
+            description: "Transaction based tax adjustment",
             snapshot_id: snapshot.snapshot_id,
             metadata: json!({
                 "module": module_code,
@@ -1195,7 +1328,7 @@ pub async fn calculate_evaluation_adjustment(
             },
             amount: summary_amount,
             direction: "INFO",
-            description: "평가 및 이월 세무조정",
+            description: "Evaluation and carryforward tax adjustment",
             snapshot_id: snapshot.snapshot_id,
             metadata: json!({
                 "module": module_code,
@@ -1321,7 +1454,7 @@ pub async fn calculate_tax_amount_adjustment(
             },
             amount: determined_tax,
             direction: "INFO",
-            description: "세액 조정",
+            description: "Tax amount adjustment",
             snapshot_id: snapshot.snapshot_id,
             metadata: json!({
                 "module": module_code,
@@ -1419,7 +1552,7 @@ pub async fn calculate_special_tax_adjustment(
             },
             amount: taxable_income,
             direction: "INFO",
-            description: "특수 세무조정",
+            description: "Special tax adjustment",
             snapshot_id: snapshot.snapshot_id,
             metadata: json!({
                 "module": module_code,
@@ -1747,72 +1880,67 @@ async fn depreciation_items(
     law_version_id: i64,
 ) -> Result<(Vec<PreparedIncomeItem>, Value)> {
     let schema = quote_ident(&tenant.schema_name)?;
+    let preview = build_depreciation_preview(pool, tenant, by_id, law_version_id).await?;
     sqlx::query(&format!(
         "DELETE FROM {schema}.depreciation WHERE by_id = $1"
     ))
     .bind(by_id)
     .execute(pool)
     .await?;
-    let assets = sqlx::query(&format!(
-        r#"
-        SELECT asset_id, asset_code, asset_name, asset_category, is_business_vehicle,
-               acquisition_cost, useful_life_years
-        FROM {schema}.assets
-        WHERE by_id = $1
-        ORDER BY asset_code
-        "#
-    ))
-    .bind(by_id)
-    .fetch_all(pool)
-    .await
-    .context("failed to load assets for depreciation")?;
+
     let mut items = Vec::new();
-    let mut details = Vec::new();
-    for asset in assets {
-        let asset_id = asset.get::<i64, _>("asset_id");
-        let asset_code = asset.get::<String, _>("asset_code");
-        let asset_name = asset.get::<String, _>("asset_name");
-        let category = asset.get::<String, _>("asset_category");
-        let cost = asset.get::<i64, _>("acquisition_cost").max(0);
-        let book_life = asset.get::<i32, _>("useful_life_years").max(1);
-        let tax_life = depreciation_tax_life(pool, law_version_id, &category).await?;
-        let book_amount = cost / i64::from(book_life);
-        let tax_limit = cost / i64::from(tax_life.max(1));
-        let addback = (book_amount - tax_limit).max(0);
+    for row in &preview.rows {
         insert_depreciation_row(
             pool,
             tenant,
             by_id,
-            asset_id,
-            book_amount,
-            tax_limit,
-            addback,
+            row.asset_id,
+            row.acct_depr_current,
+            row.tax_depr_limit,
+            row.depr_excess,
+            row.depr_shortfall,
+            json!({
+                "asset_code": row.asset_code,
+                "depr_method": row.depr_method,
+                "tax_life_years": row.tax_life_years,
+                "use_months": row.use_months,
+                "tax_depr_rate_bps": row.tax_depr_rate_bps,
+                "immediate_expense": row.immediate_expense
+            }),
         )
         .await?;
-        details.push(json!({
-            "asset_code": asset_code,
-            "book_life": book_life,
-            "tax_life": tax_life,
-            "book_amount": book_amount,
-            "tax_limit": tax_limit,
-            "addback": addback
-        }));
-        if addback > 0 {
+        update_asset_depreciation_result(pool, tenant, by_id, row).await?;
+        if row.depr_excess > 0 {
             items.push(PreparedIncomeItem {
                 section: "LOSS_DISALLOWANCE".to_string(),
-                item_code: format!("B4_{asset_code}"),
-                item_name: format!("{asset_name} 감가상각 한도초과"),
-                amount: addback,
+                item_code: format!("B4_{}", row.asset_code),
+                item_name: format!("{} depreciation limit excess", row.asset_name),
+                amount: row.depr_excess,
                 direction: "ADD".to_string(),
                 disposition: "RESERVE".to_string(),
-                law_ref: Some("법인세법 시행령 감가상각 한도".to_string()),
-                metadata: json!({"asset_id": asset_id, "category": category}),
+                law_ref: Some("Corporate tax depreciation limit".to_string()),
+                metadata: json!({
+                    "asset_id": row.asset_id,
+                    "category": row.asset_category,
+                    "tax_limit": row.tax_depr_limit,
+                    "book_amount": row.acct_depr_current,
+                    "depr_method": row.depr_method
+                }),
             });
         }
     }
-    Ok((items, json!({ "assets": details })))
-}
 
+    Ok((
+        items,
+        json!({
+            "assets": &preview.rows,
+            "total_book_amount": preview.total_book_amount,
+            "total_tax_limit": preview.total_tax_limit,
+            "total_excess": preview.total_excess,
+            "total_shortfall": preview.total_shortfall
+        }),
+    ))
+}
 fn retirement_items(request: AssetBasedAdjustmentRequest) -> (Vec<PreparedIncomeItem>, Value) {
     let book = request.book_reserve.unwrap_or(0).max(0);
     let estimated = request.estimated_liability.unwrap_or(0).max(0);
@@ -1834,11 +1962,11 @@ fn retirement_items(request: AssetBasedAdjustmentRequest) -> (Vec<PreparedIncome
             }
             .to_string(),
             item_code: "B5_RETIREMENT_LIMIT".to_string(),
-            item_name: "퇴직급여충당금 한도 조정".to_string(),
+            item_name: "Retirement reserve limit adjustment".to_string(),
             amount,
             direction: direction.to_string(),
             disposition: "RESERVE".to_string(),
-            law_ref: Some("퇴직급여충당금 한도".to_string()),
+            law_ref: Some("Retirement reserve limit".to_string()),
             metadata: json!({}),
         }]
     } else {
@@ -1861,11 +1989,11 @@ fn bad_debt_items(request: AssetBasedAdjustmentRequest) -> (Vec<PreparedIncomeIt
         vec![PreparedIncomeItem {
             section: "LOSS_DISALLOWANCE".to_string(),
             item_code: "B6_BAD_DEBT_LIMIT".to_string(),
-            item_name: "대손충당금 한도초과".to_string(),
+            item_name: "Bad debt reserve limit excess".to_string(),
             amount: addback,
             direction: "ADD".to_string(),
             disposition: "RESERVE".to_string(),
-            law_ref: Some("대손충당금 한도".to_string()),
+            law_ref: Some("Bad debt reserve limit".to_string()),
             metadata: json!({}),
         }]
     } else {
@@ -1881,7 +2009,7 @@ async fn business_vehicle_items(
     pool: &PgPool,
     tenant: &TenantRef,
     by_id: i64,
-    request: AssetBasedAdjustmentRequest,
+    _request: AssetBasedAdjustmentRequest,
 ) -> Result<(Vec<PreparedIncomeItem>, Value)> {
     let schema = quote_ident(&tenant.schema_name)?;
     let assets = sqlx::query(&format!(
@@ -1904,38 +2032,156 @@ async fn business_vehicle_items(
         let asset_name = asset.get::<String, _>("asset_name");
         let cost = asset.get::<i64, _>("acquisition_cost").max(0);
         let book_life = asset.get::<i32, _>("useful_life_years").max(1);
-        let use_bps = vehicle_business_use_bps(pool, tenant, by_id, asset_id)
-            .await?
-            .or(request.business_use_bps)
-            .unwrap_or(10_000)
-            .clamp(0, 10_000);
-        let book_amount = cost / i64::from(book_life);
-        let tax_basis = cost.min(80_000_000);
-        let annual_limit = (tax_basis / 5).min(15_000_000);
-        let tax_limit = ((annual_limit as i128) * i128::from(use_bps) / 10_000) as i64;
-        let addback = (book_amount - tax_limit).max(0);
+        let usage = vehicle_usage_summary(pool, tenant, by_id, asset_id).await?;
+        let (use_bps, use_source) = usage
+            .business_use_bps
+            .map(|bps| (bps, "usage_logs"))
+            .unwrap_or((7_000, "default_70pct"));
+        let calc = calculate_vehicle_b10_amounts(cost, book_life, use_bps);
         details.push(json!({
             "asset_code": asset_code,
-            "book_amount": book_amount,
-            "tax_basis": tax_basis,
+            "book_amount": calc.book_amount,
+            "tax_basis": calc.tax_basis,
             "business_use_bps": use_bps,
-            "tax_limit": tax_limit,
-            "addback": addback
+            "business_use_source": use_source,
+            "total_distance_km": usage.total_distance_km,
+            "business_distance_km": usage.business_distance_km,
+            "annual_limit": calc.annual_limit,
+            "tax_limit": calc.tax_limit,
+            "addback": calc.addback
         }));
-        if addback > 0 {
+        if calc.addback > 0 {
             items.push(PreparedIncomeItem {
                 section: "LOSS_DISALLOWANCE".to_string(),
                 item_code: format!("B10_{asset_code}"),
-                item_name: format!("{asset_name} 업무용승용차 한도초과"),
-                amount: addback,
+                item_name: format!("{asset_name} business vehicle limit excess"),
+                amount: calc.addback,
                 direction: "ADD".to_string(),
                 disposition: "RESERVE".to_string(),
-                law_ref: Some("업무용승용차 한도".to_string()),
-                metadata: json!({"asset_id": asset_id}),
+                law_ref: Some("Business vehicle limit".to_string()),
+                metadata: json!({"asset_id": asset_id, "business_use_bps": use_bps}),
             });
         }
     }
     Ok((items, json!({ "vehicles": details })))
+}
+
+pub async fn vehicle_b10_reconcile(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+) -> Result<VehicleB10ReconcileResult> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let assets = sqlx::query(&format!(
+        r#"
+        SELECT asset_id, asset_code, asset_name, acquisition_cost, useful_life_years
+        FROM {schema}.assets
+        WHERE by_id = $1 AND is_business_vehicle = TRUE
+        ORDER BY asset_code
+        "#
+    ))
+    .bind(by_id)
+    .fetch_all(pool)
+    .await
+    .context("failed to load business vehicle assets for B10 reconcile")?;
+    let b10_amounts = load_b10_adjustment_amounts(pool, tenant, by_id).await?;
+
+    let mut rows = Vec::new();
+    let mut issues = Vec::new();
+    for asset in assets {
+        let asset_id = asset.get::<i64, _>("asset_id");
+        let asset_code = asset.get::<String, _>("asset_code");
+        let asset_name = asset.get::<String, _>("asset_name");
+        let cost = asset.get::<i64, _>("acquisition_cost").max(0);
+        let book_life = asset.get::<i32, _>("useful_life_years").max(1);
+        let usage = vehicle_usage_summary(pool, tenant, by_id, asset_id).await?;
+        let (use_bps, use_source) = usage
+            .business_use_bps
+            .map(|bps| (bps, "usage_logs".to_string()))
+            .unwrap_or_else(|| (7_000, "default_70pct".to_string()));
+        let calc = calculate_vehicle_b10_amounts(cost, book_life, use_bps);
+        let b10_item_amount = b10_amounts.get(&asset_id).copied().unwrap_or(0);
+        let linked = b10_item_amount == calc.addback;
+
+        if usage.business_use_bps.is_none() {
+            issues.push(VehicleB10ReconcileIssue {
+                rule_code: "CHK_VEHICLE_USAGE_BPS".to_string(),
+                severity: "WARN".to_string(),
+                message: "Business vehicle has no mileage log; 70% business use default is applied"
+                    .to_string(),
+                passed: false,
+                asset_id,
+                asset_code: asset_code.clone(),
+                expected: 1,
+                actual: 0,
+                difference: 1,
+                metadata: json!({
+                    "asset_id": asset_id,
+                    "business_use_bps": use_bps,
+                    "business_use_source": use_source,
+                }),
+            });
+        }
+        issues.push(VehicleB10ReconcileIssue {
+            rule_code: "CHK_B10_LINK".to_string(),
+            severity: "ERROR".to_string(),
+            message: "B10 adjustment item must match mileage-based business vehicle addback"
+                .to_string(),
+            passed: linked,
+            asset_id,
+            asset_code: asset_code.clone(),
+            expected: calc.addback,
+            actual: b10_item_amount,
+            difference: b10_item_amount - calc.addback,
+            metadata: json!({
+                "asset_id": asset_id,
+                "item_code": format!("B10_{asset_code}"),
+                "business_use_bps": use_bps,
+                "business_use_source": use_source,
+            }),
+        });
+        rows.push(VehicleB10ReconcileRow {
+            asset_id,
+            asset_code,
+            asset_name,
+            total_distance_km: usage.total_distance_km,
+            business_distance_km: usage.business_distance_km,
+            business_use_bps: use_bps,
+            business_use_source: use_source,
+            book_amount: calc.book_amount,
+            tax_basis: calc.tax_basis,
+            annual_limit: calc.annual_limit,
+            tax_limit: calc.tax_limit,
+            expected_addback: calc.addback,
+            b10_item_amount,
+            linked,
+        });
+    }
+
+    let error_count = issues
+        .iter()
+        .filter(|issue| !issue.passed && issue.severity == "ERROR")
+        .count();
+    let warn_count = issues
+        .iter()
+        .filter(|issue| !issue.passed && issue.severity == "WARN")
+        .count();
+    let total_expected_addback = rows.iter().map(|row| row.expected_addback).sum::<i64>();
+    let total_b10_item_amount = rows.iter().map(|row| row.b10_item_amount).sum::<i64>();
+    Ok(VehicleB10ReconcileResult {
+        by_id,
+        valid: error_count == 0,
+        error_count,
+        warn_count,
+        totals: json!({
+            "vehicle_count": rows.len(),
+            "total_expected_addback": total_expected_addback,
+            "total_b10_item_amount": total_b10_item_amount,
+            "difference": total_b10_item_amount - total_expected_addback,
+        }),
+        rows,
+        issues,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -2047,11 +2293,11 @@ async fn donation_adjustment_items(
         items.push(PreparedIncomeItem {
             section: "LOSS_DISALLOWANCE".to_string(),
             item_code: "B2_SPECIAL_DONATION_EXCESS".to_string(),
-            item_name: "특례기부금 한도초과".to_string(),
+            item_name: "Special donation limit excess".to_string(),
             amount: special_excess,
             direction: "ADD".to_string(),
             disposition: "RESERVE".to_string(),
-            law_ref: Some("법인세법 기부금 한도".to_string()),
+            law_ref: Some("Corporate tax donation limit".to_string()),
             metadata: json!({
                 "carryforward_donation_type": "SPECIAL",
                 "carryforward_years": carryforward_years
@@ -2062,11 +2308,11 @@ async fn donation_adjustment_items(
         items.push(PreparedIncomeItem {
             section: "LOSS_DISALLOWANCE".to_string(),
             item_code: "B2_GENERAL_DONATION_EXCESS".to_string(),
-            item_name: "일반기부금 한도초과".to_string(),
+            item_name: "General donation limit excess".to_string(),
             amount: general_excess,
             direction: "ADD".to_string(),
             disposition: "RESERVE".to_string(),
-            law_ref: Some("법인세법 기부금 한도".to_string()),
+            law_ref: Some("Corporate tax donation limit".to_string()),
             metadata: json!({
                 "carryforward_donation_type": "GENERAL",
                 "carryforward_years": carryforward_years
@@ -2077,11 +2323,11 @@ async fn donation_adjustment_items(
         items.push(PreparedIncomeItem {
             section: "LOSS_INCLUSION".to_string(),
             item_code: "B2_PRIOR_CARRYFORWARD_USED".to_string(),
-            item_name: "전기 이월기부금 사용".to_string(),
+            item_name: "Prior donation carryforward used".to_string(),
             amount: special_prior_used + general_prior_used,
             direction: "DEDUCT".to_string(),
             disposition: "OTHER".to_string(),
-            law_ref: Some("법인세법 기부금 이월공제".to_string()),
+            law_ref: Some("Corporate tax donation carryforward deduction".to_string()),
             metadata: json!({
                 "special_used": special_prior_used,
                 "general_used": general_prior_used
@@ -2161,11 +2407,11 @@ async fn entertainment_adjustment_items(
         items.push(PreparedIncomeItem {
             section: "LOSS_DISALLOWANCE".to_string(),
             item_code: "B3_NO_CARD_DISALLOWANCE".to_string(),
-            item_name: "적격증빙 없는 접대비".to_string(),
+            item_name: "Entertainment expense without required evidence".to_string(),
             amount: no_card_disallowed,
             direction: "ADD".to_string(),
             disposition: "OUTFLOW".to_string(),
-            law_ref: Some("법인세법 접대비 증빙 규정".to_string()),
+            law_ref: Some("Corporate tax entertainment evidence rule".to_string()),
             metadata: json!({ "non_card_amount": non_card, "disallow_bps": no_card_bps }),
         });
     }
@@ -2173,11 +2419,11 @@ async fn entertainment_adjustment_items(
         items.push(PreparedIncomeItem {
             section: "LOSS_DISALLOWANCE".to_string(),
             item_code: "B3_ENTERTAINMENT_LIMIT_EXCESS".to_string(),
-            item_name: "접대비 한도초과".to_string(),
+            item_name: "Entertainment expense limit excess".to_string(),
             amount: limit_excess,
             direction: "ADD".to_string(),
             disposition: "OUTFLOW".to_string(),
-            law_ref: Some("법인세법 접대비 한도".to_string()),
+            law_ref: Some("Corporate tax entertainment limit".to_string()),
             metadata: json!({ "tax_limit": tax_limit }),
         });
     }
@@ -2237,37 +2483,37 @@ async fn interest_adjustment_items(
     let buckets = [
         (
             "B9_UNKNOWN_CREDITOR",
-            "채권자 불분명 지급이자",
+            "Interest paid to unknown creditor",
             unknown_creditor,
             "UNKNOWN_CREDITOR",
         ),
         (
             "B9_UNKNOWN_RECIPIENT",
-            "수령자 불분명 지급이자",
+            "Interest paid to unknown recipient",
             unknown_recipient,
             "UNKNOWN_RECIPIENT",
         ),
         (
             "B9_CONSTRUCTION_INTEREST",
-            "건설자금이자",
+            "Construction interest",
             construction,
             "CONSTRUCTION",
         ),
         (
             "B9_NON_BUSINESS_INTEREST",
-            "업무무관자산 관련 지급이자",
+            "Interest related to non-business assets",
             non_business,
             "NON_BUSINESS",
         ),
         (
             "B9_DEEMED_LOAN_INTEREST",
-            "가중평균 차입금 인정이자",
+            "Deemed loan interest",
             deemed_interest,
             "WEIGHTED_AVERAGE_LOAN",
         ),
         (
             "B9_MANUAL_DISALLOWANCE",
-            "수동 지급이자 손금불산입",
+            "Manual interest disallowance",
             manual,
             "MANUAL",
         ),
@@ -2282,7 +2528,7 @@ async fn interest_adjustment_items(
             amount,
             direction: "ADD".to_string(),
             disposition: "OUTFLOW".to_string(),
-            law_ref: Some("법인세법 지급이자 손금불산입".to_string()),
+            law_ref: Some("Corporate tax interest disallowance".to_string()),
             metadata: json!({ "interest_type": interest_type }),
         })
         .collect::<Vec<_>>();
@@ -2378,7 +2624,7 @@ async fn valuation_adjustment_items(
                 amount: adjustment.abs(),
                 direction: direction.to_string(),
                 disposition: "RESERVE".to_string(),
-                law_ref: Some("법인세법 평가 규정".to_string()),
+                law_ref: Some("Corporate tax valuation rule".to_string()),
                 metadata: json!({
                     "valuation_method": method,
                     "monetary": monetary,
@@ -2447,11 +2693,11 @@ async fn loss_carryforward_items(
         vec![PreparedIncomeItem {
             section: "LOSS_INCLUSION".to_string(),
             item_code: "B11_LOSS_CARRYFORWARD_DEDUCTION".to_string(),
-            item_name: "이월결손금 공제".to_string(),
+            item_name: "Loss carryforward deduction".to_string(),
             amount: deducted,
             direction: "DEDUCT".to_string(),
             disposition: "OTHER".to_string(),
-            law_ref: Some("법인세법 이월결손금 공제 규정".to_string()),
+            law_ref: Some("Corporate tax loss carryforward deduction rule".to_string()),
             metadata: json!({ "allocations": allocations }),
         }]
     } else {
@@ -2498,7 +2744,7 @@ async fn capital_reserve_items(
                     .unwrap_or("RESERVE")
             ),
             item_name: format!(
-                "{} 유보 변동",
+                "{} reserve movement",
                 row.get("source_module")
                     .and_then(Value::as_str)
                     .unwrap_or("MODULE")
@@ -2506,7 +2752,7 @@ async fn capital_reserve_items(
             amount: row.get("amount").and_then(Value::as_i64).unwrap_or(0),
             direction: "INFO".to_string(),
             disposition: "INTERNAL".to_string(),
-            law_ref: Some("자본금과 적립금 조정명세".to_string()),
+            law_ref: Some("Capital reserve schedule".to_string()),
             metadata: row.clone(),
         })
         .collect::<Vec<_>>();
@@ -2518,7 +2764,7 @@ async fn capital_reserve_items(
             amount: change.amount,
             direction: "INFO".to_string(),
             disposition: "INTERNAL".to_string(),
-            law_ref: Some("자본 변동".to_string()),
+            law_ref: Some("Capital change".to_string()),
             metadata: json!({
                 "change_date": change.change_date,
                 "description": change.description
@@ -2585,11 +2831,11 @@ async fn tax_credit_items(
             items.push(PreparedIncomeItem {
                 section: "TAX_CREDIT".to_string(),
                 item_code: format!("B12_{credit_type}"),
-                item_name: format!("{credit_type} 세액공제"),
+                item_name: format!("{credit_type} tax credit"),
                 amount: allowed,
                 direction: "DEDUCT".to_string(),
                 disposition: "OTHER".to_string(),
-                law_ref: Some("법인세법 세액공제 규정".to_string()),
+                law_ref: Some("Corporate tax credit rule".to_string()),
                 metadata: json!({ "requested_amount": requested, "rate_bps": rate_bps }),
             });
         }
@@ -2646,11 +2892,11 @@ async fn minimum_tax_items(
         vec![PreparedIncomeItem {
             section: "MINIMUM_TAX".to_string(),
             item_code: "B13_MINIMUM_TAX_ADDITIONAL".to_string(),
-            item_name: "최저한세 추가세액".to_string(),
+            item_name: "Minimum tax additional amount".to_string(),
             amount: additional_tax,
             direction: "ADD".to_string(),
             disposition: "OTHER".to_string(),
-            law_ref: Some("법인세법 최저한세 규정".to_string()),
+            law_ref: Some("Corporate tax minimum tax rule".to_string()),
             metadata: json!({ "minimum_tax": minimum_tax, "regular_tax": regular_tax }),
         }]
     } else {
@@ -2699,11 +2945,11 @@ async fn penalty_tax_items(
             items.push(PreparedIncomeItem {
                 section: "PENALTY_TAX".to_string(),
                 item_code: format!("B14_{penalty_type}"),
-                item_name: format!("{penalty_type} 가산세"),
+                item_name: format!("{penalty_type} penalty tax"),
                 amount,
                 direction: "ADD".to_string(),
                 disposition: "OTHER".to_string(),
-                law_ref: Some("가산세 규정".to_string()),
+                law_ref: Some("Penalty tax rule".to_string()),
                 metadata: json!({ "reduction_bps": reduction_bps }),
             });
         }
@@ -2766,11 +3012,11 @@ async fn foreign_corporation_items(
         items.push(PreparedIncomeItem {
             section: "FOREIGN_CORPORATION".to_string(),
             item_code: "B16_DOMESTIC_SOURCE_INCOME".to_string(),
-            item_name: "국내사업장 귀속 국내원천소득".to_string(),
+            item_name: "Domestic source income for foreign corporation".to_string(),
             amount: taxable_income,
             direction: "ADD".to_string(),
             disposition: "OTHER".to_string(),
-            law_ref: Some("외국법인 국내원천소득 규정".to_string()),
+            law_ref: Some("Foreign corporation domestic source income rule".to_string()),
             metadata: json!({ "income_count": details.len() }),
         });
     }
@@ -2844,11 +3090,11 @@ async fn consolidated_tax_items(
     let items = vec![PreparedIncomeItem {
         section: "CONSOLIDATED_TAX".to_string(),
         item_code: "B17_CONSOLIDATED_TAX_BASE".to_string(),
-        item_name: "내부거래 제거 후 연결 과세표준".to_string(),
+        item_name: "Consolidated tax base after eliminations".to_string(),
         amount: consolidated_tax_base,
         direction: "INFO".to_string(),
         disposition: "INTERNAL".to_string(),
-        law_ref: Some("연결납세 규정".to_string()),
+        law_ref: Some("Consolidated tax rule".to_string()),
         metadata: json!({ "entity_count": entities.len(), "elimination_total": elimination_total }),
     }];
     Ok((
@@ -2876,10 +3122,10 @@ async fn resolve_accounting_income(pool: &PgPool, tenant: &TenantRef, by_id: i64
         JOIN {schema}.fs_lines l ON l.fs_id = f.fs_id
         WHERE f.by_id = $1
           AND (
-              UPPER(COALESCE(l.standard_account_code, '')) IN ('NET_INCOME', 'STD_NET_INCOME', 'ACCOUNTING_INCOME')
+              UPPER(COALESCE(l.std_account_code, l.standard_account_code, '')) IN ('NET_INCOME', 'STD_NET_INCOME', 'ACCOUNTING_INCOME')
               OR UPPER(l.account_code) IN ('NET_INCOME', 'ACCOUNTING_INCOME')
               OR UPPER(l.account_name) LIKE '%NET INCOME%'
-              OR l.account_name LIKE '%당기순이익%'
+              OR UPPER(l.account_name) LIKE '%ACCOUNTING INCOME%'
           )
         "#
     );
@@ -3123,8 +3369,8 @@ async fn load_transaction_rows(
 fn classify_donation_type(description: &str) -> &'static str {
     let normalized = description.to_ascii_uppercase();
     if normalized.contains("SPECIAL")
-        || description.contains("특례")
-        || description.contains("법정")
+        || normalized.contains("SPECIAL")
+        || normalized.contains("STATUTORY")
         || normalized.contains("STATUTORY")
     {
         "SPECIAL"
@@ -3138,14 +3384,13 @@ fn classify_interest_type(description: &str) -> String {
         .trim()
         .to_ascii_uppercase()
         .replace([' ', '-'], "_");
-    if normalized.contains("UNKNOWN_CREDITOR") || description.contains("채권자불분명") {
+    if normalized.contains("UNKNOWN_CREDITOR") {
         "UNKNOWN_CREDITOR".to_string()
-    } else if normalized.contains("UNKNOWN_RECIPIENT") || description.contains("수령자불분명")
-    {
+    } else if normalized.contains("UNKNOWN_RECIPIENT") {
         "UNKNOWN_RECIPIENT".to_string()
-    } else if normalized.contains("CONSTRUCTION") || description.contains("건설자금") {
+    } else if normalized.contains("CONSTRUCTION") {
         "CONSTRUCTION".to_string()
-    } else if normalized.contains("NON_BUSINESS") || description.contains("업무무관") {
+    } else if normalized.contains("NON_BUSINESS") {
         "NON_BUSINESS".to_string()
     } else {
         "GENERAL".to_string()
@@ -3883,15 +4128,275 @@ async fn insert_consolidation_elimination(
     Ok(())
 }
 
+async fn build_depreciation_preview(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    law_version_id: i64,
+) -> Result<AssetDepreciationPreviewResult> {
+    let by = tenant::get_business_year(pool, tenant, by_id).await?;
+    let schema = quote_ident(&tenant.schema_name)?;
+    let assets = sqlx::query(&format!(
+        r#"
+        SELECT asset_id, asset_code, asset_name, asset_category, acquisition_date,
+               acquisition_cost, useful_life_years, depr_method, residual_value,
+               accumulated_depr_prior, acct_depr_current
+        FROM {schema}.assets
+        WHERE by_id = $1
+        ORDER BY asset_code
+        "#
+    ))
+    .bind(by_id)
+    .fetch_all(pool)
+    .await
+    .context("failed to load assets for depreciation preview")?;
+
+    let mut rows = Vec::with_capacity(assets.len());
+    for asset in assets {
+        let asset_id = asset.get::<i64, _>("asset_id");
+        let asset_code = asset.get::<String, _>("asset_code");
+        let asset_name = asset.get::<String, _>("asset_name");
+        let asset_category = asset.get::<String, _>("asset_category");
+        let acquisition_date = asset.get::<NaiveDate, _>("acquisition_date");
+        let acquisition_cost = asset.get::<i64, _>("acquisition_cost").max(0);
+        let useful_life_years = asset.get::<i32, _>("useful_life_years").max(1);
+        let depr_method = normalize_depr_method_for_tax(&asset.get::<String, _>("depr_method"));
+        let residual_value = asset
+            .get::<i64, _>("residual_value")
+            .max(0)
+            .min(acquisition_cost);
+        let accumulated_depr_prior = asset
+            .get::<i64, _>("accumulated_depr_prior")
+            .max(0)
+            .min(acquisition_cost);
+        let acct_depr_current = asset.get::<i64, _>("acct_depr_current").max(0);
+        let use_months = depreciation_use_months(acquisition_date, by.start_date, by.end_date);
+        let tax_life_years = depreciation_tax_life(pool, law_version_id, &asset_category).await?;
+        let immediate_expense = is_immediate_expense_asset(
+            &asset_category,
+            useful_life_years,
+            acquisition_cost,
+            accumulated_depr_prior,
+        );
+        let (tax_depr_rate_bps, mut tax_depr_limit) = if immediate_expense {
+            (
+                Some(10_000),
+                remaining_depreciable_basis(
+                    acquisition_cost,
+                    residual_value,
+                    accumulated_depr_prior,
+                ),
+            )
+        } else if depr_method == "DB" {
+            let rate_bps = depreciation_tax_rate_bps(
+                pool,
+                law_version_id,
+                &asset_category,
+                tax_life_years,
+                acquisition_cost,
+                residual_value,
+            )
+            .await?;
+            let base = (acquisition_cost - accumulated_depr_prior).max(0);
+            (
+                Some(rate_bps),
+                prorate_months(amount_by_bps(base, i64::from(rate_bps)), use_months),
+            )
+        } else {
+            let annual =
+                (acquisition_cost - residual_value).max(0) / i64::from(tax_life_years.max(1));
+            (
+                Some((10_000 / tax_life_years.max(1)).max(0)),
+                prorate_months(annual, use_months),
+            )
+        };
+        tax_depr_limit = tax_depr_limit.min(remaining_depreciable_basis(
+            acquisition_cost,
+            residual_value,
+            accumulated_depr_prior,
+        ));
+        let book_amount = if acct_depr_current > 0 {
+            acct_depr_current
+        } else {
+            let annual =
+                (acquisition_cost - residual_value).max(0) / i64::from(useful_life_years.max(1));
+            prorate_months(annual, use_months)
+        };
+        let depr_excess = (book_amount - tax_depr_limit).max(0);
+        let depr_shortfall = (tax_depr_limit - book_amount).max(0);
+
+        rows.push(AssetDepreciationPreviewRow {
+            asset_id,
+            asset_code,
+            asset_name,
+            asset_category,
+            depr_method,
+            acquisition_cost,
+            residual_value,
+            accumulated_depr_prior,
+            acct_depr_current: book_amount,
+            useful_life_years,
+            tax_life_years,
+            use_months,
+            tax_depr_rate_bps,
+            tax_depr_limit,
+            depr_excess,
+            depr_shortfall,
+            immediate_expense,
+        });
+    }
+
+    let total_book_amount = rows.iter().map(|row| row.acct_depr_current).sum();
+    let total_tax_limit = rows.iter().map(|row| row.tax_depr_limit).sum();
+    let total_excess = rows.iter().map(|row| row.depr_excess).sum();
+    let total_shortfall = rows.iter().map(|row| row.depr_shortfall).sum();
+    Ok(AssetDepreciationPreviewResult {
+        by_id,
+        law_version_id,
+        total_book_amount,
+        total_tax_limit,
+        total_excess,
+        total_shortfall,
+        rows,
+    })
+}
+
+fn depreciation_use_months(
+    acquisition_date: NaiveDate,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> i32 {
+    if acquisition_date > end_date {
+        return 0;
+    }
+    let start = acquisition_date.max(start_date);
+    let months = (end_date.year() - start.year()) * 12
+        + i32::try_from(end_date.month()).unwrap_or(12)
+        - i32::try_from(start.month()).unwrap_or(1)
+        + 1;
+    months.clamp(0, 12)
+}
+
+fn prorate_months(amount: i64, months: i32) -> i64 {
+    ((amount.max(0) as i128) * i128::from(months.clamp(0, 12)) / 12) as i64
+}
+
+fn remaining_depreciable_basis(cost: i64, residual: i64, accumulated: i64) -> i64 {
+    (cost.max(0) - residual.max(0) - accumulated.max(0)).max(0)
+}
+
+fn is_immediate_expense_asset(
+    category: &str,
+    useful_life_years: i32,
+    cost: i64,
+    accumulated: i64,
+) -> bool {
+    let normalized = category.to_ascii_uppercase();
+    useful_life_years <= 1
+        || (normalized.contains("REPAIR") && cost <= 6_000_000)
+        || (normalized.contains("REPAIR") && cost <= ((cost - accumulated).max(0) * 5 / 100))
+}
+
+fn normalize_depr_method_for_tax(value: &str) -> String {
+    let normalized = value.trim().to_ascii_uppercase().replace([' ', '-'], "_");
+    match normalized.as_str() {
+        "DB" | "DECLINING_BALANCE" | "DECLININGBALANCE" => "DB".to_string(),
+        _ => "SL".to_string(),
+    }
+}
+
+async fn depreciation_tax_rate_bps(
+    pool: &PgPool,
+    law_version_id: i64,
+    category: &str,
+    tax_life_years: i32,
+    cost: i64,
+    residual: i64,
+) -> Result<i32> {
+    let lookup = depreciation_category_lookup(category);
+    let rate = sqlx::query_scalar::<_, Option<i64>>(
+        r#"
+        SELECT amount
+        FROM tax_limits
+        WHERE law_version_id = $1
+          AND metadata->>'category' = 'DEPRECIATION_RATE'
+          AND (metadata->>'asset_category' = $2 OR item_code = $3)
+        ORDER BY tax_limit_id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(law_version_id)
+    .bind(&lookup)
+    .bind(format!("{}_DEPRECIATION_RATE_BPS", lookup))
+    .fetch_optional(pool)
+    .await
+    .context("failed to load depreciation rate")?
+    .flatten();
+    if let Some(rate) = rate {
+        return Ok(i32::try_from(rate).unwrap_or(0).clamp(0, 10_000));
+    }
+    Ok(theoretical_declining_rate_bps(
+        tax_life_years,
+        cost.max(1),
+        residual.max(cost / 20),
+    ))
+}
+
+fn theoretical_declining_rate_bps(tax_life_years: i32, cost: i64, residual: i64) -> i32 {
+    let life = tax_life_years.max(1) as f64;
+    let cost = cost.max(1) as f64;
+    let residual = residual.clamp(0, cost as i64) as f64;
+    let residual_ratio = (residual / cost).clamp(0.000001, 0.999999);
+    ((1.0 - residual_ratio.powf(1.0 / life)) * 10_000.0).round() as i32
+}
+
+fn depreciation_category_lookup(category: &str) -> String {
+    let upper = category.to_ascii_uppercase();
+    if upper.contains("VEHICLE") {
+        "VEHICLE".to_string()
+    } else if upper.contains("MACH") {
+        "MACHINE".to_string()
+    } else {
+        upper
+    }
+}
+
+async fn update_asset_depreciation_result(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+    row: &AssetDepreciationPreviewRow,
+) -> Result<()> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    sqlx::query(&format!(
+        r#"
+        UPDATE {schema}.assets
+        SET tax_depr_rate_bps = $3,
+            tax_depr_limit = $4,
+            depr_excess = $5,
+            depr_shortfall = $6,
+            updated_at = NOW()
+        WHERE by_id = $1
+          AND asset_id = $2
+        "#
+    ))
+    .bind(by_id)
+    .bind(row.asset_id)
+    .bind(row.tax_depr_rate_bps)
+    .bind(row.tax_depr_limit)
+    .bind(row.depr_excess)
+    .bind(row.depr_shortfall)
+    .execute(pool)
+    .await
+    .context("failed to update asset depreciation result")?;
+    Ok(())
+}
+
 async fn depreciation_tax_life(pool: &PgPool, law_version_id: i64, category: &str) -> Result<i32> {
     if category.to_ascii_uppercase().contains("VEHICLE") {
         return Ok(5);
     }
-    let lookup = if category.to_ascii_uppercase().contains("MACH") {
-        "MACHINE"
-    } else {
-        category
-    };
+    let lookup = depreciation_category_lookup(category);
     let life = sqlx::query_scalar::<_, Option<i64>>(
         r#"
         SELECT amount
@@ -3904,7 +4409,7 @@ async fn depreciation_tax_life(pool: &PgPool, law_version_id: i64, category: &st
         "#,
     )
     .bind(law_version_id)
-    .bind(lookup)
+    .bind(&lookup)
     .bind(format!("{}_USEFUL_LIFE_YEARS", lookup.to_ascii_uppercase()))
     .fetch_optional(pool)
     .await
@@ -3922,14 +4427,16 @@ async fn insert_depreciation_row(
     book_amount: i64,
     tax_limit: i64,
     adjustment_amount: i64,
+    shortfall_amount: i64,
+    metadata: Value,
 ) -> Result<()> {
     let schema = quote_ident(&tenant.schema_name)?;
     let sql = format!(
         r#"
         INSERT INTO {schema}.depreciation (
-            asset_id, by_id, book_amount, tax_limit, adjustment_amount
+            asset_id, by_id, book_amount, tax_limit, adjustment_amount, shortfall_amount, metadata
         )
-        VALUES ($1, $2, $3, $4, $5)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#
     );
     sqlx::query(&sql)
@@ -3938,18 +4445,55 @@ async fn insert_depreciation_row(
         .bind(book_amount)
         .bind(tax_limit)
         .bind(adjustment_amount)
+        .bind(shortfall_amount)
+        .bind(metadata)
         .execute(pool)
         .await
         .context("failed to insert depreciation result")?;
     Ok(())
 }
 
-async fn vehicle_business_use_bps(
+struct VehicleUsageSummary {
+    total_distance_km: f64,
+    business_distance_km: f64,
+    business_use_bps: Option<i32>,
+}
+
+struct VehicleB10Amounts {
+    book_amount: i64,
+    tax_basis: i64,
+    annual_limit: i64,
+    tax_limit: i64,
+    addback: i64,
+}
+
+fn calculate_vehicle_b10_amounts(
+    cost: i64,
+    useful_life_years: i32,
+    business_use_bps: i32,
+) -> VehicleB10Amounts {
+    let book_life = useful_life_years.max(1);
+    let use_bps = business_use_bps.clamp(0, 10_000);
+    let book_amount = cost.max(0) / i64::from(book_life);
+    let tax_basis = cost.max(0).min(80_000_000);
+    let annual_limit = (tax_basis / 5).min(15_000_000);
+    let tax_limit = ((annual_limit as i128) * i128::from(use_bps) / 10_000) as i64;
+    let addback = (book_amount - tax_limit).max(0);
+    VehicleB10Amounts {
+        book_amount,
+        tax_basis,
+        annual_limit,
+        tax_limit,
+        addback,
+    }
+}
+
+async fn vehicle_usage_summary(
     pool: &PgPool,
     tenant: &TenantRef,
     by_id: i64,
     asset_id: i64,
-) -> Result<Option<i32>> {
+) -> Result<VehicleUsageSummary> {
     let schema = quote_ident(&tenant.schema_name)?;
     let sql = format!(
         r#"
@@ -3967,10 +4511,53 @@ async fn vehicle_business_use_bps(
         .context("failed to summarize vehicle usage")?;
     let total = row.get::<f64, _>("total_km");
     if total <= 0.0 {
-        return Ok(None);
+        return Ok(VehicleUsageSummary {
+            total_distance_km: 0.0,
+            business_distance_km: 0.0,
+            business_use_bps: None,
+        });
     }
     let business = row.get::<f64, _>("business_km").clamp(0.0, total);
-    Ok(Some(((business / total) * 10_000.0).round() as i32))
+    Ok(VehicleUsageSummary {
+        total_distance_km: total,
+        business_distance_km: business,
+        business_use_bps: Some(((business / total) * 10_000.0).round() as i32),
+    })
+}
+
+async fn load_b10_adjustment_amounts(
+    pool: &PgPool,
+    tenant: &TenantRef,
+    by_id: i64,
+) -> Result<HashMap<i64, i64>> {
+    let schema = quote_ident(&tenant.schema_name)?;
+    let rows = sqlx::query(&format!(
+        r#"
+        SELECT asset_id, COALESCE(SUM(amount), 0)::BIGINT AS amount
+        FROM (
+            SELECT
+                CASE
+                    WHEN metadata->>'asset_id' ~ '^[0-9]+$'
+                    THEN (metadata->>'asset_id')::BIGINT
+                    ELSE NULL
+                END AS asset_id,
+                amount
+            FROM {schema}.adjustment_items
+            WHERE by_id = $1
+              AND source_module = 'B10'
+        ) x
+        WHERE asset_id IS NOT NULL
+        GROUP BY asset_id
+        "#
+    ))
+    .bind(by_id)
+    .fetch_all(pool)
+    .await
+    .context("failed to load B10 adjustment item amounts")?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.get::<i64, _>("asset_id"), row.get::<i64, _>("amount")))
+        .collect())
 }
 
 async fn insert_tax_adjustment(
@@ -4186,56 +4773,50 @@ async fn persist_adjustments(
             "ACCOUNTING_INCOME",
             result.accounting_income,
             "INFO",
-            "회계상 당기순이익",
+            "Accounting income",
         ),
-        (
-            "INCOME",
-            "ADDBACKS",
-            result.addbacks,
-            "ADD",
-            "익금산입/손금불산입 합계",
-        ),
+        ("INCOME", "ADDBACKS", result.addbacks, "ADD", "Addbacks"),
         (
             "INCOME",
             "DEDUCTIONS",
             result.deductions,
             "DEDUCT",
-            "손금산입/익금불산입 합계",
+            "Deductions",
         ),
         (
             "TAX_BASE",
             "TAXABLE_INCOME",
             result.taxable_income,
             "INFO",
-            "과세표준",
+            "Taxable income",
         ),
         (
             "TAX",
             "CORPORATE_TAX",
             result.corporate_tax,
             "INFO",
-            "법인세",
+            "Corporate tax",
         ),
         (
             "TAX",
             "LOCAL_INCOME_TAX",
             result.local_income_tax,
             "INFO",
-            "지방소득세",
+            "Local income tax",
         ),
         (
             "TAX",
             "TAX_CREDITS",
             result.tax_credits,
             "DEDUCT",
-            "세액공제",
+            "Tax credits",
         ),
         (
             "TAX",
             "TOTAL_TAX_DUE",
             result.total_tax_due,
             "INFO",
-            "총 납부세액",
+            "Total tax due",
         ),
     ];
 
@@ -4628,7 +5209,7 @@ pub async fn generate_form(
             old_data,
             new_data: form.data_json.clone(),
             changed_by: "system",
-            reason: Some("서식 엔진 생성"),
+            reason: Some("Form engine generation"),
         },
     )
     .await?;
@@ -4693,7 +5274,7 @@ pub async fn update_form_data(
             &mut data_json,
             field,
             "manual",
-            Some("사용자 수동 수정".to_string()),
+            Some("?ъ슜???섎룞 ?섏젙".to_string()),
             true,
         )?;
     }
@@ -4806,9 +5387,9 @@ pub async fn list_form_attachments(
     by_id: i64,
 ) -> Result<Vec<FormAttachmentSummary>> {
     let forms = [
-        ("FORM3", "과세표준 및 세액조정계산서"),
-        ("FORM15", "소득금액조정명세서"),
-        ("FORM22", "기부금 조정명세서"),
+        ("FORM3", "Tax base and tax adjustment statement"),
+        ("FORM15", "Income adjustment statement"),
+        ("FORM22", "Donation adjustment statement"),
     ];
     let _ = forms;
     let forms = form_attachment_catalog();
@@ -4923,22 +5504,22 @@ pub async fn generate_form_pdf(
     let watermark_label = pdf_status_label(watermark);
     let title = format!("{} ({form_code})", form_display_name(form_code));
     let mut lines = vec![
-        format!("테넌트: {}", tenant.tenant_code),
-        format!("사업연도 ID: {by_id}"),
-        format!("상태: {}", pdf_status_label(&preview.form.status)),
-        format!("워터마크: {watermark_label}"),
-        format!("직인: CIT-{watermark}-{}", tenant.tenant_code),
+        format!("Tenant: {}", tenant.tenant_code),
+        format!("Business year ID: {by_id}"),
+        format!("Status: {}", pdf_status_label(&preview.form.status)),
+        format!("Watermark: {watermark_label}"),
+        format!("Seal: CIT-{watermark}-{}", tenant.tenant_code),
     ];
     for field in &preview.fields {
         lines.push(format!(
-            "{} = {} [원천: {}]",
+            "{} = {} [source: {}]",
             field.label,
             pdf_value(&field.value),
             field.source
         ));
     }
     if !preview.validations.is_empty() {
-        lines.push("검증 이슈:".to_string());
+        lines.push("Validation issues:".to_string());
         for issue in &preview.validations {
             lines.push(format!(
                 "{} {} {}",
@@ -5102,21 +5683,21 @@ fn print_history_json(row: sqlx::postgres::PgRow) -> Value {
 
 fn form_attachment_catalog() -> &'static [(&'static str, &'static str)] {
     &[
-        ("FORM3", "법인세 과세표준 및 세액조정계산서"),
-        ("FORM15", "소득금액조정명세서"),
-        ("FORM22", "기부금 조정명세서"),
-        ("FORM32", "유보 변동 명세서"),
-        ("FORM50", "전자신고 요약 명세서"),
-        ("ATT01", "재무제표 첨부서식"),
-        ("ATT02", "자산대장 첨부서식"),
-        ("ATT03", "거래명세 첨부서식"),
-        ("ATT04", "업무용승용차 첨부서식"),
-        ("ATT05", "결재 승인 첨부서식"),
-        ("ATT06", "검증 결과 첨부서식"),
-        ("ATT07", "세액공제 첨부서식"),
-        ("ATT08", "이월결손금 첨부서식"),
-        ("ATT09", "국외소득 첨부서식"),
-        ("ATT10", "연결납세 첨부서식"),
+        ("FORM3", "Corporate tax adjustment statement"),
+        ("FORM15", "Income adjustment statement"),
+        ("FORM22", "Donation adjustment statement"),
+        ("FORM32", "Reserve movement statement"),
+        ("FORM50", "E-filing summary statement"),
+        ("ATT01", "Financial statement attachment"),
+        ("ATT02", "Asset register attachment"),
+        ("ATT03", "Transaction detail attachment"),
+        ("ATT04", "Business vehicle attachment"),
+        ("ATT05", "Approval attachment"),
+        ("ATT06", "Validation result attachment"),
+        ("ATT07", "Tax credit attachment"),
+        ("ATT08", "Loss carryforward attachment"),
+        ("ATT09", "Foreign income attachment"),
+        ("ATT10", "Consolidated tax attachment"),
     ]
 }
 
@@ -5129,16 +5710,16 @@ fn form_display_name(form_code: &str) -> String {
 
 fn pdf_status_label(status: &str) -> &'static str {
     match status {
-        "FILED" => "신고완료",
-        "APPROVED" => "승인완료",
-        "AMENDED" => "수정신고",
-        "REVIEWED" => "검토완료",
-        "IN_REVIEW" => "검토중",
-        "DRAFT" => "초안",
-        "ERROR" => "오류",
-        "WARN" => "경고",
-        "INFO" => "정보",
-        _ => "미정",
+        "FILED" => "Filed",
+        "APPROVED" => "Approved",
+        "AMENDED" => "Amended",
+        "REVIEWED" => "Reviewed",
+        "IN_REVIEW" => "In review",
+        "DRAFT" => "Draft",
+        "ERROR" => "Error",
+        "WARN" => "Warning",
+        "INFO" => "Info",
+        _ => "Unknown",
     }
 }
 
@@ -5201,7 +5782,7 @@ fn render_simple_pdf(title: &str, lines: &[String], watermark: &str) -> Vec<u8> 
         "0 -18 Td".to_string(),
         format!(
             "<{}> Tj",
-            pdf_text_hex(&format!("워터마크: {watermark_label}"))
+            pdf_text_hex(&format!("Watermark: {watermark_label}"))
         ),
     ];
     let max_lines = 48;
@@ -5213,7 +5794,7 @@ fn render_simple_pdf(title: &str, lines: &[String], watermark: &str) -> Vec<u8> 
         content_lines.push("0 -14 Td".to_string());
         content_lines.push(format!(
             "<{}> Tj",
-            pdf_text_hex(&format!("외 {}행 더 있음", lines.len() - max_lines))
+            pdf_text_hex(&format!("{} more lines", lines.len() - max_lines))
         ));
     }
     content_lines.push("ET".to_string());
@@ -5359,7 +5940,7 @@ fn build_form_payload(form_code: &str, summary: &Value, snapshot_id: i64) -> Res
                 &mut payload,
                 field,
                 "auto",
-                Some("세무조정 요약".to_string()),
+                Some("Tax adjustment summary".to_string()),
                 true,
             )?;
         }
@@ -5664,14 +6245,14 @@ fn template_fields(template_json: &Value) -> Vec<String> {
 
 fn form_field_label(field: &str) -> String {
     match field {
-        "taxable_income" => "과세표준",
-        "corporate_tax" => "산출세액",
-        "local_income_tax" => "지방소득세",
-        "tax_credits" => "세액공제",
-        "total_tax_due" => "총 납부세액",
-        "accounting_income" => "결산서상 당기순이익",
-        "addbacks" => "익금산입/손금불산입",
-        "deductions" => "손금산입/익금불산입",
+        "taxable_income" => "Taxable income",
+        "corporate_tax" => "Corporate tax",
+        "local_income_tax" => "Local income tax",
+        "tax_credits" => "Tax credits",
+        "total_tax_due" => "Total tax due",
+        "accounting_income" => "Accounting income",
+        "addbacks" => "Addbacks",
+        "deductions" => "Deductions",
         _ => field,
     }
     .to_string()
@@ -5727,13 +6308,16 @@ mod tests {
     #[test]
     fn simple_pdf_preserves_korean_text_with_cid_font() {
         let pdf = render_simple_pdf(
-            "법인세 서식",
-            &["과세표준 = 100000000".to_string()],
+            "Corporate tax form",
+            &["Taxable income = 100000000".to_string()],
             "DRAFT",
         );
         let rendered = String::from_utf8_lossy(&pdf);
         assert!(rendered.contains("/UniKS-UCS2-H"));
-        assert!(rendered.contains(&format!("<{}> Tj", pdf_text_hex("법인세 서식"))));
-        assert!(rendered.contains(&format!("<{}> Tj", pdf_text_hex("과세표준 = 100000000"))));
+        assert!(rendered.contains(&format!("<{}> Tj", pdf_text_hex("Corporate tax form"))));
+        assert!(rendered.contains(&format!(
+            "<{}> Tj",
+            pdf_text_hex("Taxable income = 100000000")
+        )));
     }
 }

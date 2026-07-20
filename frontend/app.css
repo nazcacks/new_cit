@@ -721,19 +721,9 @@ td.row-actions {
   letter-spacing: -0.04em;
 }
 
-.dashboard-rejected-banner {
-  border: 1px solid #fecaca;
-  border-radius: 18px;
-  background: #fff1f2;
-  color: #991b1b;
-  padding: 12px 16px;
-  font-size: 14px;
-  font-weight: 900;
-}
-
 .dashboard-status-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 12px;
 }
 
@@ -754,6 +744,24 @@ td.row-actions {
 .dashboard-status-card:hover {
   transform: translateY(-1px);
   border-color: var(--status-color);
+}
+
+.dashboard-status-card.emphasized {
+  border-color: var(--status-color);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-color) 30%, transparent), var(--shadow);
+}
+
+.dashboard-status-card.rejected {
+  background: linear-gradient(180deg, #fff5f5 0%, #fff1f2 100%);
+  border-color: #fecaca;
+}
+
+.dashboard-status-card .status-icon {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  font-size: 22px;
+  line-height: 1;
 }
 
 .dashboard-status-card .status-accent {
@@ -812,8 +820,32 @@ td.row-actions {
   gap: 12px;
 }
 
+.dashboard-lower-grid--single {
+  grid-template-columns: 1fr;
+}
+
 .dashboard-deadline-panel {
   align-self: start;
+}
+
+.dashboard-deadlines .deadline-bucket-row td {
+  background: #f1f5f9;
+  color: #475569;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  padding: 6px 12px;
+}
+
+.dashboard-deadlines .deadline-bucket-dday td {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.dashboard-deadlines .deadline-bucket-d7 td {
+  background: #ffedd5;
+  color: #9a3412;
 }
 
 .dashboard-deadlines .deadline-row {
@@ -1524,6 +1556,21 @@ td.row-actions {
 
 .table-wrap {
   overflow-x: auto;
+}
+
+.std-fs-table .amount-cell {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.std-fs-table .std-fs-subtotal td {
+  background: var(--panel-soft);
+  font-weight: 800;
+}
+
+.mapping-tabs,
+.std-fs-tabs {
+  margin-top: 2px;
 }
 
 .data-grid {

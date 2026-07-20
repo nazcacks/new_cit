@@ -19,29 +19,32 @@ use uuid::Uuid;
 use crate::{
     admin, auth,
     domain::{
-        AssetBasedAdjustmentRequest, AuthUser, CalculateAdjustmentRequest,
+        AssetBasedAdjustmentRequest, AssetCarryForwardRequest, AuthUser, BulkStdFsMappingRequest,
+        CalculateAdjustmentRequest, CarryForwardStdFsMappingRequest, CloneStdFsVersionRequest,
         CreateAccessDelegationRequest, CreateAccountMappingRequest,
-        CreateAdjustmentAttachmentRequest, CreateAdminUserRequest, CreateBusinessYearRequest,
-        CreateCustomerRequest, CreateFormRelationshipRequest, CreateFormVersionRequest,
-        CreateIncomeAdjustmentRequest, CreateLawAmendmentRequest, CreateTaxFormRequest,
-        CreateTaxLawRequest, CreateTaxLimitRequest, CreateTaxRateRequest, CreateTenantRequest,
-        CreateUserReportDefinitionRequest, CreateVehicleUsageLogRequest,
+        CreateAdjustmentAttachmentRequest, CreateAdminUserRequest, CreateAssetRequest,
+        CreateBusinessYearRequest, CreateCustomerRequest, CreateErpImportRequest,
+        CreateFormRelationshipRequest, CreateFormVersionRequest, CreateIncomeAdjustmentRequest,
+        CreateLawAmendmentRequest, CreateStdFsItemRequest, CreateStdFsVersionRequest,
+        CreateTaxFormRequest, CreateTaxLawRequest, CreateTaxLimitRequest, CreateTaxRateRequest,
+        CreateTenantRequest, CreateUserReportDefinitionRequest, CreateVehicleUsageLogRequest,
         DismissValidationIssueRequest, EnqueueEfilingRequest, EnqueueJobRequest,
         EvaluationAdjustmentRequest, FormMigrationRequest, HealthResponse,
         LawVersioningImpactRequest, LoginRequest, ResolveFormVersionQuery,
         SpecialTaxAdjustmentRequest, SwitchTenantRequest, TaxAmountAdjustmentRequest, TenantRef,
         TransactionBasedAdjustmentRequest, UnlockBusinessYearRequest, UpdateAdminUserRequest,
-        UpdateAdminUserStatusRequest, UpdateBusinessYearStatusRequest, UpdateFormDataRequest,
-        UpdateFormVersionStatusRequest, UpdateMenuFunctionsRequest, UpdateMenuNodeRequest,
-        UpdateNotificationRequest, UpdateRoleMenuFunctionsRequest, UpdateRolePermissionsRequest,
-        UpdateTaxLawStatusRequest, UpdateTenantPlanRequest, UpdateTenantStatusRequest,
-        WorkflowEventRequest,
+        UpdateAdminUserStatusRequest, UpdateAssetRequest, UpdateBusinessYearStatusRequest,
+        UpdateFormDataRequest, UpdateFormVersionStatusRequest, UpdateMenuFunctionsRequest,
+        UpdateMenuNodeRequest, UpdateNotificationRequest, UpdateRoleMenuFunctionsRequest,
+        UpdateRolePermissionsRequest, UpdateStdFsItemRequest, UpdateStdFsMappingRequest,
+        UpdateStdFsVersionRequest, UpdateStdFsVersionStatusRequest, UpdateTaxLawStatusRequest,
+        UpdateTenantPlanRequest, UpdateTenantStatusRequest, WorkflowEventRequest,
     },
-    efiling,
+    efiling, erp,
     error::{AppError, AppResult},
     forms, menu, modules, permissions, queue, scheduler,
     state::AppState,
-    tax, tax_data, tenant, validation_rules, web,
+    std_fs, tax, tax_data, tenant, validation_rules, web,
 };
 
 pub fn router(state: AppState) -> Router {
@@ -57,6 +60,7 @@ pub fn router(state: AppState) -> Router {
         .route("/app/menu.js", get(web::app_menu_js))
         .route("/app/router.js", get(web::app_router_js))
         .route("/app/screens.js", get(web::app_screens_js))
+        .route("/favicon.ico", get(favicon))
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/api/public/tenant-suggest", get(tenant_suggest))
@@ -148,6 +152,54 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/admin/menus/:menu_key/functions",
             put(replace_menu_functions),
+        )
+        .route(
+            "/api/admin/std-fs/versions",
+            get(list_std_fs_versions).post(create_std_fs_version),
+        )
+        .route(
+            "/api/admin/std-fs/items/template",
+            get(download_std_fs_import_template),
+        )
+        .route(
+            "/api/admin/std-fs/versions/:version_id",
+            get(get_std_fs_version)
+                .patch(update_std_fs_version)
+                .delete(delete_std_fs_version),
+        )
+        .route(
+            "/api/admin/std-fs/versions/:version_id/clone",
+            post(clone_std_fs_version),
+        )
+        .route(
+            "/api/admin/std-fs/versions/:version_id/status",
+            post(update_std_fs_version_status).patch(update_std_fs_version_status),
+        )
+        .route(
+            "/api/admin/std-fs/versions/:version_id/integrity",
+            get(check_std_fs_integrity).post(check_std_fs_integrity),
+        )
+        .route(
+            "/api/admin/std-fs/versions/:version_id/import",
+            post(import_std_fs_items),
+        )
+        .route(
+            "/api/admin/std-fs/versions/:version_id/items",
+            get(list_std_fs_items).post(create_std_fs_item),
+        )
+        .route(
+            "/api/admin/std-fs/versions/:version_id/items/import",
+            post(import_std_fs_items),
+        )
+        .route(
+            "/api/admin/std-fs/versions/:from_version_id/diff/:to_version_id",
+            get(diff_std_fs_versions),
+        )
+        .route(
+            "/api/admin/std-fs/items/:item_id",
+            get(get_std_fs_item)
+                .patch(update_std_fs_item)
+                .delete(delete_std_fs_item),
         )
         .route(
             "/api/law-versioning/summary",
@@ -405,20 +457,144 @@ pub fn router(state: AppState) -> Router {
             post(import_tax_data_file),
         )
         .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/tax-data/assets/import",
+            post(import_asset_data_file),
+        )
+        .route(
             "/api/tenants/:tenant_code/business-years/:by_id/tax-data/financial-statements",
             get(list_financial_statement_lines),
         )
         .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/erp/imports",
+            get(list_erp_import_runs).post(enqueue_erp_import),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/erp/imports/:run_id",
+            get(get_erp_import_run),
+        )
+        .route(
             "/api/tenants/:tenant_code/business-years/:by_id/tax-data/assets",
-            get(list_assets),
+            get(list_assets).post(create_asset),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/tax-data/assets/carry-forward",
+            post(carry_forward_assets),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/tax-data/assets/depr-preview",
+            get(preview_asset_depreciation),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/tax-data/assets/bs-reconcile",
+            get(reconcile_assets_bs),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/tax-data/assets/:asset_id",
+            put(update_asset).delete(delete_asset),
         )
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/tax-data/transactions",
             get(list_transactions),
         )
         .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/tax-data/transactions/is-reconcile",
+            get(reconcile_transactions_is),
+        )
+        .route(
             "/api/tenants/:tenant_code/business-years/:by_id/tax-data/validation",
             get(get_tax_data_validation).post(get_tax_data_validation),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/account-mappings",
+            get(list_business_year_account_mappings).post(create_business_year_account_mapping),
+        )
+        .route(
+            "/api/workspace/:by_id/std-fs/mappings",
+            get(list_workspace_std_fs_mappings),
+        )
+        .route(
+            "/api/workspace/:by_id/assets",
+            get(list_workspace_assets).post(create_workspace_asset),
+        )
+        .route(
+            "/api/workspace/:by_id/assets/carry-forward",
+            post(carry_forward_workspace_assets),
+        )
+        .route(
+            "/api/workspace/:by_id/assets/depr-preview",
+            get(preview_workspace_asset_depreciation),
+        )
+        .route(
+            "/api/workspace/:by_id/assets/bs-reconcile",
+            get(reconcile_workspace_assets_bs),
+        )
+        .route(
+            "/api/workspace/:by_id/assets/:asset_id",
+            put(update_workspace_asset).delete(delete_workspace_asset),
+        )
+        .route(
+            "/api/workspace/:by_id/transactions/is-reconcile",
+            get(reconcile_workspace_transactions_is),
+        )
+        .route(
+            "/api/workspace/:by_id/std-fs/mappings/bulk",
+            post(bulk_save_workspace_std_fs_mappings),
+        )
+        .route(
+            "/api/workspace/:by_id/std-fs/mappings/carry-forward",
+            post(carry_forward_workspace_std_fs_mappings),
+        )
+        .route(
+            "/api/workspace/:by_id/std-fs/mappings/:account_code",
+            put(save_workspace_std_fs_mapping),
+        )
+        .route(
+            "/api/workspace/:by_id/std-fs/aggregate",
+            post(aggregate_workspace_std_fs),
+        )
+        .route(
+            "/api/workspace/:by_id/std-fs/statements",
+            get(list_workspace_std_fs_statements),
+        )
+        .route(
+            "/api/workspace/:by_id/std-fs/validate",
+            get(validate_workspace_std_fs),
+        )
+        .route(
+            "/api/workspace/:by_id/std-fs/confirm",
+            post(confirm_workspace_std_fs),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/std-fs/mappings",
+            get(list_tenant_std_fs_mappings),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/std-fs/mappings/bulk",
+            post(bulk_save_tenant_std_fs_mappings),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/std-fs/mappings/carry-forward",
+            post(carry_forward_tenant_std_fs_mappings),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/std-fs/mappings/:account_code",
+            put(save_tenant_std_fs_mapping),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/std-fs/aggregate",
+            post(aggregate_tenant_std_fs),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/std-fs/statements",
+            get(list_tenant_std_fs_statements),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/std-fs/validate",
+            get(validate_tenant_std_fs),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/std-fs/confirm",
+            post(confirm_tenant_std_fs),
         )
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/validation/run",
@@ -475,6 +651,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/vehicle-usage-logs",
             get(list_vehicle_usage_logs).post(create_vehicle_usage_log),
+        )
+        .route(
+            "/api/tenants/:tenant_code/business-years/:by_id/vehicle-usage-logs/b10-reconcile",
+            get(reconcile_vehicle_b10),
+        )
+        .route(
+            "/api/workspace/:by_id/vehicle-usage-logs/b10-reconcile",
+            get(reconcile_workspace_vehicle_b10),
         )
         .route(
             "/api/tenants/:tenant_code/business-years/:by_id/reserves",
@@ -599,6 +783,10 @@ async fn ready(State(state): State<AppState>) -> AppResult<Json<HealthResponse>>
     }))
 }
 
+async fn favicon() -> StatusCode {
+    StatusCode::NO_CONTENT
+}
+
 async fn security_headers(request: Request<Body>, next: Next) -> axum::response::Response {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
@@ -616,7 +804,7 @@ async fn security_headers(request: Request<Body>, next: Next) -> axum::response:
     );
     headers.insert(
         HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static("default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'"),
+        HeaderValue::from_static("default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src 'self'"),
     );
     response
 }
@@ -648,6 +836,7 @@ async fn require_auth(
     )
     .await
     .map_err(|error| AppError::Unauthorized(format!("{error:#}")))?;
+    enforce_authenticated_route_access(&state.pool, &session.user, request.method(), path).await?;
     request.extensions_mut().insert(session.user);
 
     Ok(next.run(request).await)
@@ -792,6 +981,69 @@ fn client_ip(headers: &HeaderMap) -> Option<String> {
     Some("127.0.0.1".to_string())
 }
 
+async fn enforce_authenticated_route_access(
+    pool: &PgPool,
+    user: &AuthUser,
+    method: &Method,
+    path: &str,
+) -> AppResult<()> {
+    let segments = path
+        .trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    if segments.first().copied() != Some("api") {
+        return Ok(());
+    }
+
+    match segments.get(1).copied() {
+        Some("admin") => {
+            if segments.get(2).copied() == Some("tenants")
+                && segments.get(4).copied() == Some("users")
+            {
+                if let Some(tenant_code) = segments.get(3) {
+                    return ensure_admin_tenant_path_access(pool, user, tenant_code).await;
+                }
+            }
+            ensure_tenant_admin_or_super(user)
+        }
+        Some("tenants") => {
+            if is_super_admin(user) {
+                return Ok(());
+            }
+            if let Some(tenant_code) = segments.get(2) {
+                let tenant_ref = tenant::resolve_tenant(pool, tenant_code)
+                    .await
+                    .map_err(map_anyhow)?;
+                ensure_tenant_route_access(user, &tenant_ref)?;
+            }
+            Ok(())
+        }
+        Some(
+            "jobs"
+            | "operations"
+            | "login-history"
+            | "permission-change-history"
+            | "system-settings",
+        ) => ensure_tenant_admin_or_super(user),
+        Some(
+            "tax-laws" | "tax-rates" | "tax-limits" | "law-amendments" | "law-versioning"
+            | "form-versioning",
+        ) => {
+            if is_write_method(method) {
+                ensure_super_admin(user)
+            } else {
+                ensure_tenant_admin_or_super(user)
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
+fn is_write_method(method: &Method) -> bool {
+    !matches!(method, &Method::GET)
+}
+
 async fn me(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -853,7 +1105,9 @@ async fn get_legacy_module_tree(
 
 async fn list_admin_menu_nodes(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
 ) -> AppResult<Json<Vec<crate::domain::MenuNodeRecord>>> {
+    ensure_tenant_admin_or_super(&user)?;
     let nodes = menu::list_menu_nodes(&state.pool)
         .await
         .map_err(map_anyhow)?;
@@ -862,9 +1116,11 @@ async fn list_admin_menu_nodes(
 
 async fn update_admin_menu_node(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path(menu_key): Path<String>,
     Json(request): Json<UpdateMenuNodeRequest>,
 ) -> AppResult<Json<crate::domain::MenuNodeRecord>> {
+    ensure_super_admin(&user)?;
     let node = menu::update_menu_node(&state.pool, &menu_key, request)
         .await
         .map_err(map_anyhow)?;
@@ -873,8 +1129,10 @@ async fn update_admin_menu_node(
 
 async fn list_admin_users(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path(tenant_code): Path<String>,
 ) -> AppResult<Json<Vec<crate::domain::AdminUser>>> {
+    ensure_admin_tenant_path_access(&state.pool, &user, &tenant_code).await?;
     let users = admin::list_users(&state.pool, &tenant_code)
         .await
         .map_err(map_anyhow)?;
@@ -883,9 +1141,11 @@ async fn list_admin_users(
 
 async fn create_admin_user(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path(tenant_code): Path<String>,
     Json(request): Json<CreateAdminUserRequest>,
 ) -> AppResult<(StatusCode, Json<crate::domain::AdminUser>)> {
+    ensure_admin_tenant_path_access(&state.pool, &user, &tenant_code).await?;
     let user = admin::create_user(&state.pool, &tenant_code, request)
         .await
         .map_err(map_anyhow)?;
@@ -894,9 +1154,11 @@ async fn create_admin_user(
 
 async fn update_admin_user(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path((tenant_code, login_id)): Path<(String, String)>,
     Json(request): Json<UpdateAdminUserRequest>,
 ) -> AppResult<Json<crate::domain::AdminUser>> {
+    ensure_admin_tenant_path_access(&state.pool, &user, &tenant_code).await?;
     let user = admin::update_user(&state.pool, &tenant_code, &login_id, request)
         .await
         .map_err(map_anyhow)?;
@@ -905,9 +1167,11 @@ async fn update_admin_user(
 
 async fn update_admin_user_status(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path((tenant_code, login_id)): Path<(String, String)>,
     Json(request): Json<UpdateAdminUserStatusRequest>,
 ) -> AppResult<Json<crate::domain::AdminUser>> {
+    ensure_admin_tenant_path_access(&state.pool, &user, &tenant_code).await?;
     let user = admin::update_user_status(&state.pool, &tenant_code, &login_id, request)
         .await
         .map_err(map_anyhow)?;
@@ -916,36 +1180,52 @@ async fn update_admin_user_status(
 
 async fn reset_admin_user_2fa(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path((tenant_code, login_id)): Path<(String, String)>,
 ) -> AppResult<Json<crate::domain::AdminUser>> {
+    ensure_admin_tenant_path_access(&state.pool, &user, &tenant_code).await?;
     let user = admin::reset_2fa(&state.pool, &tenant_code, &login_id)
         .await
         .map_err(map_anyhow)?;
     Ok(Json(user))
 }
 
-async fn list_roles(State(state): State<AppState>) -> AppResult<Json<Vec<crate::domain::Role>>> {
+async fn list_roles(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+) -> AppResult<Json<Vec<crate::domain::Role>>> {
+    ensure_tenant_admin_or_super(&user)?;
     let roles = admin::list_roles(&state.pool).await.map_err(map_anyhow)?;
     Ok(Json(roles))
 }
 
 async fn list_role_permissions(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
 ) -> AppResult<Json<Vec<crate::domain::RolePermission>>> {
+    ensure_tenant_admin_or_super(&user)?;
     let permissions = admin::list_role_permissions(&state.pool)
         .await
         .map_err(map_anyhow)?;
     Ok(Json(permissions))
 }
 
-async fn list_function_codes(State(state): State<AppState>) -> AppResult<Json<Vec<Value>>> {
+async fn list_function_codes(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+) -> AppResult<Json<Vec<Value>>> {
+    ensure_tenant_admin_or_super(&user)?;
     let functions = permissions::list_function_codes(&state.pool)
         .await
         .map_err(map_anyhow)?;
     Ok(Json(functions))
 }
 
-async fn list_menu_functions(State(state): State<AppState>) -> AppResult<Json<Vec<Value>>> {
+async fn list_menu_functions(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+) -> AppResult<Json<Vec<Value>>> {
+    ensure_tenant_admin_or_super(&user)?;
     let functions = permissions::list_menu_functions(&state.pool)
         .await
         .map_err(map_anyhow)?;
@@ -954,16 +1234,22 @@ async fn list_menu_functions(State(state): State<AppState>) -> AppResult<Json<Ve
 
 async fn replace_menu_functions(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path(menu_key): Path<String>,
     Json(request): Json<UpdateMenuFunctionsRequest>,
 ) -> AppResult<Json<Vec<Value>>> {
+    ensure_super_admin(&user)?;
     let functions = permissions::replace_menu_functions(&state.pool, &menu_key, request)
         .await
         .map_err(map_anyhow)?;
     Ok(Json(functions))
 }
 
-async fn list_role_menu_functions(State(state): State<AppState>) -> AppResult<Json<Vec<Value>>> {
+async fn list_role_menu_functions(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+) -> AppResult<Json<Vec<Value>>> {
+    ensure_tenant_admin_or_super(&user)?;
     let grants = permissions::list_role_menu_functions(&state.pool)
         .await
         .map_err(map_anyhow)?;
@@ -972,9 +1258,11 @@ async fn list_role_menu_functions(State(state): State<AppState>) -> AppResult<Js
 
 async fn replace_role_menu_functions(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path(role_code): Path<String>,
     Json(request): Json<UpdateRoleMenuFunctionsRequest>,
 ) -> AppResult<Json<Vec<Value>>> {
+    ensure_super_admin(&user)?;
     let grants = permissions::replace_role_menu_functions(&state.pool, &role_code, request)
         .await
         .map_err(map_anyhow)?;
@@ -983,13 +1271,264 @@ async fn replace_role_menu_functions(
 
 async fn replace_role_permissions(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path(role_code): Path<String>,
     Json(request): Json<UpdateRolePermissionsRequest>,
 ) -> AppResult<Json<Vec<crate::domain::RolePermission>>> {
+    ensure_super_admin(&user)?;
     let permissions = admin::replace_role_permissions(&state.pool, &role_code, request)
         .await
         .map_err(map_anyhow)?;
     Ok(Json(permissions))
+}
+
+#[derive(Debug, Deserialize)]
+struct StdFsVersionQuery {
+    status: Option<String>,
+    industry_type: Option<String>,
+    corp_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StdFsItemQuery {
+    stmt_type: Option<String>,
+    include_inactive: Option<bool>,
+}
+
+async fn list_std_fs_versions(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Query(query): Query<StdFsVersionQuery>,
+) -> AppResult<Json<Vec<crate::domain::StdFsItemVersion>>> {
+    ensure_tenant_admin_or_super(&user)?;
+    let versions = std_fs::list_versions(
+        &state.pool,
+        query.status.as_deref(),
+        query.industry_type.as_deref(),
+        query.corp_type.as_deref(),
+    )
+    .await
+    .map_err(map_anyhow)?;
+    Ok(Json(versions))
+}
+
+async fn get_std_fs_version(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(version_id): Path<Uuid>,
+) -> AppResult<Json<crate::domain::StdFsItemVersion>> {
+    ensure_tenant_admin_or_super(&user)?;
+    let version = std_fs::get_version(&state.pool, version_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(version))
+}
+
+async fn create_std_fs_version(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Json(request): Json<CreateStdFsVersionRequest>,
+) -> AppResult<(StatusCode, Json<crate::domain::StdFsItemVersion>)> {
+    ensure_tenant_admin_or_super(&user)?;
+    let version = std_fs::create_version(&state.pool, request, user.user_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok((StatusCode::CREATED, Json(version)))
+}
+
+async fn update_std_fs_version(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(version_id): Path<Uuid>,
+    Json(request): Json<UpdateStdFsVersionRequest>,
+) -> AppResult<Json<crate::domain::StdFsItemVersion>> {
+    ensure_tenant_admin_or_super(&user)?;
+    let version = std_fs::update_version(&state.pool, version_id, request)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(version))
+}
+
+async fn delete_std_fs_version(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(version_id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    ensure_super_admin(&user)?;
+    std_fs::delete_version(&state.pool, version_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn download_std_fs_import_template(
+    Extension(user): Extension<AuthUser>,
+) -> AppResult<Response<Body>> {
+    ensure_tenant_admin_or_super(&user)?;
+    let mut response = Response::new(Body::from(std_fs::import_template_csv()));
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/csv; charset=utf-8"),
+    );
+    response.headers_mut().insert(
+        CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=\"std-fs-items-template.csv\""),
+    );
+    Ok(response)
+}
+
+async fn clone_std_fs_version(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(version_id): Path<Uuid>,
+    Json(request): Json<CloneStdFsVersionRequest>,
+) -> AppResult<(StatusCode, Json<crate::domain::StdFsItemVersion>)> {
+    ensure_tenant_admin_or_super(&user)?;
+    let version = std_fs::clone_version(&state.pool, version_id, request, user.user_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok((StatusCode::CREATED, Json(version)))
+}
+
+async fn update_std_fs_version_status(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(version_id): Path<Uuid>,
+    Json(request): Json<UpdateStdFsVersionStatusRequest>,
+) -> AppResult<Json<crate::domain::StdFsItemVersion>> {
+    ensure_tenant_admin_or_super(&user)?;
+    let requested_status = request.status.trim().to_ascii_uppercase();
+    if matches!(requested_status.as_str(), "ACTIVE" | "RETIRED") {
+        ensure_super_admin(&user)?;
+    }
+    let version = std_fs::update_version_status(&state.pool, version_id, request, user.user_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(version))
+}
+
+async fn import_std_fs_items(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(version_id): Path<Uuid>,
+    mut multipart: Multipart,
+) -> AppResult<(StatusCode, Json<crate::domain::StdFsImportReport>)> {
+    ensure_tenant_admin_or_super(&user)?;
+    let mut file_name = None;
+    let mut bytes = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| AppError::bad_request(error.to_string()))?
+    {
+        if field.name().unwrap_or_default() == "file" {
+            file_name = field.file_name().map(ToString::to_string);
+            bytes = Some(
+                field
+                    .bytes()
+                    .await
+                    .map_err(|error| AppError::bad_request(error.to_string()))?
+                    .to_vec(),
+            );
+        }
+    }
+    let bytes = bytes.ok_or_else(|| AppError::bad_request("file field is required"))?;
+    let report = std_fs::import_items(&state.pool, version_id, file_name, &bytes)
+        .await
+        .map_err(map_anyhow)?;
+    Ok((StatusCode::CREATED, Json(report)))
+}
+
+async fn list_std_fs_items(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(version_id): Path<Uuid>,
+    Query(query): Query<StdFsItemQuery>,
+) -> AppResult<Json<Vec<crate::domain::StdFsItem>>> {
+    ensure_tenant_admin_or_super(&user)?;
+    let items = std_fs::list_items(
+        &state.pool,
+        version_id,
+        query.stmt_type.as_deref(),
+        query.include_inactive.unwrap_or(false),
+    )
+    .await
+    .map_err(map_anyhow)?;
+    Ok(Json(items))
+}
+
+async fn get_std_fs_item(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(item_id): Path<Uuid>,
+) -> AppResult<Json<crate::domain::StdFsItem>> {
+    ensure_tenant_admin_or_super(&user)?;
+    let item = std_fs::get_item(&state.pool, item_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(item))
+}
+
+async fn create_std_fs_item(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(version_id): Path<Uuid>,
+    Json(request): Json<CreateStdFsItemRequest>,
+) -> AppResult<(StatusCode, Json<crate::domain::StdFsItem>)> {
+    ensure_tenant_admin_or_super(&user)?;
+    let item = std_fs::create_item(&state.pool, version_id, request)
+        .await
+        .map_err(map_anyhow)?;
+    Ok((StatusCode::CREATED, Json(item)))
+}
+
+async fn update_std_fs_item(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(item_id): Path<Uuid>,
+    Json(request): Json<UpdateStdFsItemRequest>,
+) -> AppResult<Json<crate::domain::StdFsItem>> {
+    ensure_tenant_admin_or_super(&user)?;
+    let item = std_fs::update_item(&state.pool, item_id, request)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(item))
+}
+
+async fn delete_std_fs_item(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(item_id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    ensure_super_admin(&user)?;
+    std_fs::delete_item(&state.pool, item_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn check_std_fs_integrity(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(version_id): Path<Uuid>,
+) -> AppResult<Json<crate::domain::StdFsIntegrityResult>> {
+    ensure_tenant_admin_or_super(&user)?;
+    let result = std_fs::check_integrity(&state.pool, version_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(result))
+}
+
+async fn diff_std_fs_versions(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path((from_version_id, to_version_id)): Path<(Uuid, Uuid)>,
+) -> AppResult<Json<crate::domain::StdFsVersionDiff>> {
+    ensure_tenant_admin_or_super(&user)?;
+    let diff = std_fs::diff_versions(&state.pool, from_version_id, to_version_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(diff))
 }
 
 async fn create_tenant(
@@ -1953,6 +2492,57 @@ async fn import_tax_data_file(
     Ok((StatusCode::CREATED, Json(result)))
 }
 
+async fn import_asset_data_file(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+    multipart: Multipart,
+) -> AppResult<(StatusCode, Json<crate::domain::TaxDataImportResponse>)> {
+    import_tax_data_multipart(state, tenant_code, by_id, "assets".to_string(), multipart).await
+}
+
+async fn import_tax_data_multipart(
+    state: AppState,
+    tenant_code: String,
+    by_id: i64,
+    data_type: String,
+    mut multipart: Multipart,
+) -> AppResult<(StatusCode, Json<crate::domain::TaxDataImportResponse>)> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let mut file_name = None;
+    let mut bytes = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| AppError::bad_request(error.to_string()))?
+    {
+        let name = field.name().unwrap_or_default().to_string();
+        if name == "file" {
+            file_name = field.file_name().map(ToString::to_string);
+            bytes = Some(
+                field
+                    .bytes()
+                    .await
+                    .map_err(|error| AppError::bad_request(error.to_string()))?
+                    .to_vec(),
+            );
+        }
+    }
+    let bytes = bytes.ok_or_else(|| AppError::bad_request("file field is required"))?;
+    let result = tax_data::import_tax_data(
+        &state.pool,
+        &tenant_ref,
+        by_id,
+        &data_type,
+        file_name,
+        &bytes,
+    )
+    .await
+    .map_err(map_anyhow)?;
+    Ok((StatusCode::CREATED, Json(result)))
+}
+
 async fn list_tax_data_import_batches(
     State(state): State<AppState>,
     Path((tenant_code, by_id)): Path<(String, i64)>,
@@ -1992,6 +2582,55 @@ async fn list_financial_statement_lines(
     Ok(Json(lines))
 }
 
+async fn enqueue_erp_import(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+    Json(request): Json<CreateErpImportRequest>,
+) -> AppResult<(StatusCode, Json<crate::domain::ErpImportEnqueueResponse>)> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let response = erp::enqueue_import(&state.pool, &tenant_ref, by_id, request, &user.login_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+async fn list_erp_import_runs(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+) -> AppResult<Json<Vec<crate::domain::ErpImportRun>>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let runs = erp::list_import_runs(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(runs))
+}
+
+async fn get_erp_import_run(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path((tenant_code, by_id, run_id)): Path<(String, i64, i64)>,
+) -> AppResult<Json<crate::domain::ErpImportRun>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let run = erp::get_import_run(&state.pool, &tenant_ref, run_id)
+        .await
+        .map_err(map_anyhow)?;
+    if run.by_id != by_id {
+        return Err(AppError::not_found("ERP import run not found"));
+    }
+    Ok(Json(run))
+}
+
 async fn list_assets(
     State(state): State<AppState>,
     Path((tenant_code, by_id)): Path<(String, i64)>,
@@ -2005,6 +2644,181 @@ async fn list_assets(
     Ok(Json(assets))
 }
 
+async fn create_asset(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+    Json(request): Json<CreateAssetRequest>,
+) -> AppResult<(StatusCode, Json<crate::domain::AssetRecord>)> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let asset = tax_data::create_asset(&state.pool, &tenant_ref, by_id, request)
+        .await
+        .map_err(map_anyhow)?;
+    Ok((StatusCode::CREATED, Json(asset)))
+}
+
+async fn update_asset(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id, asset_id)): Path<(String, i64, i64)>,
+    Json(request): Json<UpdateAssetRequest>,
+) -> AppResult<Json<crate::domain::AssetRecord>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let asset = tax_data::update_asset(&state.pool, &tenant_ref, by_id, asset_id, request)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(asset))
+}
+
+async fn delete_asset(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id, asset_id)): Path<(String, i64, i64)>,
+) -> AppResult<StatusCode> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    tax_data::delete_asset(&state.pool, &tenant_ref, by_id, asset_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn carry_forward_assets(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+    Json(request): Json<AssetCarryForwardRequest>,
+) -> AppResult<Json<crate::domain::AssetCarryForwardResult>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let result = tax_data::carry_forward_assets(&state.pool, &tenant_ref, by_id, request)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(result))
+}
+
+async fn preview_asset_depreciation(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+) -> AppResult<Json<crate::domain::AssetDepreciationPreviewResult>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let result = tax::preview_depreciation(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(result))
+}
+
+async fn reconcile_assets_bs(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+) -> AppResult<Json<crate::domain::AssetBsReconcileResult>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let result = tax_data::asset_bs_reconcile(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(result))
+}
+
+async fn list_workspace_assets(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(by_id): Path<i64>,
+) -> AppResult<Json<Vec<crate::domain::AssetRecord>>> {
+    let tenant_ref = resolve_workspace_tenant(&state.pool, &user).await?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let assets = tax_data::list_assets(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(assets))
+}
+
+async fn create_workspace_asset(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(by_id): Path<i64>,
+    Json(request): Json<CreateAssetRequest>,
+) -> AppResult<(StatusCode, Json<crate::domain::AssetRecord>)> {
+    let tenant_ref = resolve_workspace_tenant(&state.pool, &user).await?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let asset = tax_data::create_asset(&state.pool, &tenant_ref, by_id, request)
+        .await
+        .map_err(map_anyhow)?;
+    Ok((StatusCode::CREATED, Json(asset)))
+}
+
+async fn update_workspace_asset(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path((by_id, asset_id)): Path<(i64, i64)>,
+    Json(request): Json<UpdateAssetRequest>,
+) -> AppResult<Json<crate::domain::AssetRecord>> {
+    let tenant_ref = resolve_workspace_tenant(&state.pool, &user).await?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let asset = tax_data::update_asset(&state.pool, &tenant_ref, by_id, asset_id, request)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(asset))
+}
+
+async fn delete_workspace_asset(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path((by_id, asset_id)): Path<(i64, i64)>,
+) -> AppResult<StatusCode> {
+    let tenant_ref = resolve_workspace_tenant(&state.pool, &user).await?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    tax_data::delete_asset(&state.pool, &tenant_ref, by_id, asset_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn carry_forward_workspace_assets(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(by_id): Path<i64>,
+    Json(request): Json<AssetCarryForwardRequest>,
+) -> AppResult<Json<crate::domain::AssetCarryForwardResult>> {
+    let tenant_ref = resolve_workspace_tenant(&state.pool, &user).await?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let result = tax_data::carry_forward_assets(&state.pool, &tenant_ref, by_id, request)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(result))
+}
+
+async fn preview_workspace_asset_depreciation(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(by_id): Path<i64>,
+) -> AppResult<Json<crate::domain::AssetDepreciationPreviewResult>> {
+    let tenant_ref = resolve_workspace_tenant(&state.pool, &user).await?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let result = tax::preview_depreciation(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(result))
+}
+
+async fn reconcile_workspace_assets_bs(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(by_id): Path<i64>,
+) -> AppResult<Json<crate::domain::AssetBsReconcileResult>> {
+    let tenant_ref = resolve_workspace_tenant(&state.pool, &user).await?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let result = tax_data::asset_bs_reconcile(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(result))
+}
+
 async fn list_transactions(
     State(state): State<AppState>,
     Path((tenant_code, by_id)): Path<(String, i64)>,
@@ -2016,6 +2830,32 @@ async fn list_transactions(
         .await
         .map_err(map_anyhow)?;
     Ok(Json(transactions))
+}
+
+async fn reconcile_transactions_is(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+) -> AppResult<Json<crate::domain::TransactionIsReconcileResult>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let result = tax_data::transaction_is_reconcile(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(result))
+}
+
+async fn reconcile_workspace_transactions_is(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(by_id): Path<i64>,
+) -> AppResult<Json<crate::domain::TransactionIsReconcileResult>> {
+    let tenant_ref = resolve_workspace_tenant(&state.pool, &user).await?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let result = tax_data::transaction_is_reconcile(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(result))
 }
 
 async fn get_tax_data_validation(
@@ -2060,12 +2900,37 @@ async fn dismiss_validation_issue(
 
 async fn list_account_mappings(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path((tenant_code, customer_id)): Path<(String, i64)>,
 ) -> AppResult<Json<Vec<crate::domain::AccountMapping>>> {
     let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
         .await
         .map_err(map_anyhow)?;
+    ensure_tenant_route_access(&user, &tenant_ref)?;
+    let allowed =
+        permissions::has_customer_work_scope(&state.pool, &tenant_ref, &user, customer_id, "INFO")
+            .await
+            .map_err(map_anyhow)?;
+    if !allowed {
+        return Err(AppError::forbidden("customer INFO scope is required"));
+    }
     let mappings = tax_data::list_account_mappings(&state.pool, &tenant_ref, customer_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(mappings))
+}
+
+async fn list_business_year_account_mappings(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+) -> AppResult<Json<Vec<crate::domain::AccountMapping>>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let by =
+        ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let mappings = tax_data::list_account_mappings(&state.pool, &tenant_ref, by.customer_id)
         .await
         .map_err(map_anyhow)?;
     Ok(Json(mappings))
@@ -2073,16 +2938,332 @@ async fn list_account_mappings(
 
 async fn create_account_mapping(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
     Path((tenant_code, customer_id)): Path<(String, i64)>,
     Json(request): Json<CreateAccountMappingRequest>,
 ) -> AppResult<(StatusCode, Json<crate::domain::AccountMapping>)> {
     let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
         .await
         .map_err(map_anyhow)?;
+    ensure_tenant_route_access(&user, &tenant_ref)?;
+    let allowed =
+        permissions::has_customer_work_scope(&state.pool, &tenant_ref, &user, customer_id, "INFO")
+            .await
+            .map_err(map_anyhow)?;
+    if !allowed {
+        return Err(AppError::forbidden("customer INFO scope is required"));
+    }
     let mapping = tax_data::create_account_mapping(&state.pool, &tenant_ref, customer_id, request)
         .await
         .map_err(map_anyhow)?;
     Ok((StatusCode::CREATED, Json(mapping)))
+}
+
+async fn create_business_year_account_mapping(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+    Json(request): Json<CreateAccountMappingRequest>,
+) -> AppResult<(StatusCode, Json<crate::domain::AccountMapping>)> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let mapping = tax_data::create_account_mapping_for_business_year(
+        &state.pool,
+        &tenant_ref,
+        by_id,
+        request,
+    )
+    .await
+    .map_err(map_anyhow)?;
+    Ok((StatusCode::CREATED, Json(mapping)))
+}
+
+async fn list_workspace_std_fs_mappings(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(by_id): Path<i64>,
+) -> AppResult<Json<Vec<crate::domain::StdFsMappingRow>>> {
+    let tenant_ref = resolve_workspace_tenant(&state.pool, &user).await?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let mappings = std_fs::list_workspace_mappings(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(mappings))
+}
+
+async fn save_workspace_std_fs_mapping(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path((by_id, account_code)): Path<(i64, String)>,
+    Json(request): Json<UpdateStdFsMappingRequest>,
+) -> AppResult<Json<crate::domain::StdFsMappingSaveResult>> {
+    let tenant_ref = resolve_workspace_tenant(&state.pool, &user).await?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let result = std_fs::save_workspace_mapping(
+        &state.pool,
+        &tenant_ref,
+        by_id,
+        &account_code,
+        request,
+        user.user_id,
+    )
+    .await
+    .map_err(map_anyhow)?;
+    Ok(Json(result))
+}
+
+async fn bulk_save_workspace_std_fs_mappings(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(by_id): Path<i64>,
+    Json(request): Json<BulkStdFsMappingRequest>,
+) -> AppResult<Json<crate::domain::StdFsMappingSaveResult>> {
+    let tenant_ref = resolve_workspace_tenant(&state.pool, &user).await?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let result = std_fs::bulk_save_workspace_mappings(
+        &state.pool,
+        &tenant_ref,
+        by_id,
+        request,
+        user.user_id,
+    )
+    .await
+    .map_err(map_anyhow)?;
+    Ok(Json(result))
+}
+
+async fn carry_forward_workspace_std_fs_mappings(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(by_id): Path<i64>,
+    Json(request): Json<CarryForwardStdFsMappingRequest>,
+) -> AppResult<Json<crate::domain::StdFsMappingCarryForwardResult>> {
+    let tenant_ref = resolve_workspace_tenant(&state.pool, &user).await?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let result = std_fs::carry_forward_workspace_mappings(
+        &state.pool,
+        &tenant_ref,
+        by_id,
+        request,
+        user.user_id,
+    )
+    .await
+    .map_err(map_anyhow)?;
+    Ok(Json(result))
+}
+
+async fn list_tenant_std_fs_mappings(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+) -> AppResult<Json<Vec<crate::domain::StdFsMappingRow>>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let mappings = std_fs::list_workspace_mappings(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(mappings))
+}
+
+async fn save_tenant_std_fs_mapping(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path((tenant_code, by_id, account_code)): Path<(String, i64, String)>,
+    Json(request): Json<UpdateStdFsMappingRequest>,
+) -> AppResult<Json<crate::domain::StdFsMappingSaveResult>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let result = std_fs::save_workspace_mapping(
+        &state.pool,
+        &tenant_ref,
+        by_id,
+        &account_code,
+        request,
+        user.user_id,
+    )
+    .await
+    .map_err(map_anyhow)?;
+    Ok(Json(result))
+}
+
+async fn bulk_save_tenant_std_fs_mappings(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+    Json(request): Json<BulkStdFsMappingRequest>,
+) -> AppResult<Json<crate::domain::StdFsMappingSaveResult>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let result = std_fs::bulk_save_workspace_mappings(
+        &state.pool,
+        &tenant_ref,
+        by_id,
+        request,
+        user.user_id,
+    )
+    .await
+    .map_err(map_anyhow)?;
+    Ok(Json(result))
+}
+
+async fn carry_forward_tenant_std_fs_mappings(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+    Json(request): Json<CarryForwardStdFsMappingRequest>,
+) -> AppResult<Json<crate::domain::StdFsMappingCarryForwardResult>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let result = std_fs::carry_forward_workspace_mappings(
+        &state.pool,
+        &tenant_ref,
+        by_id,
+        request,
+        user.user_id,
+    )
+    .await
+    .map_err(map_anyhow)?;
+    Ok(Json(result))
+}
+
+#[derive(Debug, Deserialize)]
+struct StdFsStatementQuery {
+    #[serde(default, alias = "stmtType")]
+    stmt_type: Option<String>,
+}
+
+async fn aggregate_workspace_std_fs(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(by_id): Path<i64>,
+) -> AppResult<Json<crate::domain::StdFsAggregateResult>> {
+    let tenant_ref = resolve_workspace_tenant(&state.pool, &user).await?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let result = std_fs::aggregate_workspace_statements(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(result))
+}
+
+async fn list_workspace_std_fs_statements(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(by_id): Path<i64>,
+    Query(query): Query<StdFsStatementQuery>,
+) -> AppResult<Json<Vec<crate::domain::StdFsStatementLine>>> {
+    let tenant_ref = resolve_workspace_tenant(&state.pool, &user).await?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let statements = std_fs::list_workspace_statements(
+        &state.pool,
+        &tenant_ref,
+        by_id,
+        query.stmt_type.as_deref(),
+    )
+    .await
+    .map_err(map_anyhow)?;
+    Ok(Json(statements))
+}
+
+async fn validate_workspace_std_fs(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(by_id): Path<i64>,
+) -> AppResult<Json<crate::domain::StdFsValidationResult>> {
+    let tenant_ref = resolve_workspace_tenant(&state.pool, &user).await?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let result = std_fs::validate_workspace_statements(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(result))
+}
+
+async fn confirm_workspace_std_fs(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(by_id): Path<i64>,
+) -> AppResult<Json<crate::domain::StdFsConfirmResult>> {
+    let tenant_ref = resolve_workspace_tenant(&state.pool, &user).await?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let result = std_fs::confirm_workspace_statements(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(result))
+}
+
+async fn aggregate_tenant_std_fs(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+) -> AppResult<Json<crate::domain::StdFsAggregateResult>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let result = std_fs::aggregate_workspace_statements(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(result))
+}
+
+async fn list_tenant_std_fs_statements(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+    Query(query): Query<StdFsStatementQuery>,
+) -> AppResult<Json<Vec<crate::domain::StdFsStatementLine>>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let statements = std_fs::list_workspace_statements(
+        &state.pool,
+        &tenant_ref,
+        by_id,
+        query.stmt_type.as_deref(),
+    )
+    .await
+    .map_err(map_anyhow)?;
+    Ok(Json(statements))
+}
+
+async fn validate_tenant_std_fs(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+) -> AppResult<Json<crate::domain::StdFsValidationResult>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let result = std_fs::validate_workspace_statements(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(result))
+}
+
+async fn confirm_tenant_std_fs(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+) -> AppResult<Json<crate::domain::StdFsConfirmResult>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let result = std_fs::confirm_workspace_statements(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(result))
 }
 
 async fn calculate_adjustments(
@@ -2382,6 +3563,32 @@ async fn list_vehicle_usage_logs(
         .await
         .map_err(map_anyhow)?;
     Ok(Json(logs))
+}
+
+async fn reconcile_vehicle_b10(
+    State(state): State<AppState>,
+    Path((tenant_code, by_id)): Path<(String, i64)>,
+) -> AppResult<Json<crate::domain::VehicleB10ReconcileResult>> {
+    let tenant_ref = tenant::resolve_tenant(&state.pool, &tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    let result = tax::vehicle_b10_reconcile(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(result))
+}
+
+async fn reconcile_workspace_vehicle_b10(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(by_id): Path<i64>,
+) -> AppResult<Json<crate::domain::VehicleB10ReconcileResult>> {
+    let tenant_ref = resolve_workspace_tenant(&state.pool, &user).await?;
+    ensure_business_year_work_scope(&state.pool, &tenant_ref, &user, by_id, "INFO").await?;
+    let result = tax::vehicle_b10_reconcile(&state.pool, &tenant_ref, by_id)
+        .await
+        .map_err(map_anyhow)?;
+    Ok(Json(result))
 }
 
 async fn list_reserves(
@@ -3455,6 +4662,26 @@ fn ensure_tenant_route_access(user: &AuthUser, tenant_ref: &TenantRef) -> AppRes
     } else {
         Err(AppError::forbidden("tenant access denied"))
     }
+}
+
+async fn ensure_admin_tenant_path_access(
+    pool: &PgPool,
+    user: &AuthUser,
+    tenant_code: &str,
+) -> AppResult<()> {
+    ensure_tenant_admin_or_super(user)?;
+    let tenant_ref = tenant::resolve_tenant(pool, tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_tenant_route_access(user, &tenant_ref)
+}
+
+async fn resolve_workspace_tenant(pool: &PgPool, user: &AuthUser) -> AppResult<TenantRef> {
+    let tenant_ref = tenant::resolve_tenant(pool, &user.tenant_code)
+        .await
+        .map_err(map_anyhow)?;
+    ensure_tenant_route_access(user, &tenant_ref)?;
+    Ok(tenant_ref)
 }
 
 async fn ensure_business_year_work_scope(

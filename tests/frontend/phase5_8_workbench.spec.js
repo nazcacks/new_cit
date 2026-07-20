@@ -65,6 +65,8 @@ for (const snippet of [
   'data-download-form="${escapeHtml(item.form_code)}"',
   'data-efile-jump="${escapeHtml(efilingIssueLeaf(issue))}"',
   'data-download-efile="${item.efiling_id}"',
+  'target.includes("std_fs")',
+  'return "ws/info:mapping"',
   'data-open-amend="${escapeHtml(by.by_id)}"',
   'request(`${root}/forms/linkage-check`)',
   'request(`${root}/forms/${selectedFormCode}/preview`)',

@@ -76,6 +76,74 @@ async fn admin_tenant_leaf_and_super_admin_crud_routes_work() {
         .await
         .unwrap();
     assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+    let writer_roles = writer_client
+        .get(format!("{base_url}/api/admin/roles"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(writer_roles.status(), StatusCode::FORBIDDEN);
+    let writer_tax_laws = writer_client
+        .get(format!("{base_url}/api/tax-laws"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(writer_tax_laws.status(), StatusCode::FORBIDDEN);
+    let writer_cross_tenant_audit = writer_client
+        .get(format!("{base_url}/api/tenants/samplefirm/audit-logs"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(writer_cross_tenant_audit.status(), StatusCode::FORBIDDEN);
+
+    let tenant_admin_login_id = format!("taadm{}", &Uuid::new_v4().simple().to_string()[..8]);
+    let created_user = admin_client
+        .post(format!("{base_url}/api/admin/tenants/demo/users"))
+        .json(&json!({
+            "login_id": tenant_admin_login_id,
+            "password": "ChangeMe123!",
+            "user_name": "Tenant Admin",
+            "email": null,
+            "phone": null,
+            "use_2fa": false,
+            "roles": ["TENANT_ADMIN"],
+            "customer_access": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created_user.status(), StatusCode::CREATED);
+
+    let tenant_admin = login_as(&base_url, &tenant_admin_login_id).await;
+    let tenant_admin_client = authenticated_client(tenant_admin["token"].as_str().unwrap());
+    let own_users = tenant_admin_client
+        .get(format!("{base_url}/api/admin/tenants/demo/users"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(own_users.status(), StatusCode::OK);
+
+    let cross_tenant_users = tenant_admin_client
+        .get(format!("{base_url}/api/admin/tenants/samplefirm/users"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cross_tenant_users.status(), StatusCode::FORBIDDEN);
+
+    let tenant_admin_roles = tenant_admin_client
+        .get(format!("{base_url}/api/admin/roles"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tenant_admin_roles.status(), StatusCode::OK);
+
+    let denied_role_mutation = tenant_admin_client
+        .put(format!("{base_url}/api/admin/roles/ASSISTANT/permissions"))
+        .json(&json!({"permissions": []}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied_role_mutation.status(), StatusCode::FORBIDDEN);
 }
 
 async fn spawn_seeded_app() -> (String, seed::DemoSeedResult) {

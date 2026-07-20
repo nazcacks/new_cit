@@ -5,7 +5,7 @@ use sqlx::PgPool;
 use tokio::time;
 use uuid::Uuid;
 
-use crate::{domain::Job, efiling, state::AppState, tenant};
+use crate::{domain::Job, efiling, erp, state::AppState, tenant};
 
 pub async fn enqueue(
     pool: &PgPool,
@@ -169,6 +169,9 @@ async fn process_job(state: &AppState, job: &Job) -> Result<Value> {
             let tenant = tenant::resolve_tenant(&state.pool, tenant_code).await?;
             let result = efiling::generate_efiling(&state.pool, &tenant, by_id).await?;
             Ok(serde_json::to_value(result)?)
+        }
+        "erp_import" => {
+            erp::process_job(&state.pool, &job.payload, job.attempts, job.max_attempts).await
         }
         other => Err(anyhow!("unsupported job type {other}")),
     }

@@ -5,6 +5,7 @@ use chrono::Utc;
 use cit_system::{auth, db, queue, router, AppState, Config};
 use reqwest::{
     header::{HeaderMap, HeaderValue, AUTHORIZATION},
+    multipart::{Form, Part},
     Client, StatusCode,
 };
 use serde_json::{json, Value};
@@ -220,6 +221,36 @@ async fn filed_lock_login_ip_allowlist_and_lockout_are_enforced() {
     )
     .await;
     assert_eq!(relogin.0, StatusCode::OK, "{}", relogin.1);
+    let lock_user_client =
+        authed_client(relogin.1["token"].as_str().unwrap(), Some("203.0.113.10"));
+    let forbidden_mapping = post_json(
+        &lock_user_client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/account-mappings"),
+        json!({
+            "statement_type": "BS",
+            "source_account_code": "10100",
+            "source_account_name": "Cash",
+            "std_account_code": "STD_CASH"
+        }),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    assert_eq!(forbidden_mapping["error"]["code"], "FORBIDDEN");
+
+    let mapping = post_json(
+        &secure_client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/account-mappings"),
+        json!({
+            "statement_type": "BS",
+            "source_account_code": "10100",
+            "source_account_name": "Cash",
+            "std_account_code": "STD_CASH"
+        }),
+        StatusCode::CREATED,
+    )
+    .await;
+    assert_eq!(mapping["std_account_code"], "STD_CASH");
+    assert_eq!(mapping["standard_account_code"], "STD_CASH");
 
     for status in ["IN_REVIEW", "APPROVED", "FILED"] {
         post_json(
@@ -238,6 +269,19 @@ async fn filed_lock_login_ip_allowlist_and_lockout_are_enforced() {
     )
     .await;
     assert_eq!(blocked["error"]["code"], "CONFLICT");
+    let mapping_blocked = post_json(
+        &secure_client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/account-mappings"),
+        json!({
+            "statement_type": "BS",
+            "source_account_code": "10200",
+            "source_account_name": "Accounts receivable",
+            "std_account_code": "STD_AR"
+        }),
+        StatusCode::CONFLICT,
+    )
+    .await;
+    assert_eq!(mapping_blocked["error"]["code"], "CONFLICT");
 
     let amended = post_json(
         &secure_client,
@@ -396,6 +440,51 @@ async fn efiling_submit_step_up_role_and_filed_lock_are_enforced() {
     )
     .await;
     let by_id = by["by_id"].as_i64().unwrap();
+
+    let fs_csv = "\
+statement_type,account_code,account_name,debit,credit,standard_account_code,standard_account_name
+BS,10100,Cash,1000,0,STD_CASH,Cash
+BS,20100,Accounts payable,0,400,STD_PAYABLE,Accounts payable
+BS,30100,Capital,0,600,STD_CAPITAL,Capital
+IS,40100,Revenue,0,600,STD_PRODUCT_REVENUE,Revenue
+IS,50100,Cost of goods sold,400,0,STD_COGS,Cost of goods sold
+IS,51100,Salary expense,200,0,STD_SALARY,Salary expense
+";
+    post_csv_file(
+        &admin_client,
+        &format!(
+            "{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/tax-data/financial-statements/import"
+        ),
+        "efiling-fs.csv",
+        fs_csv,
+        StatusCode::CREATED,
+    )
+    .await;
+    post_json(
+        &admin_client,
+        &format!(
+            "{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/std-fs/mappings/bulk"
+        ),
+        json!({
+            "mappings": [
+                {"account_code": "10100", "std_fs_item_code": "1010"},
+                {"account_code": "20100", "std_fs_item_code": "2010"},
+                {"account_code": "30100", "std_fs_item_code": "3010"},
+                {"account_code": "40100", "std_fs_item_code": "4010"},
+                {"account_code": "50100", "std_fs_item_code": "4510"},
+                {"account_code": "51100", "std_fs_item_code": "5110"}
+            ]
+        }),
+        StatusCode::OK,
+    )
+    .await;
+    post_json(
+        &admin_client,
+        &format!("{base_url}/api/tenants/{tenant_code}/business-years/{by_id}/std-fs/confirm"),
+        json!({}),
+        StatusCode::OK,
+    )
+    .await;
 
     post_json(
         &admin_client,
@@ -652,6 +741,27 @@ async fn run_until_job_status(state: &AppState, job_id: &str, expected: &str) ->
 
 async fn post_json(client: &Client, url: &str, body: Value, expected: StatusCode) -> Value {
     let response = client.post(url).json(&body).send().await.unwrap();
+    let status = response.status();
+    let text = response.text().await.unwrap();
+    assert_eq!(status, expected, "{text}");
+    serde_json::from_str(&text).unwrap()
+}
+
+async fn post_csv_file(
+    client: &Client,
+    url: &str,
+    file_name: &str,
+    csv: &str,
+    expected: StatusCode,
+) -> Value {
+    let form = Form::new().part(
+        "file",
+        Part::text(csv.to_string())
+            .file_name(file_name.to_string())
+            .mime_str("text/csv")
+            .unwrap(),
+    );
+    let response = client.post(url).multipart(form).send().await.unwrap();
     let status = response.status();
     let text = response.text().await.unwrap();
     assert_eq!(status, expected, "{text}");

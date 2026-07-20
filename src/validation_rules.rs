@@ -7,10 +7,11 @@ use sqlx::{PgPool, Row};
 use crate::{
     db::quote_ident,
     domain::{
-        DismissValidationIssueRequest, TenantRef, ValidationIssue, ValidationRuleRecord,
-        ValidationRunResult,
+        AssetBsReconcileResult, DismissValidationIssueRequest, StdFsValidationResult, TenantRef,
+        TransactionIsReconcileResult, ValidationIssue, ValidationRuleRecord, ValidationRunResult,
+        VehicleB10ReconcileResult,
     },
-    tax_data, tenant,
+    std_fs, tax, tax_data, tenant,
 };
 
 pub async fn list_rules(pool: &PgPool) -> Result<Vec<ValidationRuleRecord>> {
@@ -148,6 +149,10 @@ struct ValidationFacts {
     efiling_count: i64,
     reserve_count: i64,
     notification_count: i64,
+    std_fs: Option<StdFsValidationResult>,
+    asset_bs: Option<AssetBsReconcileResult>,
+    transaction_is: Option<TransactionIsReconcileResult>,
+    vehicle_b10: Option<VehicleB10ReconcileResult>,
 }
 
 struct CandidateIssue {
@@ -237,6 +242,19 @@ impl ValidationFacts {
         .await
         .context("failed to count notifications")?;
 
+        let std_fs = std_fs::validate_workspace_statements(pool, tenant_ref, by_id)
+            .await
+            .ok();
+        let asset_bs = tax_data::asset_bs_reconcile(pool, tenant_ref, by_id)
+            .await
+            .ok();
+        let transaction_is = tax_data::transaction_is_reconcile(pool, tenant_ref, by_id)
+            .await
+            .ok();
+        let vehicle_b10 = tax::vehicle_b10_reconcile(pool, tenant_ref, by_id)
+            .await
+            .ok();
+
         Ok(Self {
             by_id,
             status: business_year.status,
@@ -248,6 +266,10 @@ impl ValidationFacts {
             efiling_count,
             reserve_count,
             notification_count,
+            std_fs,
+            asset_bs,
+            transaction_is,
+            vehicle_b10,
         })
     }
 }
@@ -260,6 +282,14 @@ fn evaluate_rule(rule: &ValidationRuleRecord, facts: &ValidationFacts) -> Option
         "unresolved_mapping_count",
         facts.tax_data.unresolved_mapping_count.to_string(),
     );
+    values.insert(
+        "mandatory_mapping_missing_count",
+        facts.tax_data.mandatory_mapping_missing_count.to_string(),
+    );
+    values.insert(
+        "mandatory_mapping_missing_codes",
+        facts.tax_data.mandatory_mapping_missing_codes.join(","),
+    );
     values.insert("asset_count", facts.tax_data.asset_count.to_string());
     values.insert(
         "business_vehicle_count",
@@ -270,11 +300,101 @@ fn evaluate_rule(rule: &ValidationRuleRecord, facts: &ValidationFacts) -> Option
         facts.tax_data.transaction_count.to_string(),
     );
     values.insert("status", facts.status.clone());
+    values.insert(
+        "std_bs_balance_diff",
+        std_fs_issue_by_code(facts, "CHK_STDBS_BALANCE")
+            .map(|issue| issue.difference.abs())
+            .unwrap_or(0)
+            .to_string(),
+    );
+    values.insert(
+        "std_bs_vs_fs_diff",
+        std_fs_issue_by_code(facts, "CHK_STDBS_VS_FS")
+            .map(|issue| issue.difference.abs())
+            .unwrap_or(0)
+            .to_string(),
+    );
+    values.insert(
+        "std_is_vs_fs_diff",
+        std_fs_issue_by_code(facts, "CHK_STDIS_VS_FS")
+            .map(|issue| issue.difference.abs())
+            .unwrap_or(0)
+            .to_string(),
+    );
+    values.insert(
+        "std_fs_unmapped_count",
+        facts
+            .std_fs
+            .as_ref()
+            .map(|result| result.unmapped_count)
+            .unwrap_or(0)
+            .to_string(),
+    );
+    values.insert(
+        "std_fs_confirmed",
+        facts
+            .std_fs
+            .as_ref()
+            .map(|result| if result.confirmed { "Y" } else { "N" })
+            .unwrap_or("N")
+            .to_string(),
+    );
+    values.insert(
+        "ppe_cost_diff",
+        asset_bs_issue_by_code(facts, "CHK_PPE_COST")
+            .map(|issue| issue.difference.abs())
+            .unwrap_or(0)
+            .to_string(),
+    );
+    values.insert(
+        "accum_depr_diff",
+        asset_bs_issue_by_code(facts, "CHK_ACCUM_DEPR")
+            .map(|issue| issue.difference.abs())
+            .unwrap_or(0)
+            .to_string(),
+    );
+    values.insert(
+        "intangible_diff",
+        asset_bs_issue_by_code(facts, "CHK_INTANGIBLE")
+            .map(|issue| issue.difference.abs())
+            .unwrap_or(0)
+            .to_string(),
+    );
+    values.insert(
+        "donation_txn_is_diff",
+        transaction_is_issue_by_code(facts, "CHK_DONATION_TXN")
+            .map(max_transaction_reconcile_difference)
+            .unwrap_or(0)
+            .to_string(),
+    );
+    values.insert(
+        "entertain_txn_is_diff",
+        transaction_is_issue_by_code(facts, "CHK_ENTERTAIN_TXN")
+            .map(max_transaction_reconcile_difference)
+            .unwrap_or(0)
+            .to_string(),
+    );
+    values.insert(
+        "interest_txn_is_diff",
+        transaction_is_issue_by_code(facts, "CHK_INTEREST_TXN")
+            .map(max_transaction_reconcile_difference)
+            .unwrap_or(0)
+            .to_string(),
+    );
+    values.insert(
+        "vehicle_usage_default_count",
+        vehicle_b10_issue_count_by_code(facts, "CHK_VEHICLE_USAGE_BPS").to_string(),
+    );
+    values.insert(
+        "b10_link_diff",
+        vehicle_b10_max_difference_by_code(facts, "CHK_B10_LINK").to_string(),
+    );
 
     let failed = match rule.rule_code.as_str() {
         "TD_FS_REQUIRED" => facts.tax_data.fs_line_count == 0,
         "TD_FS_BALANCED" => facts.tax_data.fs_line_count > 0 && !facts.tax_data.balanced,
         "TD_MAPPING_RESOLVED" => facts.tax_data.unresolved_mapping_count > 0,
+        "TD_TAX_REQUIRED_MAPPINGS" => facts.tax_data.mandatory_mapping_missing_count > 0,
         "TD_ASSET_REGISTER" => facts.tax_data.asset_count == 0,
         "TD_VEHICLE_USAGE" => {
             facts.tax_data.business_vehicle_count > 0 && facts.vehicle_log_count == 0
@@ -300,20 +420,152 @@ fn evaluate_rule(rule: &ValidationRuleRecord, facts: &ValidationFacts) -> Option
         code if code.starts_with("EF_") => false,
         code if code.starts_with("RP_") => false,
         code if code.starts_with("WF_") => false,
+        "CHK_STDBS_BALANCE" => std_fs_rule_failed(facts, "CHK_STDBS_BALANCE"),
+        "CHK_STDBS_VS_FS" => std_fs_rule_failed(facts, "CHK_STDBS_VS_FS"),
+        "CHK_STDIS_VS_FS" => std_fs_rule_failed(facts, "CHK_STDIS_VS_FS"),
+        "CHK_STDFS_UNMAPPED" => std_fs_rule_failed(facts, "CHK_STDFS_UNMAPPED"),
+        "CHK_STDFS_CONFIRMED" => std_fs_confirmed_rule_failed(facts),
+        "CHK_PPE_COST" => asset_bs_rule_failed(facts, "CHK_PPE_COST"),
+        "CHK_ACCUM_DEPR" => asset_bs_rule_failed(facts, "CHK_ACCUM_DEPR"),
+        "CHK_INTANGIBLE" => asset_bs_rule_failed(facts, "CHK_INTANGIBLE"),
+        "CHK_DONATION_TXN" => transaction_is_rule_failed(facts, "CHK_DONATION_TXN"),
+        "CHK_ENTERTAIN_TXN" => transaction_is_rule_failed(facts, "CHK_ENTERTAIN_TXN"),
+        "CHK_INTEREST_TXN" => transaction_is_rule_failed(facts, "CHK_INTEREST_TXN"),
+        "CHK_VEHICLE_USAGE_BPS" => vehicle_b10_rule_failed(facts, "CHK_VEHICLE_USAGE_BPS"),
+        "CHK_B10_LINK" => vehicle_b10_rule_failed(facts, "CHK_B10_LINK"),
         _ => false,
     };
 
-    failed.then(|| CandidateIssue {
-        rule_code: rule.rule_code.clone(),
-        severity: rule.severity.clone(),
-        area: rule.area.clone(),
-        message: render_message(&rule.message_template, &values),
-        target_path: Some(rule.applies_to.clone()),
-        metadata: json!({
-            "applies_to": rule.applies_to,
-            "rule_code": rule.rule_code,
-        }),
-    })
+    if failed {
+        let asset_issue = asset_bs_issue_by_code(facts, &rule.rule_code);
+        let transaction_issue = transaction_is_issue_by_code(facts, &rule.rule_code);
+        let vehicle_issues = vehicle_b10_issues_by_code(facts, &rule.rule_code);
+        Some(CandidateIssue {
+            rule_code: rule.rule_code.clone(),
+            severity: rule.severity.clone(),
+            area: rule.area.clone(),
+            message: render_message(&rule.message_template, &values),
+            target_path: Some(rule.applies_to.clone()),
+            metadata: json!({
+                "applies_to": rule.applies_to,
+                "rule_code": rule.rule_code,
+                "std_fs_validation": facts.std_fs,
+                "asset_reconcile": asset_issue,
+                "transaction_is_reconcile": transaction_issue,
+                "vehicle_b10_reconcile": vehicle_issues,
+            }),
+        })
+    } else {
+        None
+    }
+}
+
+fn std_fs_issue_by_code<'a>(
+    facts: &'a ValidationFacts,
+    rule_code: &str,
+) -> Option<&'a crate::domain::StdFsValidationIssue> {
+    facts
+        .std_fs
+        .as_ref()?
+        .issues
+        .iter()
+        .find(|issue| issue.rule_code == rule_code)
+}
+
+fn std_fs_rule_failed(facts: &ValidationFacts, rule_code: &str) -> bool {
+    std_fs_issue_by_code(facts, rule_code)
+        .map(|issue| !issue.passed)
+        .unwrap_or(false)
+}
+
+fn std_fs_confirmed_rule_failed(facts: &ValidationFacts) -> bool {
+    facts
+        .std_fs
+        .as_ref()
+        .map(|result| !result.confirmed)
+        .unwrap_or(true)
+}
+
+fn asset_bs_issue_by_code<'a>(
+    facts: &'a ValidationFacts,
+    rule_code: &str,
+) -> Option<&'a crate::domain::AssetBsReconcileIssue> {
+    facts
+        .asset_bs
+        .as_ref()?
+        .issues
+        .iter()
+        .find(|issue| issue.rule_code == rule_code)
+}
+
+fn asset_bs_rule_failed(facts: &ValidationFacts, rule_code: &str) -> bool {
+    asset_bs_issue_by_code(facts, rule_code)
+        .map(|issue| !issue.passed)
+        .unwrap_or(false)
+}
+
+fn transaction_is_issue_by_code<'a>(
+    facts: &'a ValidationFacts,
+    rule_code: &str,
+) -> Option<&'a crate::domain::TransactionIsReconcileIssue> {
+    facts
+        .transaction_is
+        .as_ref()?
+        .issues
+        .iter()
+        .find(|issue| issue.rule_code == rule_code)
+}
+
+fn transaction_is_rule_failed(facts: &ValidationFacts, rule_code: &str) -> bool {
+    transaction_is_issue_by_code(facts, rule_code)
+        .map(|issue| !issue.passed)
+        .unwrap_or(false)
+}
+
+fn max_transaction_reconcile_difference(issue: &crate::domain::TransactionIsReconcileIssue) -> i64 {
+    issue
+        .transaction_is_difference
+        .abs()
+        .max(issue.is_std_difference.abs())
+}
+
+fn vehicle_b10_issues_by_code<'a>(
+    facts: &'a ValidationFacts,
+    rule_code: &str,
+) -> Vec<&'a crate::domain::VehicleB10ReconcileIssue> {
+    facts
+        .vehicle_b10
+        .as_ref()
+        .map(|result| {
+            result
+                .issues
+                .iter()
+                .filter(|issue| issue.rule_code == rule_code)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn vehicle_b10_rule_failed(facts: &ValidationFacts, rule_code: &str) -> bool {
+    vehicle_b10_issues_by_code(facts, rule_code)
+        .into_iter()
+        .any(|issue| !issue.passed)
+}
+
+fn vehicle_b10_issue_count_by_code(facts: &ValidationFacts, rule_code: &str) -> usize {
+    vehicle_b10_issues_by_code(facts, rule_code)
+        .into_iter()
+        .filter(|issue| !issue.passed)
+        .count()
+}
+
+fn vehicle_b10_max_difference_by_code(facts: &ValidationFacts, rule_code: &str) -> i64 {
+    vehicle_b10_issues_by_code(facts, rule_code)
+        .into_iter()
+        .filter(|issue| !issue.passed)
+        .map(|issue| issue.difference.abs())
+        .max()
+        .unwrap_or(0)
 }
 
 fn render_message(template: &str, values: &HashMap<&str, String>) -> String {

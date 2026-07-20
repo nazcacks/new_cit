@@ -254,6 +254,7 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
             customer_name   VARCHAR(200) NOT NULL,
             biz_reg_no      VARCHAR(13) NOT NULL,
             corp_reg_no     VARCHAR(20),
+            corp_type       VARCHAR(20) NOT NULL DEFAULT 'DOMESTIC',
             industry_code   VARCHAR(20),
             is_sme          BOOLEAN NOT NULL DEFAULT FALSE,
             work_scopes     TEXT[] NOT NULL DEFAULT ARRAY['INFO','ADJUST','FORM','VALIDATE','PRINT']::TEXT[],
@@ -264,6 +265,8 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
         );
         ALTER TABLE {schema}.customers
             ADD COLUMN IF NOT EXISTS work_scopes TEXT[] NOT NULL DEFAULT ARRAY['INFO','ADJUST','FORM','VALIDATE','PRINT']::TEXT[];
+        ALTER TABLE {schema}.customers
+            ADD COLUMN IF NOT EXISTS corp_type VARCHAR(20) NOT NULL DEFAULT 'DOMESTIC';
 
         CREATE TABLE IF NOT EXISTS {schema}.business_years (
             by_id           BIGSERIAL PRIMARY KEY,
@@ -321,6 +324,33 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
         CREATE INDEX IF NOT EXISTS idx_import_batches_by
             ON {schema}.import_batches(by_id, data_type, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS {schema}.erp_import_runs (
+            run_id          BIGSERIAL PRIMARY KEY,
+            by_id           BIGINT NOT NULL REFERENCES {schema}.business_years(by_id),
+            vendor          VARCHAR(40) NOT NULL,
+            source_system   VARCHAR(120) NOT NULL,
+            adapter_kind    VARCHAR(30) NOT NULL DEFAULT 'MOCK',
+            mock_profile    VARCHAR(40),
+            status          VARCHAR(30) NOT NULL DEFAULT 'QUEUED',
+            attempt_count   INT NOT NULL DEFAULT 0,
+            last_error      TEXT,
+            job_id          UUID,
+            import_batch_id BIGINT REFERENCES {schema}.import_batches(batch_id),
+            row_count       INT NOT NULL DEFAULT 0,
+            valid_count     INT NOT NULL DEFAULT 0,
+            error_count     INT NOT NULL DEFAULT 0,
+            metadata        JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            completed_at    TIMESTAMPTZ
+        );
+        CREATE INDEX IF NOT EXISTS idx_erp_import_runs_by
+            ON {schema}.erp_import_runs(by_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_erp_import_runs_status
+            ON {schema}.erp_import_runs(status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_erp_import_runs_job
+            ON {schema}.erp_import_runs(job_id);
+
         CREATE TABLE IF NOT EXISTS {schema}.import_errors (
             error_id        BIGSERIAL PRIMARY KEY,
             batch_id        BIGINT NOT NULL REFERENCES {schema}.import_batches(batch_id) ON DELETE CASCADE,
@@ -338,6 +368,10 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
             statement_type  VARCHAR(30) NOT NULL DEFAULT 'BS',
             source_account_code VARCHAR(50) NOT NULL,
             source_account_name VARCHAR(200) NOT NULL,
+            std_account_code VARCHAR(50) NOT NULL REFERENCES public.standard_accounts(code),
+            std_account_name VARCHAR(100) NOT NULL,
+            is_auto_mapped BOOLEAN NOT NULL DEFAULT FALSE,
+            map_confidence DOUBLE PRECISION NOT NULL DEFAULT 1.000,
             standard_account_code VARCHAR(50) NOT NULL,
             standard_account_name VARCHAR(200) NOT NULL,
             use_count       INT NOT NULL DEFAULT 1,
@@ -346,6 +380,38 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
             updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             UNIQUE(customer_id, statement_type, source_account_code)
         );
+        ALTER TABLE {schema}.account_mappings
+            ADD COLUMN IF NOT EXISTS std_account_code VARCHAR(50) REFERENCES public.standard_accounts(code);
+        ALTER TABLE {schema}.account_mappings
+            ADD COLUMN IF NOT EXISTS std_account_name VARCHAR(100);
+        ALTER TABLE {schema}.account_mappings
+            ADD COLUMN IF NOT EXISTS is_auto_mapped BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE {schema}.account_mappings
+            ADD COLUMN IF NOT EXISTS map_confidence DOUBLE PRECISION NOT NULL DEFAULT 1.000;
+        UPDATE {schema}.account_mappings
+            SET std_account_code = COALESCE(std_account_code, NULLIF(TRIM(standard_account_code), '')),
+                std_account_name = COALESCE(std_account_name, NULLIF(TRIM(standard_account_name), ''));
+        CREATE INDEX IF NOT EXISTS idx_account_mappings_std_account
+            ON {schema}.account_mappings(customer_id, std_account_code);
+
+        CREATE TABLE IF NOT EXISTS {schema}.std_fs_mappings (
+            id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            tenant_id       BIGINT NOT NULL REFERENCES public.tenants(tenant_id),
+            customer_id     BIGINT NOT NULL REFERENCES {schema}.customers(customer_id) ON DELETE CASCADE,
+            version_id      UUID NOT NULL REFERENCES public.std_fs_item_versions(id),
+            account_code    VARCHAR(50) NOT NULL,
+            account_name    VARCHAR(200),
+            std_fs_item_code VARCHAR(10) NOT NULL,
+            is_auto_mapped  BOOLEAN NOT NULL DEFAULT FALSE,
+            usage_count     INT NOT NULL DEFAULT 1,
+            last_used_at    TIMESTAMPTZ,
+            created_by      BIGINT REFERENCES public.users(user_id),
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(customer_id, version_id, account_code)
+        );
+        CREATE INDEX IF NOT EXISTS idx_std_fs_mappings_customer
+            ON {schema}.std_fs_mappings(customer_id, version_id, std_fs_item_code);
 
         CREATE TABLE IF NOT EXISTS {schema}.financial_statements (
             fs_id           BIGSERIAL PRIMARY KEY,
@@ -353,10 +419,13 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
             batch_id        BIGINT REFERENCES {schema}.import_batches(batch_id),
             statement_type  VARCHAR(30) NOT NULL,
             currency        VARCHAR(3) NOT NULL DEFAULT 'KRW',
+            std_map_rate    DOUBLE PRECISION NOT NULL DEFAULT 0,
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
         ALTER TABLE {schema}.financial_statements
             ADD COLUMN IF NOT EXISTS batch_id BIGINT REFERENCES {schema}.import_batches(batch_id);
+        ALTER TABLE {schema}.financial_statements
+            ADD COLUMN IF NOT EXISTS std_map_rate DOUBLE PRECISION NOT NULL DEFAULT 0;
 
         CREATE TABLE IF NOT EXISTS {schema}.fs_lines (
             line_id         BIGSERIAL PRIMARY KEY,
@@ -365,8 +434,13 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
             row_no          INT,
             account_code    VARCHAR(50) NOT NULL,
             account_name    VARCHAR(200) NOT NULL,
+            std_account_code VARCHAR(50) REFERENCES public.standard_accounts(code),
+            std_account_name VARCHAR(100),
+            is_auto_mapped  BOOLEAN NOT NULL DEFAULT FALSE,
+            map_confidence  DOUBLE PRECISION,
             standard_account_code VARCHAR(50),
             standard_account_name VARCHAR(200),
+            std_fs_item_code VARCHAR(10),
             amount          BIGINT NOT NULL,
             debit_credit    VARCHAR(10) NOT NULL
         );
@@ -378,6 +452,23 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
             ADD COLUMN IF NOT EXISTS standard_account_code VARCHAR(50);
         ALTER TABLE {schema}.fs_lines
             ADD COLUMN IF NOT EXISTS standard_account_name VARCHAR(200);
+        ALTER TABLE {schema}.fs_lines
+            ADD COLUMN IF NOT EXISTS std_account_code VARCHAR(50) REFERENCES public.standard_accounts(code);
+        ALTER TABLE {schema}.fs_lines
+            ADD COLUMN IF NOT EXISTS std_account_name VARCHAR(100);
+        ALTER TABLE {schema}.fs_lines
+            ADD COLUMN IF NOT EXISTS is_auto_mapped BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE {schema}.fs_lines
+            ADD COLUMN IF NOT EXISTS map_confidence DOUBLE PRECISION;
+        UPDATE {schema}.fs_lines
+            SET std_account_code = COALESCE(std_account_code, NULLIF(TRIM(standard_account_code), '')),
+                std_account_name = COALESCE(std_account_name, NULLIF(TRIM(standard_account_name), ''));
+        ALTER TABLE {schema}.fs_lines
+            ADD COLUMN IF NOT EXISTS std_fs_item_code VARCHAR(10);
+        CREATE INDEX IF NOT EXISTS idx_fs_lines_std_acct
+            ON {schema}.fs_lines(std_account_code);
+        CREATE INDEX IF NOT EXISTS idx_fs_lines_stdfs
+            ON {schema}.fs_lines(std_fs_item_code);
 
         CREATE TABLE IF NOT EXISTS {schema}.assets (
             asset_id        BIGSERIAL PRIMARY KEY,
@@ -390,6 +481,16 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
             acquisition_date DATE NOT NULL,
             acquisition_cost BIGINT NOT NULL,
             useful_life_years INT NOT NULL,
+            depr_method    VARCHAR(20) NOT NULL DEFAULT 'SL',
+            residual_value BIGINT NOT NULL DEFAULT 0,
+            accumulated_depr_prior BIGINT NOT NULL DEFAULT 0,
+            acct_depr_current BIGINT NOT NULL DEFAULT 0,
+            tax_depr_rate_bps INT,
+            tax_depr_limit BIGINT NOT NULL DEFAULT 0,
+            depr_excess BIGINT NOT NULL DEFAULT 0,
+            depr_shortfall BIGINT NOT NULL DEFAULT 0,
+            prev_year_asset_id BIGINT REFERENCES {schema}.assets(asset_id),
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
         ALTER TABLE {schema}.assets
@@ -398,8 +499,30 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
             ADD COLUMN IF NOT EXISTS asset_category VARCHAR(50) NOT NULL DEFAULT 'GENERAL';
         ALTER TABLE {schema}.assets
             ADD COLUMN IF NOT EXISTS is_business_vehicle BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE {schema}.assets
+            ADD COLUMN IF NOT EXISTS depr_method VARCHAR(20) NOT NULL DEFAULT 'SL';
+        ALTER TABLE {schema}.assets
+            ADD COLUMN IF NOT EXISTS residual_value BIGINT NOT NULL DEFAULT 0;
+        ALTER TABLE {schema}.assets
+            ADD COLUMN IF NOT EXISTS accumulated_depr_prior BIGINT NOT NULL DEFAULT 0;
+        ALTER TABLE {schema}.assets
+            ADD COLUMN IF NOT EXISTS acct_depr_current BIGINT NOT NULL DEFAULT 0;
+        ALTER TABLE {schema}.assets
+            ADD COLUMN IF NOT EXISTS tax_depr_rate_bps INT;
+        ALTER TABLE {schema}.assets
+            ADD COLUMN IF NOT EXISTS tax_depr_limit BIGINT NOT NULL DEFAULT 0;
+        ALTER TABLE {schema}.assets
+            ADD COLUMN IF NOT EXISTS depr_excess BIGINT NOT NULL DEFAULT 0;
+        ALTER TABLE {schema}.assets
+            ADD COLUMN IF NOT EXISTS depr_shortfall BIGINT NOT NULL DEFAULT 0;
+        ALTER TABLE {schema}.assets
+            ADD COLUMN IF NOT EXISTS prev_year_asset_id BIGINT REFERENCES {schema}.assets(asset_id);
+        ALTER TABLE {schema}.assets
+            ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
         CREATE INDEX IF NOT EXISTS idx_assets_by
             ON {schema}.assets(by_id, asset_category, asset_code);
+        CREATE INDEX IF NOT EXISTS idx_assets_prev_year
+            ON {schema}.assets(prev_year_asset_id);
 
         CREATE TABLE IF NOT EXISTS {schema}.vehicle_usage_logs (
             usage_log_id   BIGSERIAL PRIMARY KEY,
@@ -422,8 +545,14 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
             book_amount     BIGINT NOT NULL,
             tax_limit       BIGINT NOT NULL,
             adjustment_amount BIGINT NOT NULL,
+            shortfall_amount BIGINT NOT NULL DEFAULT 0,
+            metadata        JSONB NOT NULL DEFAULT '{{}}'::jsonb,
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+        ALTER TABLE {schema}.depreciation
+            ADD COLUMN IF NOT EXISTS shortfall_amount BIGINT NOT NULL DEFAULT 0;
+        ALTER TABLE {schema}.depreciation
+            ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb;
 
         CREATE TABLE IF NOT EXISTS {schema}.transactions (
             transaction_id  BIGSERIAL PRIMARY KEY,
@@ -504,10 +633,35 @@ pub async fn provision_tenant_schema(pool: &PgPool, schema_name: &str) -> Result
             rate_version_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
             form_version_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
             efile_master_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+            std_fs_version_id UUID REFERENCES public.std_fs_item_versions(id),
             snapshot_data    JSONB NOT NULL,
             locked           BOOLEAN NOT NULL DEFAULT FALSE,
             created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+        ALTER TABLE {schema}.by_law_snapshot
+            ADD COLUMN IF NOT EXISTS std_fs_version_id UUID REFERENCES public.std_fs_item_versions(id);
+        CREATE INDEX IF NOT EXISTS idx_by_law_snapshot_stdfs
+            ON {schema}.by_law_snapshot(std_fs_version_id);
+
+        CREATE TABLE IF NOT EXISTS {schema}.std_fs_statements (
+            id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            tenant_id       BIGINT NOT NULL REFERENCES public.tenants(tenant_id),
+            business_year_id BIGINT NOT NULL REFERENCES {schema}.business_years(by_id) ON DELETE CASCADE,
+            version_id      UUID NOT NULL REFERENCES public.std_fs_item_versions(id),
+            stmt_type       VARCHAR(10) NOT NULL,
+            status          VARCHAR(15) NOT NULL DEFAULT 'DRAFT',
+            item_code       VARCHAR(10) NOT NULL,
+            amount          BIGINT NOT NULL DEFAULT 0,
+            source_line_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+            total_check     JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+            confirmed_at    TIMESTAMPTZ,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            CHECK (stmt_type IN ('STD_BS', 'STD_IS', 'STD_COST', 'STD_RE')),
+            CHECK (status IN ('DRAFT', 'CONFIRMED', 'SUPERSEDED')),
+            UNIQUE(business_year_id, version_id, stmt_type, item_code, status)
+        );
+        CREATE INDEX IF NOT EXISTS idx_std_fs_statements_by
+            ON {schema}.std_fs_statements(business_year_id, version_id, stmt_type, status);
 
         CREATE TABLE IF NOT EXISTS {schema}.tax_adjustments (
             adjustment_id  BIGSERIAL PRIMARY KEY,
@@ -893,14 +1047,16 @@ pub async fn create_customer(
 ) -> Result<Customer> {
     let schema = quote_ident(&tenant.schema_name)?;
     let work_scopes = normalize_customer_work_scopes(request.work_scopes.as_deref())?;
+    let corp_type = normalize_corp_type(request.corp_type.as_deref())?;
     let sql = format!(
         r#"
         INSERT INTO {schema}.customers (
-            tenant_id, customer_code, customer_name, biz_reg_no, corp_reg_no, industry_code, is_sme, work_scopes
+            tenant_id, customer_code, customer_name, biz_reg_no, corp_reg_no,
+            corp_type, industry_code, is_sme, work_scopes
         )
-        VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, FALSE), $8)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, FALSE), $9)
         RETURNING customer_id, tenant_id, customer_code, customer_name, biz_reg_no, corp_reg_no,
-                  industry_code, is_sme, work_scopes, status, created_at, updated_at
+                  corp_type, industry_code, is_sme, work_scopes, status, created_at, updated_at
         "#
     );
 
@@ -910,6 +1066,7 @@ pub async fn create_customer(
         .bind(request.customer_name.trim())
         .bind(request.biz_reg_no.trim())
         .bind(request.corp_reg_no)
+        .bind(corp_type)
         .bind(request.industry_code)
         .bind(request.is_sme)
         .bind(work_scopes)
@@ -941,7 +1098,7 @@ pub async fn list_customers(pool: &PgPool, tenant: &TenantRef) -> Result<Vec<Cus
     let sql = format!(
         r#"
         SELECT customer_id, tenant_id, customer_code, customer_name, biz_reg_no, corp_reg_no,
-               industry_code, is_sme, work_scopes, status, created_at, updated_at
+               corp_type, industry_code, is_sme, work_scopes, status, created_at, updated_at
         FROM {schema}.customers
         WHERE tenant_id = $1
         ORDER BY customer_code
@@ -980,6 +1137,15 @@ fn normalize_customer_work_scopes(scopes: Option<&[String]>) -> Result<Vec<Strin
     normalized.sort();
     normalized.dedup();
     Ok(normalized)
+}
+
+fn normalize_corp_type(corp_type: Option<&str>) -> Result<String> {
+    let normalized = corp_type.unwrap_or("DOMESTIC").trim().to_ascii_uppercase();
+    if matches!(normalized.as_str(), "DOMESTIC" | "FOREIGN" | "CONSOLIDATED") {
+        Ok(normalized)
+    } else {
+        anyhow::bail!("invalid customer corp_type");
+    }
 }
 
 pub async fn create_business_year(
@@ -1032,6 +1198,7 @@ pub async fn create_business_year(
         },
     )
     .await?;
+    crate::tax::ensure_law_snapshot(pool, tenant, business_year.by_id).await?;
     Ok(business_year)
 }
 
@@ -1434,7 +1601,7 @@ async fn insert_audit_log(
         SELECT $1, $2, $3, $4, $5, $6, CURRENT_DATE,
                prev.hash_current,
                md5(COALESCE(prev.hash_current, '') || $1 || $2 || $3 ||
-                   COALESCE($4::text, '') || COALESCE($5::text, '') || $6)
+                   COALESCE($4::jsonb::text, '') || COALESCE($5::jsonb::text, '') || $6)
         FROM (SELECT 1) seed
         LEFT JOIN prev ON TRUE
         "#
@@ -3784,10 +3951,14 @@ async fn clone_amendment_baseline(
         r#"
         INSERT INTO {schema}.assets (
             by_id, batch_id, asset_code, asset_name, asset_category, is_business_vehicle,
-            acquisition_date, acquisition_cost, useful_life_years
+            acquisition_date, acquisition_cost, useful_life_years, depr_method, residual_value,
+            accumulated_depr_prior, acct_depr_current, tax_depr_rate_bps, tax_depr_limit,
+            depr_excess, depr_shortfall, prev_year_asset_id
         )
         SELECT $2, NULL, asset_code, asset_name, asset_category, is_business_vehicle,
-               acquisition_date, acquisition_cost, useful_life_years
+               acquisition_date, acquisition_cost, useful_life_years, depr_method, residual_value,
+               accumulated_depr_prior, acct_depr_current, tax_depr_rate_bps, tax_depr_limit,
+               depr_excess, depr_shortfall, asset_id
         FROM {schema}.assets
         WHERE by_id = $1
         "#
@@ -3821,23 +3992,25 @@ async fn clone_amendment_baseline(
     let copy_financial_statements = format!(
         r#"
         WITH source_fs AS (
-            SELECT fs_id, statement_type, currency
+            SELECT fs_id, statement_type, currency, std_map_rate
             FROM {schema}.financial_statements
             WHERE by_id = $1
         ),
         inserted_fs AS (
-            INSERT INTO {schema}.financial_statements (by_id, batch_id, statement_type, currency)
-            SELECT $2, NULL, statement_type, currency
+            INSERT INTO {schema}.financial_statements (by_id, batch_id, statement_type, currency, std_map_rate)
+            SELECT $2, NULL, statement_type, currency, std_map_rate
             FROM source_fs
             RETURNING fs_id, statement_type
         )
         INSERT INTO {schema}.fs_lines (
-            fs_id, batch_id, row_no, account_code, account_name, standard_account_code,
-            standard_account_name, amount, debit_credit
+            fs_id, batch_id, row_no, account_code, account_name, std_account_code,
+            std_account_name, is_auto_mapped, map_confidence, standard_account_code,
+            standard_account_name, std_fs_item_code, amount, debit_credit
         )
         SELECT inserted_fs.fs_id, NULL, lines.row_no, lines.account_code, lines.account_name,
-               lines.standard_account_code, lines.standard_account_name, lines.amount,
-               lines.debit_credit
+               lines.std_account_code, lines.std_account_name, lines.is_auto_mapped,
+               lines.map_confidence, lines.standard_account_code, lines.standard_account_name,
+               lines.std_fs_item_code, lines.amount, lines.debit_credit
         FROM source_fs
         JOIN {schema}.fs_lines lines ON lines.fs_id = source_fs.fs_id
         JOIN inserted_fs ON inserted_fs.statement_type = source_fs.statement_type

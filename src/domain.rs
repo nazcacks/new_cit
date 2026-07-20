@@ -250,6 +250,7 @@ pub struct Customer {
     pub customer_name: String,
     pub biz_reg_no: String,
     pub corp_reg_no: Option<String>,
+    pub corp_type: String,
     pub industry_code: Option<String>,
     pub is_sme: bool,
     pub work_scopes: Vec<String>,
@@ -264,6 +265,7 @@ pub struct CreateCustomerRequest {
     pub customer_name: String,
     pub biz_reg_no: String,
     pub corp_reg_no: Option<String>,
+    pub corp_type: Option<String>,
     pub industry_code: Option<String>,
     pub is_sme: Option<bool>,
     pub work_scopes: Option<Vec<String>>,
@@ -723,6 +725,57 @@ pub struct ImportError {
 pub struct TaxDataImportResponse {
     pub batch: ImportBatch,
     pub errors: Vec<ImportError>,
+    #[serde(rename = "stdMapRate", skip_serializing_if = "Option::is_none")]
+    pub std_map_rate: Option<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateErpImportRequest {
+    pub vendor: String,
+    pub source_system: Option<String>,
+    pub mock_profile: Option<String>,
+    pub max_attempts: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct ErpImportRun {
+    pub run_id: i64,
+    pub by_id: i64,
+    pub vendor: String,
+    pub source_system: String,
+    pub adapter_kind: String,
+    pub mock_profile: Option<String>,
+    pub status: String,
+    pub attempt_count: i32,
+    pub last_error: Option<String>,
+    pub job_id: Option<Uuid>,
+    pub import_batch_id: Option<i64>,
+    pub row_count: i32,
+    pub valid_count: i32,
+    pub error_count: i32,
+    pub metadata: Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ErpImportEnqueueResponse {
+    pub run: ErpImportRun,
+    pub job: Job,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct StandardAccount {
+    pub code: String,
+    pub name_ko: String,
+    pub fs_type: String,
+    pub account_class: String,
+    pub normal_balance: String,
+    pub tax_relevance: Option<String>,
+    pub sub_class: Option<String>,
+    pub is_active: bool,
+    pub sort_order: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -732,6 +785,10 @@ pub struct AccountMapping {
     pub statement_type: String,
     pub source_account_code: String,
     pub source_account_name: String,
+    pub std_account_code: String,
+    pub std_account_name: String,
+    pub is_auto_mapped: bool,
+    pub map_confidence: f64,
     pub standard_account_code: String,
     pub standard_account_name: String,
     pub use_count: i32,
@@ -745,8 +802,10 @@ pub struct CreateAccountMappingRequest {
     pub statement_type: Option<String>,
     pub source_account_code: String,
     pub source_account_name: String,
+    #[serde(alias = "std_account_code")]
     pub standard_account_code: String,
-    pub standard_account_name: String,
+    #[serde(default, alias = "std_account_name")]
+    pub standard_account_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -758,12 +817,348 @@ pub struct FinancialStatementLine {
     pub row_no: Option<i32>,
     pub account_code: String,
     pub account_name: String,
+    pub std_account_code: Option<String>,
+    pub std_account_name: Option<String>,
+    pub is_auto_mapped: bool,
+    pub map_confidence: Option<f64>,
     pub standard_account_code: Option<String>,
     pub standard_account_name: Option<String>,
+    pub std_fs_item_code: Option<String>,
     pub amount: i64,
     pub debit_credit: String,
     pub debit: i64,
     pub credit: i64,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct StdFsItemVersion {
+    pub id: Uuid,
+    pub version_code: String,
+    pub industry_type: String,
+    pub corp_type: String,
+    pub effective_from: NaiveDate,
+    pub effective_to: Option<NaiveDate>,
+    pub nts_doc_ref: Option<String>,
+    pub status: String,
+    pub xml_schema_ver: Option<String>,
+    pub created_by: Option<i64>,
+    pub reviewed_by: Option<i64>,
+    pub created_at: DateTime<Utc>,
+    pub activated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct StdFsItem {
+    pub id: Uuid,
+    pub version_id: Uuid,
+    pub stmt_type: String,
+    pub item_code: String,
+    pub item_name: String,
+    pub parent_code: Option<String>,
+    pub level: i32,
+    pub account_class: Option<String>,
+    pub normal_balance: Option<String>,
+    pub is_subtotal: bool,
+    pub is_required: bool,
+    pub agg_formula: Option<String>,
+    pub xml_field_id: Option<String>,
+    pub sort_order: Option<i32>,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateStdFsVersionRequest {
+    pub version_code: String,
+    pub industry_type: String,
+    pub corp_type: Option<String>,
+    pub effective_from: NaiveDate,
+    pub effective_to: Option<NaiveDate>,
+    pub nts_doc_ref: Option<String>,
+    pub status: Option<String>,
+    pub xml_schema_ver: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateStdFsVersionRequest {
+    pub version_code: Option<String>,
+    pub industry_type: Option<String>,
+    pub corp_type: Option<String>,
+    pub effective_from: Option<NaiveDate>,
+    pub effective_to: Option<NaiveDate>,
+    pub nts_doc_ref: Option<String>,
+    pub xml_schema_ver: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CloneStdFsVersionRequest {
+    pub version_code: String,
+    pub industry_type: Option<String>,
+    pub corp_type: Option<String>,
+    pub effective_from: Option<NaiveDate>,
+    pub effective_to: Option<NaiveDate>,
+    pub nts_doc_ref: Option<String>,
+    pub xml_schema_ver: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateStdFsVersionStatusRequest {
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateStdFsItemRequest {
+    pub stmt_type: String,
+    pub item_code: String,
+    pub item_name: String,
+    pub parent_code: Option<String>,
+    pub level: Option<i32>,
+    pub account_class: Option<String>,
+    pub normal_balance: Option<String>,
+    pub is_subtotal: Option<bool>,
+    pub is_required: Option<bool>,
+    pub agg_formula: Option<String>,
+    pub xml_field_id: Option<String>,
+    pub sort_order: Option<i32>,
+    pub is_active: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateStdFsItemRequest {
+    pub stmt_type: Option<String>,
+    pub item_code: Option<String>,
+    pub item_name: Option<String>,
+    pub parent_code: Option<String>,
+    pub level: Option<i32>,
+    pub account_class: Option<String>,
+    pub normal_balance: Option<String>,
+    pub is_subtotal: Option<bool>,
+    pub is_required: Option<bool>,
+    pub agg_formula: Option<String>,
+    pub xml_field_id: Option<String>,
+    pub sort_order: Option<i32>,
+    pub is_active: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StdFsIntegrityIssue {
+    pub severity: String,
+    pub code: String,
+    pub item_code: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StdFsIntegrityResult {
+    pub version_id: Uuid,
+    pub valid: bool,
+    pub error_count: usize,
+    pub warn_count: usize,
+    pub issues: Vec<StdFsIntegrityIssue>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StdFsItemDiff {
+    pub item_code: String,
+    pub from: Option<StdFsItem>,
+    pub to: Option<StdFsItem>,
+    pub changed_fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StdFsVersionDiff {
+    pub from_version_id: Uuid,
+    pub to_version_id: Uuid,
+    pub added: Vec<StdFsItemDiff>,
+    pub removed: Vec<StdFsItemDiff>,
+    pub changed: Vec<StdFsItemDiff>,
+    pub summary: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StdFsImportIssue {
+    pub row_no: i32,
+    pub severity: String,
+    pub code: String,
+    pub field_name: Option<String>,
+    pub item_code: Option<String>,
+    pub message: String,
+    pub raw_row: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StdFsImportReport {
+    pub version_id: Uuid,
+    pub status: String,
+    pub total_rows: usize,
+    pub valid_rows: usize,
+    pub inserted_count: usize,
+    pub updated_count: usize,
+    pub unchanged_count: usize,
+    pub error_count: usize,
+    pub warn_count: usize,
+    pub issues: Vec<StdFsImportIssue>,
+    pub integrity: Option<StdFsIntegrityResult>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct StdFsMapping {
+    pub id: Uuid,
+    pub tenant_id: i64,
+    pub customer_id: i64,
+    pub version_id: Uuid,
+    pub account_code: String,
+    pub account_name: Option<String>,
+    pub std_fs_item_code: String,
+    pub is_auto_mapped: bool,
+    pub usage_count: i32,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub created_by: Option<i64>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct StdFsMappingRow {
+    pub by_id: i64,
+    pub customer_id: i64,
+    pub version_id: Uuid,
+    pub statement_type: String,
+    pub account_code: String,
+    pub account_name: String,
+    pub debit_total: i64,
+    pub credit_total: i64,
+    pub amount: i64,
+    pub debit_credit: String,
+    pub std_fs_item_code: Option<String>,
+    pub std_fs_item_name: Option<String>,
+    pub mapped_is_subtotal: Option<bool>,
+    pub mapping_id: Option<Uuid>,
+    pub is_auto_mapped: bool,
+    pub usage_count: Option<i32>,
+    pub mapped_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateStdFsMappingRequest {
+    #[serde(default, alias = "stdFsItemCode")]
+    pub std_fs_item_code: Option<String>,
+    #[serde(default, alias = "accountName")]
+    pub account_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StdFsMappingInput {
+    #[serde(alias = "accountCode")]
+    pub account_code: String,
+    #[serde(default, alias = "stdFsItemCode")]
+    pub std_fs_item_code: Option<String>,
+    #[serde(default, alias = "accountName")]
+    pub account_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BulkStdFsMappingRequest {
+    pub mappings: Vec<StdFsMappingInput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StdFsMappingSaveResult {
+    pub updated_count: usize,
+    pub cleared_count: usize,
+    pub mappings: Vec<StdFsMappingRow>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CarryForwardStdFsMappingRequest {
+    #[serde(default, alias = "sourceById")]
+    pub source_by_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StdFsMappingCarryForwardResult {
+    pub source_by_id: i64,
+    pub copied_count: usize,
+    pub skipped_count: usize,
+    pub mappings: Vec<StdFsMappingRow>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct StdFsStatement {
+    pub id: Uuid,
+    pub tenant_id: i64,
+    pub business_year_id: i64,
+    pub version_id: Uuid,
+    pub stmt_type: String,
+    pub status: String,
+    pub item_code: String,
+    pub amount: i64,
+    pub source_line_ids: Value,
+    pub total_check: Value,
+    pub confirmed_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StdFsStatementLine {
+    pub by_id: i64,
+    pub version_id: Uuid,
+    pub stmt_type: String,
+    pub item_code: String,
+    pub item_name: String,
+    pub parent_code: Option<String>,
+    pub level: i32,
+    pub account_class: Option<String>,
+    pub normal_balance: Option<String>,
+    pub is_subtotal: bool,
+    pub is_required: bool,
+    pub sort_order: Option<i32>,
+    pub amount: i64,
+    pub source_line_ids: Value,
+    pub total_check: Value,
+    pub confirmed: bool,
+    pub confirmed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StdFsValidationIssue {
+    pub rule_code: String,
+    pub severity: String,
+    pub message: String,
+    pub passed: bool,
+    pub expected: i64,
+    pub actual: i64,
+    pub difference: i64,
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StdFsValidationResult {
+    pub by_id: i64,
+    pub version_id: Uuid,
+    pub valid: bool,
+    pub error_count: usize,
+    pub warn_count: usize,
+    pub unmapped_count: i64,
+    pub confirmed: bool,
+    pub totals: Value,
+    pub issues: Vec<StdFsValidationIssue>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StdFsAggregateResult {
+    pub by_id: i64,
+    pub version_id: Uuid,
+    pub statements: Vec<StdFsStatementLine>,
+    pub validation: StdFsValidationResult,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StdFsConfirmResult {
+    pub by_id: i64,
+    pub version_id: Uuid,
+    pub confirmed_count: usize,
+    pub statements: Vec<StdFsStatement>,
+    pub validation: StdFsValidationResult,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -778,7 +1173,132 @@ pub struct AssetRecord {
     pub acquisition_date: NaiveDate,
     pub acquisition_cost: i64,
     pub useful_life_years: i32,
+    pub depr_method: String,
+    pub residual_value: i64,
+    pub accumulated_depr_prior: i64,
+    pub acct_depr_current: i64,
+    pub tax_depr_rate_bps: Option<i32>,
+    pub tax_depr_limit: i64,
+    pub depr_excess: i64,
+    pub depr_shortfall: i64,
+    pub prev_year_asset_id: Option<i64>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateAssetRequest {
+    pub asset_code: String,
+    pub asset_name: String,
+    #[serde(default, alias = "category")]
+    pub asset_category: Option<String>,
+    #[serde(default)]
+    pub is_business_vehicle: Option<bool>,
+    pub acquisition_date: NaiveDate,
+    pub acquisition_cost: i64,
+    #[serde(default)]
+    pub useful_life_years: Option<i32>,
+    #[serde(default, alias = "depreciation_method")]
+    pub depr_method: Option<String>,
+    #[serde(default)]
+    pub residual_value: Option<i64>,
+    #[serde(default)]
+    pub accumulated_depr_prior: Option<i64>,
+    #[serde(default)]
+    pub acct_depr_current: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateAssetRequest {
+    #[serde(default)]
+    pub asset_code: Option<String>,
+    #[serde(default)]
+    pub asset_name: Option<String>,
+    #[serde(default, alias = "category")]
+    pub asset_category: Option<String>,
+    #[serde(default)]
+    pub is_business_vehicle: Option<bool>,
+    #[serde(default)]
+    pub acquisition_date: Option<NaiveDate>,
+    #[serde(default)]
+    pub acquisition_cost: Option<i64>,
+    #[serde(default)]
+    pub useful_life_years: Option<i32>,
+    #[serde(default, alias = "depreciation_method")]
+    pub depr_method: Option<String>,
+    #[serde(default)]
+    pub residual_value: Option<i64>,
+    #[serde(default)]
+    pub accumulated_depr_prior: Option<i64>,
+    #[serde(default)]
+    pub acct_depr_current: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AssetCarryForwardRequest {
+    #[serde(default, alias = "sourceById")]
+    pub source_by_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AssetCarryForwardResult {
+    pub source_by_id: i64,
+    pub copied_count: usize,
+    pub skipped_count: usize,
+    pub assets: Vec<AssetRecord>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AssetDepreciationPreviewRow {
+    pub asset_id: i64,
+    pub asset_code: String,
+    pub asset_name: String,
+    pub asset_category: String,
+    pub depr_method: String,
+    pub acquisition_cost: i64,
+    pub residual_value: i64,
+    pub accumulated_depr_prior: i64,
+    pub acct_depr_current: i64,
+    pub useful_life_years: i32,
+    pub tax_life_years: i32,
+    pub use_months: i32,
+    pub tax_depr_rate_bps: Option<i32>,
+    pub tax_depr_limit: i64,
+    pub depr_excess: i64,
+    pub depr_shortfall: i64,
+    pub immediate_expense: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AssetDepreciationPreviewResult {
+    pub by_id: i64,
+    pub law_version_id: i64,
+    pub total_book_amount: i64,
+    pub total_tax_limit: i64,
+    pub total_excess: i64,
+    pub total_shortfall: i64,
+    pub rows: Vec<AssetDepreciationPreviewRow>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AssetBsReconcileIssue {
+    pub rule_code: String,
+    pub severity: String,
+    pub message: String,
+    pub passed: bool,
+    pub expected: i64,
+    pub actual: i64,
+    pub difference: i64,
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AssetBsReconcileResult {
+    pub by_id: i64,
+    pub valid: bool,
+    pub error_count: usize,
+    pub warn_count: usize,
+    pub totals: Value,
+    pub issues: Vec<AssetBsReconcileIssue>,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -797,6 +1317,32 @@ pub struct TransactionRecord {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct TransactionIsReconcileIssue {
+    pub rule_code: String,
+    pub severity: String,
+    pub message: String,
+    pub passed: bool,
+    pub category: String,
+    pub transaction_total: i64,
+    pub is_total: i64,
+    pub std_is_total: i64,
+    pub transaction_is_difference: i64,
+    pub is_std_difference: i64,
+    pub tolerance: i64,
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TransactionIsReconcileResult {
+    pub by_id: i64,
+    pub valid: bool,
+    pub error_count: usize,
+    pub warn_count: usize,
+    pub totals: Value,
+    pub issues: Vec<TransactionIsReconcileIssue>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct TaxDataValidationSummary {
     pub by_id: i64,
     pub debit_total: i64,
@@ -804,6 +1350,8 @@ pub struct TaxDataValidationSummary {
     pub balanced: bool,
     pub fs_line_count: i64,
     pub unresolved_mapping_count: i64,
+    pub mandatory_mapping_missing_count: i64,
+    pub mandatory_mapping_missing_codes: Vec<String>,
     pub asset_count: i64,
     pub business_vehicle_count: i64,
     pub transaction_count: i64,
@@ -918,6 +1466,7 @@ pub struct LawSnapshot {
     pub rate_version_ids: Value,
     pub form_version_ids: Value,
     pub efile_master_ids: Value,
+    pub std_fs_version_id: Option<Uuid>,
     pub snapshot_data: Value,
     pub locked: bool,
     pub created_at: DateTime<Utc>,
@@ -1028,6 +1577,49 @@ pub struct VehicleUsageLog {
     pub business_distance_km: f64,
     pub business_use_bps: i32,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VehicleB10ReconcileRow {
+    pub asset_id: i64,
+    pub asset_code: String,
+    pub asset_name: String,
+    pub total_distance_km: f64,
+    pub business_distance_km: f64,
+    pub business_use_bps: i32,
+    pub business_use_source: String,
+    pub book_amount: i64,
+    pub tax_basis: i64,
+    pub annual_limit: i64,
+    pub tax_limit: i64,
+    pub expected_addback: i64,
+    pub b10_item_amount: i64,
+    pub linked: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VehicleB10ReconcileIssue {
+    pub rule_code: String,
+    pub severity: String,
+    pub message: String,
+    pub passed: bool,
+    pub asset_id: i64,
+    pub asset_code: String,
+    pub expected: i64,
+    pub actual: i64,
+    pub difference: i64,
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VehicleB10ReconcileResult {
+    pub by_id: i64,
+    pub valid: bool,
+    pub error_count: usize,
+    pub warn_count: usize,
+    pub totals: Value,
+    pub rows: Vec<VehicleB10ReconcileRow>,
+    pub issues: Vec<VehicleB10ReconcileIssue>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -15,6 +15,11 @@ function bodyOf(name, prefix = "async function") {
 }
 
 const workInfo = bodyOf("renderWorkInfo(env)");
+const mappingSupport = [
+  "renderTaxAccountMappingPanel(data, locale, hidden = false)",
+  "renderStdFsMappingPanel(data, locale, hidden = true)",
+].map((name) => bodyOf(name, "function")).join("\n");
+const workInfoAndSupport = `${workInfo}\n${mappingSupport}`;
 const dedicatedTaxData = [
   "renderWorkInfoFinancialStatements",
   "renderWorkInfoAccountMapping",
@@ -47,9 +52,9 @@ for (const snippet of [
   "data-tax-tab",
   "data-source-jump",
   'id="taxDataComplete"',
-  'env.navigate("ws/adj:B1")',
+  "runPhaseFValidationGate(env, root, { navigateOnPass: true })",
 ]) {
-  assert(workInfo.includes(snippet), `renderWorkInfo must include ${snippet}`);
+  assert(workInfoAndSupport.includes(snippet), `renderWorkInfo must include ${snippet}`);
 }
 
 assert(screens.includes("function activateTaxDataTab(tab)"), "tax-data tabs must have an activation helper");

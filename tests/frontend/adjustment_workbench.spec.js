@@ -10,6 +10,7 @@ for (const snippet of [
   'data-module-code="${escapeHtml(selectedCode)}"',
   'data-leaf-key="ws/adj:${escapeHtml(selectedCode)}"',
   "renderAdjustmentModuleLeaf",
+  "ensurePhaseFAdjustmentGate(env, moduleCode)",
   "renderAdjustmentModuleNavigator(selectedCode, env.locale)",
   "renderAdjustmentModuleHighlights(selectedModule",
   "renderAdjustmentModuleForm(selectedModule",
